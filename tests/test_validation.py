@@ -285,3 +285,20 @@ def test_bay_is_checked_where_the_mass_actually_sits():
     assert ok_good, f"0.27c is the seat that works ({have_good:.1f} mm)"
     assert not ok_nose, "0.085c hangs the pack off the nose and must fail"
     assert have_nose == 0.0
+
+
+def test_the_seed_design_actually_flies():
+    """optimize.py claims the search starts from something that flies, so
+    that had better be true. It was not for three runs: the seed trimmed
+    at the old 16x4 lattice and, at the converged 32x8, its pitching
+    moment never crossed zero anywhere in the bracket. A seed that cannot
+    trim teaches the early generations nothing."""
+    from planeforge.geom import cst as _cst
+    from planeforge.search.design import Mission, evaluate, physical_to_unit
+    from planeforge.search.optimize import SEED_PHYSICAL
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    ev = evaluate(physical_to_unit(SEED_PHYSICAL), Mission.fpv_1m(), base,
+                  vase.PrintSettings(), z_step_mm=2.0)
+    assert ev.ok, f"seed is infeasible: {'; '.join(ev.reasons)}"
+    assert ev.ld > 8.0

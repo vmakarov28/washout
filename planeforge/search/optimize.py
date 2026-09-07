@@ -30,11 +30,16 @@ from .design import (BOUNDS, LATTICE_NC, LATTICE_NS, N_DIM, Evaluation,
                      Mission, evaluate, physical_to_unit, unit_to_physical)
 
 SEED_PHYSICAL = {
-    "root_chord": 0.34, "kink_eta": 0.30, "kink_chord_frac": 0.62,
+    # A seed that FLIES at the working lattice, verified by a test. The
+    # previous one did not: it trimmed at 16x4 and, at the converged
+    # 32x8, its Cm never crossed zero anywhere in [-6, 12] deg. A seed
+    # that cannot trim teaches the first generations nothing, and the
+    # docstring below claimed otherwise for three runs.
+    "root_chord": 0.30, "kink_eta": 0.30, "kink_chord_frac": 0.62,
     "tip_chord_frac": 0.28, "sweep_le": 38.0, "kink_sweep_le": 24.0,
     "dihedral": 2.0, "twist_kink": -1.0, "twist_tip": -3.0,
-    "body_thickness": 1.55, "batt_x": 0.34,
-    "reflex_deg": 3.0, "camber_scale": 1.0,
+    "body_thickness": 1.85, "batt_x": 0.30,
+    "reflex_deg": 2.5, "camber_scale": 1.0,
 }
 
 

@@ -33,6 +33,7 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 from ..geom.planform import Planform
+from .ribs import RibSpec, insert_ribs, min_clearance_mm
 
 
 def _hull_indices(points: np.ndarray) -> np.ndarray:
@@ -61,6 +62,17 @@ class PrintSettings:
     spar_x_frac: float = 0.30           # chordwise seat of the spar
     filament_density_gcc: float = 0.60  # LW-PLA, foamed; 1.24 for solid PLA
     contour_points: int = 121           # per surface -> 2n-1 per loop
+    ribs: bool = False
+    rib_count: int = 3
+    rib_pitch_mm: float = 30.0
+    rib_clearance_factor: float = 1.10
+    """Rib slit and floor gap, as a multiple of extrusion width.
+
+    One bead exactly is the physical requirement -- the beads must touch
+    and weld -- but building to exactly one bead lands 3 microns short of
+    the clearance rule after interpolation, which is meaningless
+    physically and fails the gate. A 10% bias costs nothing and makes the
+    geometry honestly satisfy the rule it is checked against."""
 
     @property
     def min_wall_mm(self) -> float:
@@ -81,6 +93,7 @@ class LayerStack:
     settings: PrintSettings
     name: str = "panel"
     z_step_mm: float | None = None   # sampling pitch; None = the real layer
+    has_ribs: bool = False
 
     @property
     def layers_per_sample(self) -> float:
@@ -218,12 +231,20 @@ def build_stack(
     z = z[z <= panel_len_mm + 1e-9]
     eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
 
-    contours = np.empty((len(z), 2 * settings.contour_points - 1, 2))
+    rib_spec = RibSpec(n_ribs=settings.rib_count,
+                       pitch_mm=settings.rib_pitch_mm,
+                       enabled=settings.ribs)
+    n_pts = 2 * settings.contour_points - 1 + (4 * settings.rib_count
+                                               if settings.ribs else 0)
+    contours = np.empty((len(z), n_pts, 2))
     for k, e in enumerate(eta):
         st = plan.at(float(e))
         chord_mm = st.chord_m * 1000.0
         loop = st.airfoil.coords(settings.contour_points)
         loop = thicken_for_nozzle(loop, chord_mm, settings)
+        if settings.ribs:
+            clr = settings.extrusion_width_mm * settings.rib_clearance_factor
+            loop = insert_ribs(loop, chord_mm, float(z[k]), rib_spec, clr, clr)
         # twist about the quarter chord, then scale to mm and sweep
         p = loop - np.array([0.25, 0.0])
         a = np.radians(-st.twist_deg)
@@ -237,7 +258,8 @@ def build_stack(
     flat = contours.reshape(-1, 2)
     contours -= 0.5 * (flat.min(0) + flat.max(0))
     return LayerStack(z_mm=z, eta=eta, contours=contours,
-                      settings=settings, name=name, z_step_mm=step)
+                      settings=settings, name=name, z_step_mm=step,
+                      has_ribs=settings.ribs)
 
 
 # ------------------------------------------------------------------- gates
@@ -343,9 +365,20 @@ def check(stack: LayerStack) -> Printability:
     # RIGIDLY rotated, so it cannot self-intersect unless the thickness
     # floor was violated. Checking that floor proves the premise, and
     # costs one array op instead of 40M segment-pair tests.
-    t_min = float(stack.wall_separation_mm().min())
+    if stack.has_ribs:
+        # With ribs the upper/lower index pairing no longer describes the
+        # section, so clearance is measured the general way: every vertex
+        # against every non-adjacent segment. Sampled, because it is
+        # O(n^2) per layer and the geometry varies smoothly with Z.
+        step = max(len(stack.contours) // 40, 1)
+        t_min = min(min_clearance_mm(c, skip=8)
+                    for c in stack.contours[::step])
+        detail = f"general contour clearance, {stack.settings.rib_count} ribs"
+    else:
+        t_min = float(stack.wall_separation_mm().min())
+        detail = "=> single simple loop per layer"
     gates.append(Gate("min wall separation", t_min >= s.min_wall_mm, t_min,
-                      s.min_wall_mm, "mm", "=> single simple loop per layer"))
+                      s.min_wall_mm, "mm", detail))
 
     spar, spar_z = spar_fit(stack)
     gates.append(Gate("spar bore", spar >= s.spar_d_mm, spar, s.spar_d_mm, "mm",

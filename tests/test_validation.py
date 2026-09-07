@@ -302,3 +302,73 @@ def test_the_seed_design_actually_flies():
                   vase.PrintSettings(), z_step_mm=2.0)
     assert ev.ok, f"seed is infeasible: {'; '.join(ev.reasons)}"
     assert ev.ld > 8.0
+
+
+# ------------------------------------------------------- ribs & structure
+
+
+def _ribbed(nr: int):
+    af = cst.load_selig(ASSETS / "mh45.dat")
+    p = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
+                     -6.0, -1.0, af, af, 1.8, "t")
+    s = vase.PrintSettings(ribs=nr > 0, rib_count=nr, spar_d_mm=4.0)
+    return p, vase.build_stack(p, s, 0.40, 0.95, "t")
+
+
+def test_ribs_keep_the_layer_a_single_simple_loop():
+    """Spiralize prints ONE contour per layer, so a rib cannot be a
+    separate loop joined to the skin -- that is a T-junction and the
+    curve stops being simple. A rib is a DETOUR of the skin loop, and
+    the proof is that no part of the contour comes within one extrusion
+    width of any non-adjacent part."""
+    from planeforge.printing.ribs import min_clearance_mm
+    for nr in (2, 3, 4):
+        _, st = _ribbed(nr)
+        worst = min(min_clearance_mm(c, skip=8) for c in st.contours[::37])
+        assert worst >= st.settings.min_wall_mm, f"{nr} ribs: {worst:.3f} mm"
+
+
+def test_rib_point_count_is_constant_across_layers():
+    """The STL skinner joins layer k index i to layer k+1 index i, so a
+    layer that gained or lost a vertex because a rib happened to land on
+    one would shear the whole mesh. Ribs are inserted into gaps between
+    existing vertices, never on top of them."""
+    for nr in (2, 3, 4):
+        _, st = _ribbed(nr)
+        assert st.contours.shape[1] == 241 + 4 * nr
+
+
+def test_ribbed_mesh_is_still_watertight():
+    """Ear clipping replaced the upper/lower ladder precisely because a
+    rib detour doubles back in x and the ladder assumed it could not."""
+    for nr in (0, 3):
+        _, st = _ribbed(nr)
+        rep = stl.manifold_report(stl.skin(st)[1])
+        assert rep["watertight"], f"{nr} ribs: {rep}"
+        assert rep["inconsistent_windings"] == 0
+
+
+def test_ribs_cost_mass_and_the_cost_is_bounded():
+    _, plain = _ribbed(0)
+    _, three = _ribbed(3)
+    ratio = three.mass_g() / plain.mass_g()
+    assert 1.05 < ratio < 1.6, f"ribs changed mass by {ratio:.2f}x"
+
+
+def test_spar_is_selected_to_survive_the_load_case():
+    """Structure is CHOSEN, not assumed: the lightest stock tube that
+    passes ultimate load and a deflection limit. A heavier aircraft must
+    never select a lighter tube."""
+    from planeforge import structure
+    from planeforge.aero.vlm import VLM
+
+    af = cst.load_selig(ASSETS / "mh45.dat")
+    plan = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
+                        -6.0, -1.0, af, af, 1.8, "t")
+    pt = VLM(plan, 24, 6).solve(6.0, 0.10)
+    light = structure.select(plan, pt, 0.35, 0.45, n_limit=3.0)
+    heavy = structure.select(plan, pt, 1.40, 0.45, n_limit=3.0)
+    assert light.ok
+    assert heavy.spar.od_mm >= light.spar.od_mm
+    assert heavy.stress_ult_mpa > light.stress_ult_mpa
+    assert light.tip_defl_pct >= 0.0

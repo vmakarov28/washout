@@ -41,30 +41,75 @@ def skin(stack: LayerStack) -> tuple[np.ndarray, np.ndarray]:
         np.stack([a, d, c], -1).reshape(-1, 3),
     ])
 
-    # --- caps: ladder between upper and lower at matching x ---
-    n = (N + 1) // 2
-    up = (n - 1) - np.arange(n)            # LE -> TE along the upper surface
-    lo = (n - 1) + np.arange(n)            # LE -> TE along the lower surface
-    q = np.arange(n - 1)
-    quads = np.stack([up[q], up[q + 1], lo[q + 1], lo[q]], -1)
-    cap = np.concatenate([
-        np.stack([quads[:, 0], quads[:, 1], quads[:, 2]], -1),
-        np.stack([quads[:, 0], quads[:, 2], quads[:, 3]], -1),
-    ])
-    cap = cap[(cap[:, 0] != cap[:, 1]) & (cap[:, 1] != cap[:, 2])
-              & (cap[:, 0] != cap[:, 2])]          # drop the LE degenerate
+    # --- caps ---
+    # Ear clipping, not the old upper/lower ladder. The ladder assumed the
+    # section is two graphs over a shared x, which a RIBBED contour is
+    # emphatically not: its rib detours double back in x. Ear clipping
+    # triangulates any simple polygon, so it covers both cases and there
+    # is no reason to keep two code paths.
+    cap = _ear_clip(contours[0])
 
-    # Both cap boundary edges run counter to the side ring's cyclic
-    # direction (the ladder walks the upper surface LE->TE, which is
-    # DECREASING index), so `cap` is already wound as the bottom. The top
-    # is its mirror. Getting this backwards costs exactly 2N inconsistent
-    # windings and a mesh the slicer will quietly patch for you.
-    bottom = cap
-    top = cap[:, ::-1] + (L - 1) * N
+    # _ear_clip normalises its output to counter-clockwise, which runs
+    # WITH the side ring's cyclic direction -- the opposite of the old
+    # ladder, whose boundary ran against it. So the reversal that used to
+    # belong on the top now belongs on the bottom. Getting this backwards
+    # costs exactly 2N inconsistent windings (482 for a 241-point
+    # section) and a mesh the slicer will quietly patch for you.
+    bottom = cap[:, ::-1]
+    top = cap + (L - 1) * N
 
     tris = np.concatenate([side, bottom, top]).astype(np.int64)
     tris = _orient_outward(verts, tris)
     return verts, tris
+
+
+def _ear_clip(poly: np.ndarray) -> np.ndarray:
+    """Triangulate a simple polygon -> (T,3) indices into its own points.
+
+    O(n^2) and unglamorous, but it makes no assumption about the shape,
+    which is what a rib detour requires. Winding is normalised first so
+    the returned triangles are consistently counter-clockwise."""
+    n = len(poly)
+    idx = list(range(n))
+    area2 = float(np.dot(poly[:, 0], np.roll(poly[:, 1], -1))
+                  - np.dot(poly[:, 1], np.roll(poly[:, 0], -1)))
+    if area2 < 0:
+        idx.reverse()
+
+    def cross(o, a, b):
+        return ((poly[a][0] - poly[o][0]) * (poly[b][1] - poly[o][1])
+                - (poly[a][1] - poly[o][1]) * (poly[b][0] - poly[o][0]))
+
+    def inside(a, b, c, p):
+        d1 = cross(a, b, p)
+        d2 = cross(b, c, p)
+        d3 = cross(c, a, p)
+        return (d1 >= 0 and d2 >= 0 and d3 >= 0) or (d1 <= 0 and d2 <= 0 and d3 <= 0)
+
+    out: list[tuple[int, int, int]] = []
+    guard = 0
+    while len(idx) > 3 and guard < 4 * n:
+        guard += 1
+        clipped = False
+        for k in range(len(idx)):
+            a, b, c = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
+            if cross(a, b, c) <= 0:                 # reflex or collinear
+                continue
+            if any(inside(a, b, c, p) for p in idx
+                   if p not in (a, b, c)):
+                continue
+            out.append((a, b, c))
+            idx.pop(k)
+            clipped = True
+            break
+        if not clipped:                             # numerically stuck: fan
+            for k in range(1, len(idx) - 1):
+                out.append((idx[0], idx[k], idx[k + 1]))
+            idx = idx[:3]
+            break
+    if len(idx) == 3:
+        out.append((idx[0], idx[1], idx[2]))
+    return np.array(out, dtype=np.int64)
 
 
 def _orient_outward(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:

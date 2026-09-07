@@ -29,6 +29,19 @@ from ..printing import vase
 from .design import (BOUNDS, LATTICE_NC, LATTICE_NS, N_DIM, Evaluation,
                      Mission, evaluate, physical_to_unit, unit_to_physical)
 
+TRAINER_SEED = {
+    # Verified feasible for Mission.beginner_trainer() AT THE WORKING
+    # 32x8 lattice -- an earlier version of this seed was found at 16x4
+    # and did not trim at all when checked properly. Washout and ~3 deg
+    # of reflex buy the stall progression; the pack sits well forward
+    # (0.18c) because that is what holds the static margin at +0.15.
+    "root_chord": 0.28, "kink_eta": 0.30, "kink_chord_frac": 0.62,
+    "tip_chord_frac": 0.45, "sweep_le": 38.0, "kink_sweep_le": 24.0,
+    "dihedral": 4.0, "twist_kink": -1.0, "twist_tip": -6.0,
+    "body_thickness": 1.80, "batt_x": 0.18,
+    "reflex_deg": 3.0, "camber_scale": 1.0,
+}
+
 SEED_PHYSICAL = {
     # A seed that FLIES at the working lattice, verified by a test. The
     # previous one did not: it trimmed at 16x4 and, at the converged
@@ -75,6 +88,7 @@ def run_search(
     workers: int = 1,
     out_dir: Path | None = None,
     verbose: bool = True,
+    seed_physical: dict | None = None,
 ) -> tuple[np.ndarray, Evaluation, SearchLog]:
     """Returns (best design vector, its full evaluation, the log)."""
     log = SearchLog()
@@ -103,7 +117,7 @@ def run_search(
                       f"{ev.line()}", flush=True)
         return -ev.score
 
-    seed_u = np.clip(physical_to_unit(SEED_PHYSICAL), 0.0, 1.0)
+    seed_u = np.clip(physical_to_unit(seed_physical or SEED_PHYSICAL), 0.0, 1.0)
     rng = np.random.default_rng(seed)
     n_pop = popsize * N_DIM
     init = rng.random((n_pop, N_DIM))

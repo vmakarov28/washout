@@ -123,6 +123,64 @@ class Mission:
     cl_max_section: float = 1.05
     max_mass_kg: float = 0.90
     require_printable: bool = True
+    max_wing_loading_gdm2: float = 1e9
+    """Wing loading is the single number a beginner feels. Low loading
+    means a low stall speed, a long time to react, and a survivable
+    arrival; it is worth more to a first-time pilot than any amount of
+    L/D."""
+    battery_kg: float = 0.190
+    """The pack's mass, which belongs to the MISSION, not to the module.
+
+    It was a module-level constant, so a 900 mm trainer was silently
+    charged for the 1 m FPV wing's 4S 1500 -- 190 g on a 340 g aircraft.
+    Wing loading then failed every candidate and the mission looked
+    infeasible when it was only mis-specified. The pack's box lives in
+    `bays`; its mass lives here; both describe the same object."""
+    tip_stall_margin: float = 0.0
+    """How far the tip section must stay below the peak section cl, as a
+    fraction. A wing whose TIPS stall first drops a wingtip and departs
+    into a spin -- the classic way a beginner loses a flying wing on its
+    first launch. Loading the root harder than the tip means the centre
+    lets go first, the nose drops, and the aircraft recovers itself.
+    This is the most important safety property in the whole file."""
+    n_limit_g: float = 3.5
+
+    @staticmethod
+    def beginner_trainer() -> "Mission":
+        """Slow, self-righting, hard to hurt yourself with. Under 1 m.
+
+        Every number here is chosen against ONE question: what happens
+        when a first-time pilot lets go of the sticks? The answer has to
+        be "it flies away straight and slows down", which needs a big
+        static margin (nose-down when it speeds up), real dihedral (rolls
+        level on its own), low wing loading (slow, and gentle when it
+        lands), and a root that stalls before the tips.
+
+        The cost is L/D and top speed, and that is the correct trade. A
+        trainer that is 20% more efficient and drops a wing on launch is
+        worth nothing."""
+        return Mission(
+            span_m=0.90,
+            payload=(
+                Item("motor+prop", 0.055, 0.97),      # 2205 pusher
+                Item("esc+wiring", 0.030, 0.50),
+                Item("fc+rx", 0.030, 0.38),
+                Item("servos x2", 0.020, 0.72),
+                Item("spar+joints", 0.030, 0.30),
+            ),
+            bays=(Bay("battery 3S 1300", 0.30, (72.0, 35.0, 24.0),
+                      x_var="batt_x"),
+                  Bay("fc+rx", 0.40, (36.0, 36.0, 15.0))),
+            cruise_band_ms=(7.5, 11.5),
+            min_static_margin=0.14,        # deeply stable, not merely stable
+            max_static_margin=0.30,
+            cl_max_section=0.85,           # stay well clear of the stall
+            max_mass_kg=0.50,
+            battery_kg=0.110,              # 3S 1300, not the FPV wing's 4S
+            max_wing_loading_gdm2=26.0,    # slow, and forgiving on arrival
+            tip_stall_margin=0.12,         # root stalls first, by 12%
+            n_limit_g=3.0,
+        )
 
     @staticmethod
     def fpv_1m() -> "Mission":
@@ -165,15 +223,15 @@ class Bound:
 
 
 PLANFORM_BOUNDS = (
-    Bound("root_chord", 0.20, 0.42, "m"),
+    Bound("root_chord", 0.15, 0.42, "m"),
     Bound("kink_eta", 0.18, 0.50, ""),
     Bound("kink_chord_frac", 0.45, 0.85, ""),
     Bound("tip_chord_frac", 0.16, 0.45, ""),
     Bound("sweep_le", 20.0, 55.0, "deg"),
     Bound("kink_sweep_le", 10.0, 40.0, "deg"),
-    Bound("dihedral", 0.0, 6.0, "deg"),
+    Bound("dihedral", 0.0, 10.0, "deg"),
     Bound("twist_kink", -3.0, 1.0, "deg"),
-    Bound("twist_tip", -7.0, 0.0, "deg"),
+    Bound("twist_tip", -8.0, 0.0, "deg"),
     Bound("body_thickness", 1.15, 2.10, "x"),
     # Where the battery sits is a DESIGN VARIABLE, not a constant. On a
     # tailless aircraft the CG is the single strongest lever on trim --
@@ -184,7 +242,7 @@ PLANFORM_BOUNDS = (
     Bound("batt_x", 0.06, 0.72, "c_root"),
 )
 
-BATTERY = Item("battery 4S", 0.190, 0.0)
+BATTERY_NAME = "battery"
 
 # Section shape: two interpretable knobs, not six coefficient nudges.
 # REFLEX is degrees of trailing-edge-up built into the moulded section --
@@ -310,7 +368,7 @@ def evaluate(
 
     root_c = plan.stations[0].chord_m
     items = tuple(i.at(root_c) for i in mission.payload)
-    items += (perf.PointMass(BATTERY.name, BATTERY.mass_kg,
+    items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
                              p_vec["batt_x"] * root_c),)
     mass = perf.MassBudget(shell_kg=shell_kg,
                            shell_x_m=perf.shell_centroid_x(plan),
@@ -332,9 +390,15 @@ def evaluate(
     vlm = VLM(plan, ns=ns, nc=nc)
     x_np = perf.neutral_point(vlm, plan)
     sm = (x_np - mass.x_cg_m) / plan.mac_m
-    alpha = vlm.trim_alpha(mass.x_cg_m)
+    # The bracket is a SOLVER detail, not a design constraint. A slow
+    # heavily-cambered trainer legitimately trims near 10 deg, and the
+    # old [-6, 12] window was quietly rejecting exactly the aircraft this
+    # mission asks for -- 154 of 216 candidates in one scan. What makes a
+    # high trim angle unacceptable is proximity to the stall, and that is
+    # already gated properly by cl_max_section below.
+    alpha = vlm.trim_alpha(mass.x_cg_m, bounds=(-10.0, 18.0))
     if alpha is None:
-        reasons.append("no trim angle in [-6, 12] deg")
+        reasons.append("no trim angle in [-10, 18] deg")
         return Evaluation(False, -1e5 - 10 * len(reasons), reasons=tuple(reasons),
                           plan=plan, mass=mass, static_margin=sm)
     pt = vlm.solve(alpha, mass.x_cg_m)
@@ -370,6 +434,25 @@ def evaluate(
     if cl_pk > mission.cl_max_section:
         reasons.append(f"peak section cl {cl_pk:.2f} > {mission.cl_max_section}")
         penalty += 25.0 * (cl_pk - mission.cl_max_section)
+
+    loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
+    if loading > mission.max_wing_loading_gdm2:
+        reasons.append(f"wing loading {loading:.1f} > "
+                       f"{mission.max_wing_loading_gdm2:.0f} g/dm2")
+        penalty += 2.0 * (loading - mission.max_wing_loading_gdm2)
+
+    # stall progression: the tip must be working LESS hard than the peak,
+    # so the root gives up first and the nose drops instead of a wing.
+    if mission.tip_stall_margin > 0.0:
+        eta = np.abs(pt.y_strip) / plan.half_span_m
+        outer = pt.cl_local[eta > 0.80]
+        if len(outer) and cl_pk > 1e-6:
+            tip_ratio = float(np.nanmax(outer)) / cl_pk
+            if tip_ratio > 1.0 - mission.tip_stall_margin:
+                reasons.append(
+                    f"tip cl is {tip_ratio*100:.0f}% of peak -- tips stall "
+                    f"first (need <= {(1-mission.tip_stall_margin)*100:.0f}%)")
+                penalty += 30.0 * (tip_ratio - (1 - mission.tip_stall_margin))
     if mass.total_kg > mission.max_mass_kg:
         penalty += 30.0 * (mass.total_kg - mission.max_mass_kg) / mission.max_mass_kg
 

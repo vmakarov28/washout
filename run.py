@@ -25,7 +25,7 @@ from planeforge.geom import cst
 from planeforge.printing import stl, vase
 from planeforge.search.design import (Mission, evaluate, physical_to_unit,
                                       unit_to_physical)
-from planeforge.search.optimize import SEED_PHYSICAL, run_search
+from planeforge.search.optimize import SEED_PHYSICAL, TRAINER_SEED, run_search
 
 ROOT = Path(__file__).resolve().parent
 
@@ -96,7 +96,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["search", "export", "seed"])
-    ap.add_argument("--span", type=float, default=1.0, help="m")
+    ap.add_argument("--mission", choices=["fpv_1m", "trainer"], default="fpv_1m")
+    ap.add_argument("--span", type=float, default=None, help="m; overrides the mission")
     ap.add_argument("--iters", type=int, default=60)
     ap.add_argument("--popsize", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
@@ -114,13 +115,16 @@ def main() -> int:
     a = ap.parse_args()
 
     base = cst.load_selig(a.airfoil)
-    mission = Mission.fpv_1m() if abs(a.span - 1.0) < 1e-9 else \
-        Mission(**{**Mission.fpv_1m().__dict__, "span_m": a.span})
+    mission = (Mission.beginner_trainer() if a.mission == "trainer"
+               else Mission.fpv_1m())
+    if a.span is not None:
+        mission = Mission(**{**mission.__dict__, "span_m": a.span})
     settings = print_settings(a)
     a.out.mkdir(parents=True, exist_ok=True)
 
     if a.command == "seed":
-        ev = evaluate(physical_to_unit(SEED_PHYSICAL), mission, base, settings,
+        seed_phys = TRAINER_SEED if a.mission == "trainer" else SEED_PHYSICAL
+        ev = evaluate(physical_to_unit(seed_phys), mission, base, settings,
                       want_panels=True)
         print(report(ev, settings))
         if ev.reasons:
@@ -135,11 +139,12 @@ def main() -> int:
         do_export(ev, settings, a.out)
         return 0
 
-    print(f"planeforge search: {a.span*1000:.0f} mm span, bed "
+    print(f"planeforge search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
+    seed_phys = TRAINER_SEED if a.mission == "trainer" else SEED_PHYSICAL
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed,
-                                   out_dir=a.out)
+                                   out_dir=a.out, seed_physical=seed_phys)
     (a.out / "design.json").write_text(json.dumps({
         "u": list(map(float, best_u)),
         "physical": unit_to_physical(best_u),

@@ -23,6 +23,7 @@ import csv
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -128,6 +129,9 @@ def main() -> int:
     ap.add_argument("--video-steps", type=int, default=90000, dest="video_steps")
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "tunnel")
     ap.add_argument("--skip-polar", action="store_true")
+    ap.add_argument("--jobs", type=int, default=3,
+                    help="concurrent tunnel runs; one does not "
+                         "saturate the GPU")
     a = ap.parse_args()
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -154,7 +158,12 @@ def main() -> int:
 
     rows = []
     if not a.skip_polar:
-        for al in alphas:
+        # Run several angles CONCURRENTLY. One 4.6 Mcell D2Q9 run leaves
+        # the GPU at 10-30%: the grid is too small to saturate a 5080 and
+        # per-step launch overhead dominates. Three runs share the card
+        # almost perfectly and turn a 4.7 hour sweep into about 1.6.
+        # Memory is the limit, not compute -- roughly 4 GB each.
+        def one(al: float):
             name = f"{a.tag}_a{al:g}".replace("-", "m").replace(".", "p")
             (WIN_TUNNEL / "scenes" / f"{name}.yaml").write_text(
                 scene_text(name, f"assets/{dat.name}", a.re, al,
@@ -163,21 +172,26 @@ def main() -> int:
             cmd = (f"cd {WSL_TUNNEL} && {WSL_PY} run.py --scene {name} "
                    f"--seed 0 --steps {steps} --measure-force --solver fused "
                    f"--out /tmp/{name}")
-            print(f"  alpha {al:+5.1f} ... ", end="", flush=True)
             proc = wsl(cmd)
             if proc.returncode != 0:
-                print("FAILED")
-                print(proc.stderr[-1500:])
-                continue
+                return al, None, None, proc.stderr[-500:]
             try:
                 cl, cd = parse_forces(proc.stdout)
             except RuntimeError as e:
-                print(f"unparsed ({e})")
-                continue
-            rows.append({"alpha": al, "cl": cl, "cd": cd,
-                         "ld": cl / cd if cd else 0.0})
-            print(f"Cl {cl:+.4f}  Cd {cd:.5f}  L/D {cl/cd if cd else 0:+6.2f}")
+                return al, None, None, str(e)[:300]
+            return al, cl, cd, None
 
+        with ThreadPoolExecutor(max_workers=a.jobs) as pool:
+            for al, cl, cd, err in pool.map(one, alphas):
+                if err:
+                    print(f"  alpha {al:+5.1f}  FAILED: {err}", flush=True)
+                    continue
+                rows.append({"alpha": al, "cl": cl, "cd": cd,
+                             "ld": cl / cd if cd else 0.0})
+                print(f"  alpha {al:+5.1f}  Cl {cl:+.4f}  Cd {cd:.5f}  "
+                      f"L/D {cl / cd if cd else 0:+6.2f}", flush=True)
+
+        rows.sort(key=lambda r: r["alpha"])
         with (a.out / "polar.csv").open("w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=["alpha", "cl", "cd", "ld"])
             w.writeheader()

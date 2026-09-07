@@ -59,6 +59,30 @@ def report(ev, settings: vase.PrintSettings) -> str:
     return "\n".join(lines)
 
 
+def choose_structure(ev, mission, settings: vase.PrintSettings):
+    """Size the spar and the rib pitch from the trimmed flight condition,
+    then hand back the print settings that follow from them.
+
+    This is the 'pick the best settings' step and it runs AFTER the
+    aerodynamic search, not inside it: the loads depend on the span
+    loading of the design that won, and no earlier point in the pipeline
+    knows what that is."""
+    from planeforge import structure
+    from planeforge.aero.vlm import VLM
+    from planeforge.search.design import LATTICE_NC, LATTICE_NS
+
+    pt = VLM(ev.plan, LATTICE_NS, LATTICE_NC).solve(ev.trim.alpha_deg,
+                                                    ev.trim.x_cg_m)
+    st = structure.select(ev.plan, pt, ev.mass_kg,
+                          skin_t_mm=settings.extrusion_width_mm,
+                          n_limit=mission.n_limit_g)
+    tuned = vase.PrintSettings(**{**settings.__dict__,
+                                  "spar_d_mm": st.spar.od_mm,
+                                  "ribs": True,
+                                  "rib_pitch_mm": st.rib_pitch_mm})
+    return st, tuned
+
+
 def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
@@ -112,6 +136,8 @@ def main() -> int:
     ap.add_argument("--density", type=float, default=0.60,
                     help="g/cc; 0.60 LW-PLA foamed, 1.24 solid PLA")
     ap.add_argument("--spar", type=float, default=6.0)
+    ap.add_argument("--no-structure", action="store_true", dest="no_structure",
+                    help="skip spar/rib sizing; export a bare vase shell")
     a = ap.parse_args()
 
     base = cst.load_selig(a.airfoil)
@@ -136,6 +162,15 @@ def main() -> int:
         u = np.array(d["u"])
         ev = evaluate(u, mission, base, settings, want_panels=True)
         print(report(ev, settings))
+        if ev.trim and not a.no_structure:
+            st, settings = choose_structure(ev, mission, settings)
+            print(st.report())
+            print()
+            # the spar just got chosen, so the bore gate must be re-run
+            # against the tube we actually intend to slide in
+            ev = evaluate(u, mission, base, settings, want_panels=True)
+            if ev.reasons:
+                print("after structure sizing:", "; ".join(ev.reasons), "\n")
         do_export(ev, settings, a.out)
         return 0
 

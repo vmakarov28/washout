@@ -333,9 +333,10 @@ def test_rib_point_count_is_constant_across_layers():
     layer that gained or lost a vertex because a rib happened to land on
     one would shear the whole mesh. Ribs are inserted into gaps between
     existing vertices, never on top of them."""
+    from planeforge.printing.ribs import POINTS_PER_RIB
     for nr in (2, 3, 4):
         _, st = _ribbed(nr)
-        assert st.contours.shape[1] == 241 + 4 * nr
+        assert st.contours.shape[1] == 241 + POINTS_PER_RIB * nr
 
 
 def test_ribbed_mesh_is_still_watertight():
@@ -372,3 +373,25 @@ def test_spar_is_selected_to_survive_the_load_case():
     assert heavy.spar.od_mm >= light.spar.od_mm
     assert heavy.stress_ult_mpa > light.stress_ult_mpa
     assert light.tip_defl_pct >= 0.0
+
+
+def test_rib_sweep_respects_the_remaining_overhang_budget():
+    """A tapered swept panel already spends most of the overhang
+    allowance moving its own section sideways -- 37.9 deg of 50 on the
+    trainer root panel with no ribs at all. The truss gets the REMAINDER,
+    not its own allowance.
+
+    Sizing the rib against the full limit in isolation produced 58 deg of
+    real overhang, and because the excess came from the wing rather than
+    the rib it was independent of rib pitch, which is what eventually
+    identified it after two wrong diagnoses."""
+    af = cst.load_selig(ASSETS / "mh45.dat")
+    plan = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
+                        -6.0, -1.0, af, af, 1.8, "t")
+    for (e0, e1) in ((0.0, 0.30), (0.30, 0.65), (0.65, 1.0)):
+        s = vase.PrintSettings(ribs=True, rib_count=3, rib_pitch_mm=25.0,
+                               spar_d_mm=4.0)
+        st = vase.build_stack(plan, s, e0, e1, "p")
+        ang, _ = vase.overhang_deg(st)
+        assert ang <= s.max_overhang_deg, (
+            f"panel {e0}-{e1}: {ang:.1f} deg of overhang with ribs")

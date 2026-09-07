@@ -27,13 +27,13 @@ print. `spar_fit` checks the tube clears every layer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.spatial import ConvexHull
 
 from ..geom.planform import Planform
-from .ribs import RibSpec, insert_ribs, min_clearance_mm
+from .ribs import POINTS_PER_RIB, RibSpec, insert_ribs, min_clearance_mm
 
 
 def _hull_indices(points: np.ndarray) -> np.ndarray:
@@ -233,9 +233,21 @@ def build_stack(
 
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
+                       max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs)
-    n_pts = 2 * settings.contour_points - 1 + (4 * settings.rib_count
-                                               if settings.ribs else 0)
+    if settings.ribs:
+        # Measure what the bare panel already spends of the overhang
+        # budget, and give the truss only the remainder. Taper and sweep
+        # move the section sideways on their own; the rib adds to that,
+        # it does not get its own allowance.
+        bare = build_stack(plan, replace(settings, ribs=False), eta0, eta1,
+                           name + "_bare", z_step_mm)
+        used = np.tan(np.radians(overhang_deg(bare)[0]))
+        allowed = np.tan(np.radians(settings.max_overhang_deg))
+        rib_spec = replace(rib_spec,
+                           rate_mm_per_mm=max(allowed - used, 0.02))
+    n_pts = 2 * settings.contour_points - 1 + (
+        POINTS_PER_RIB * settings.rib_count if settings.ribs else 0)
     contours = np.empty((len(z), n_pts, 2))
     for k, e in enumerate(eta):
         st = plan.at(float(e))

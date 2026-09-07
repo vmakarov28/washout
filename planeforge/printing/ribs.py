@@ -44,7 +44,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-POINTS_PER_RIB = 4
+POINTS_PER_RIB = 2
 
 
 @dataclass(frozen=True)
@@ -54,27 +54,69 @@ class RibSpec:
 
     n_ribs: int = 3
     pitch_mm: float = 30.0
-    sweep_frac: float = 0.55
-    """How far each rib slides chordwise over one period, as a fraction
-    of the spacing between rib stations. 0 gives parallel walls; ~0.5
-    makes adjacent ribs cross into diamonds without letting any two ribs
-    collide."""
+    max_overhang_deg: float = 50.0
+    """The sweep amplitude is NOT a free parameter -- it is set by this.
+
+    A rib that slides A mm chordwise over half a pitch of Z leans at
+    atan(2A / (pitch/2)) from vertical, and that is an overhang like any
+    other. Specifying the sweep as a fraction of rib spacing (the obvious
+    parametrization, and the first one tried) gave 20 mm of travel over
+    12.5 mm of Z: a 73 degree lean, on a wall the printer has to build in
+    mid-air. The amplitude is therefore DERIVED:
+
+        A <= tan(theta_max) * pitch / 4
+
+    which is the largest diagonal the truss can have and still print."""
     x_first: float = 0.20
     x_last: float = 0.72
     enabled: bool = True
 
-    def stations(self, z_mm: float) -> np.ndarray:
-        """Chordwise positions of every rib at this height."""
+    rate_mm_per_mm: float | None = None
+    """Chordwise travel per mm of Z that the truss is allowed to use.
+
+    This is a BUDGET, not a property of the rib, and that is the whole
+    point. A tapered swept panel already moves its own section sideways
+    as Z rises -- 37.9 deg of the 50 deg allowance on the trainer's root
+    panel, before any rib exists. The rib's sweep ADDS to that. Sizing
+    the rib against the full allowance in isolation produced 58 deg of
+    real overhang and, because the excess came from the wing rather than
+    the rib, it was stubbornly independent of rib pitch -- which is what
+    finally gave it away after two wrong diagnoses.
+
+    build_stack measures the bare panel first and passes the remainder."""
+
+    def amplitude_mm(self) -> float:
+        rate = (self.rate_mm_per_mm if self.rate_mm_per_mm is not None
+                else np.tan(np.radians(self.max_overhang_deg)))
+        return float(max(rate, 0.0) * self.pitch_mm / 4.0)
+
+    def stations(self, z_mm: float, chord_mm: float = 250.0) -> np.ndarray:
+        """Chordwise positions of every rib at this height, as x/c."""
         if self.n_ribs <= 0:
             return np.zeros(0)
         base = (np.linspace(self.x_first, self.x_last, self.n_ribs)
                 if self.n_ribs > 1 else np.array([0.5 * (self.x_first + self.x_last)]))
-        spacing = (self.x_last - self.x_first) / max(self.n_ribs - 1, 1)
-        # triangle wave in Z, alternating sign per rib -> crossing diagonals
+        spacing_mm = ((self.x_last - self.x_first) / max(self.n_ribs - 1, 1)
+                      * chord_mm)
+        # never let adjacent ribs reach each other, whatever the pitch says
+        amp_mm = min(self.amplitude_mm(), 0.35 * spacing_mm)
         phase = (z_mm / max(self.pitch_mm, 1e-6)) % 1.0
         tri = 4.0 * np.abs(phase - 0.5) - 1.0          # -1 .. +1
         sign = np.where(np.arange(self.n_ribs) % 2 == 0, 1.0, -1.0)
-        return base + sign * tri * 0.5 * self.sweep_frac * spacing
+        return base + sign * tri * amp_mm / max(chord_mm, 1e-6)
+
+
+def segment_counts(n_up: int, n_seg: int) -> list[int]:
+    """How many skin vertices each inter-rib segment gets. FIXED.
+
+    Fixed, because the count per segment is what keeps the total per
+    layer constant; only the positions inside a segment are allowed to
+    move as the ribs sweep."""
+    base = n_up // n_seg
+    counts = [base] * n_seg
+    for i in range(n_up - base * n_seg):
+        counts[i] += 1
+    return [max(c, 2) for c in counts]
 
 
 def insert_ribs(
@@ -85,13 +127,19 @@ def insert_ribs(
     slit_mm: float,
     gap_mm: float,
 ) -> np.ndarray:
-    """Add rib detours to a unit-chord contour -> longer contour.
+    """Rebuild the upper skin around rib detours -> longer contour.
 
-    The loop arrives in Selig order: upper surface traversed TE -> LE
-    (x decreasing), then lower surface LE -> TE. Ribs hang from the
-    upper surface, so they are spliced into the first half, and because
-    that half runs backwards in x the detour is entered at the HIGH-x leg
-    and left at the low-x one.
+    The upper surface is REPARAMETRIZED, not spliced. An earlier version
+    snapped each rib into whichever gap between existing vertices was
+    wide enough, which quantised rib position to the contour grid: as a
+    rib swept, it jumped a whole grid interval at a time -- 1.7 mm in one
+    step, a 60 degree overhang on a wall the printer builds in mid-air,
+    and pitch-independent, which is what gave the game away.
+
+    Instead the skin between ribs is divided into segments with FIXED
+    vertex counts, and the vertices inside each segment slide smoothly as
+    the segment's ends move. Point count per layer stays constant; rib
+    position becomes continuous in Z.
     """
     if not spec.enabled or spec.n_ribs <= 0:
         return loop_unit
@@ -99,59 +147,39 @@ def insert_ribs(
     n = (len(loop_unit) + 1) // 2
     upper = loop_unit[:n]                    # TE -> LE, x decreasing
     lower = loop_unit[n - 1:]                # LE -> TE, x increasing
+    up_x, up_y = upper[::-1, 0], upper[::-1, 1]      # ascending for interp
 
     slit = slit_mm / chord_mm
     gap = gap_mm / chord_mm
-    want = np.clip(spec.stations(z_mm), spec.x_first, spec.x_last)
+    xr = np.sort(np.clip(spec.stations(z_mm, chord_mm), 0.08, 0.88))[::-1]
 
-    def y_lower_at(x: float) -> float:
-        return float(np.interp(x, lower[:, 0], lower[:, 1]))
+    def y_up(x):
+        return np.interp(x, up_x, up_y)
 
-    def y_upper_at(x: float) -> float:
-        return float(np.interp(x, upper[::-1, 0], upper[::-1, 1]))
+    def y_lo(x):
+        return np.interp(x, lower[:, 0], lower[:, 1])
 
-    # Snap each rib into a GAP BETWEEN existing vertices wide enough to
-    # hold the slit. Inserting without deleting is what keeps the point
-    # count per layer constant, and the STL skinner joins layer k index i
-    # to layer k+1 index i -- so a layer that dropped a vertex because a
-    # rib happened to land on one would shear the whole mesh.
-    widths = upper[:-1, 0] - upper[1:, 0]              # x decreases
-    need = slit + 2.0 * (slit * 0.25)
-    ok_idx = np.flatnonzero(widths > need)
-    if len(ok_idx) == 0:
-        return loop_unit                                # too coarse: no ribs
-
-    chosen: list[int] = []
-    for xr in want:
-        mids = 0.5 * (upper[ok_idx, 0] + upper[ok_idx + 1, 0])
-        order = np.argsort(np.abs(mids - xr))
-        for k in order:                                 # never reuse a slot
-            j = int(ok_idx[k])
-            if j not in chosen:
-                chosen.append(j)
-                break
-    chosen.sort()                                       # ascending index = x descending
+    # segment boundaries, walking TE -> LE (x descending)
+    edges = [1.0]
+    for x in xr:
+        edges += [x + 0.5 * slit, x - 0.5 * slit]
+    edges += [0.0]
+    segs = [(edges[2 * i], edges[2 * i + 1]) for i in range(len(xr) + 1)]
+    counts = segment_counts(n, len(segs))
 
     out: list[np.ndarray] = []
-    prev = 0
-    for j in chosen:
-        out.extend(upper[prev:j + 1])
-        mid = 0.5 * (upper[j, 0] + upper[j + 1, 0])
-        xa, xb = mid + 0.5 * slit, mid - 0.5 * slit
-        # Clear the HIGHEST point of the lower surface across the rib's
-        # whole footprint, not the surface at its midpoint. The skin
-        # slopes, and over a 0.45 mm footprint that slope ate 0.03 mm of
-        # a 0.45 mm gap -- enough to fail the clearance rule by exactly
-        # the amount the measurement said, at every chord.
-        y_floor = max(y_lower_at(xa), y_lower_at(mid), y_lower_at(xb)) + gap
-        out.extend([np.array([xa, y_upper_at(xa)]),
-                    np.array([xa, y_floor]),
-                    np.array([xb, y_floor]),
-                    np.array([xb, y_upper_at(xb)])])
-        prev = j + 1
-    out.extend(upper[prev:n])
-    out.extend(lower[1:])
-    return np.asarray(out, dtype=float)
+    for k, ((x_hi, x_lo), c) in enumerate(zip(segs, counts)):
+        # cosine spacing inside the segment keeps the LE segment dense
+        t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, c)))
+        xs = x_hi + (x_lo - x_hi) * t
+        out.append(np.stack([xs, y_up(xs)], 1))
+        if k < len(xr):                       # the rib detour itself
+            xa, xb = x_lo, x_lo - slit
+            floor = max(float(y_lo(xa)), float(y_lo(xb)),
+                        float(y_lo(0.5 * (xa + xb)))) + gap
+            out.append(np.array([[xa, floor], [xb, floor]]))
+    out.append(lower[1:])
+    return np.concatenate(out, axis=0)
 
 
 def rib_point_budget(spec: RibSpec) -> int:

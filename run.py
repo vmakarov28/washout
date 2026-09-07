@@ -121,7 +121,7 @@ def main() -> int:
 
     if a.command == "seed":
         ev = evaluate(physical_to_unit(SEED_PHYSICAL), mission, base, settings,
-                      ns=28, nc=6, want_panels=True)
+                      want_panels=True)
         print(report(ev, settings))
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons))
@@ -130,7 +130,7 @@ def main() -> int:
     if a.command == "export":
         d = json.loads((a.design or (a.out / "design.json")).read_text())
         u = np.array(d["u"])
-        ev = evaluate(u, mission, base, settings, ns=28, nc=6, want_panels=True)
+        ev = evaluate(u, mission, base, settings, want_panels=True)
         print(report(ev, settings))
         do_export(ev, settings, a.out)
         return 0

@@ -190,3 +190,52 @@ def test_panels_fit_the_z_envelope():
     s = vase.PrintSettings()
     for p in vase.build_panels(plan, s):
         assert p.height_mm <= s.bed_z_mm
+
+
+# ---------------------------------------------------------- the search loop
+
+
+def test_trim_is_converged_at_the_working_lattice_resolution():
+    """The search and the final verdict must agree, so the resolution they
+    share has to be converged in the quantity that decides feasibility.
+
+    Trim converges much more slowly than lift: it is where a small MOMENT
+    difference is driven to zero. On a representative design cruise speed
+    reads 13.5 m/s at 12x4 and 10.6 at 32x8 -- a 27% error. Searching at
+    one resolution and judging at another wasted a 7384-evaluation run.
+
+    32x8 is NOT fully converged: it still sits ~4% in cruise speed from
+    42x10, and this test pins that residual rather than hiding it. That
+    is a deliberate trade -- 4% of cruise speed is 0.4 m/s, well inside
+    the tier-0 profile-drag error of 20-40%, and the resolution costs
+    ~1.7 s per evaluation against ~2.4 s. What was actually fatal was not
+    the residual but the MISMATCH, and that is now impossible by
+    construction: LATTICE_NS/NC are used by the search and the verdict
+    alike.
+    """
+    from planeforge.geom import cst as _cst
+    from planeforge.search.design import (LATTICE_NC, LATTICE_NS, Mission,
+                                          evaluate, physical_to_unit)
+    from planeforge.search.optimize import SEED_PHYSICAL
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    m = Mission.fpv_1m()
+    s = vase.PrintSettings()
+    u = physical_to_unit({**SEED_PHYSICAL, "reflex_deg": 3.0, "batt_x": 0.20,
+                          "twist_tip": -4.0})
+    here = evaluate(u, m, base, s, z_step_mm=2.0)
+    finer = evaluate(u, m, base, s, ns=LATTICE_NS + 10, nc=LATTICE_NC + 2,
+                     z_step_mm=2.0)
+    assert here.v_cruise == pytest.approx(finer.v_cruise, rel=0.05)
+    assert here.cl_trim == pytest.approx(finer.cl_trim, rel=0.08)
+
+
+def test_search_and_verdict_use_the_same_lattice():
+    """The mismatch itself, pinned. run_search's final evaluation must be
+    at the resolution it searched at, not a 'nicer' one."""
+    import inspect
+
+    from planeforge.search import optimize
+    src = inspect.getsource(optimize.run_search)
+    assert "ns=ns, nc=nc" in src, "final evaluation must reuse the search lattice"
+    assert "ns: int = LATTICE_NS" in inspect.getsource(optimize)

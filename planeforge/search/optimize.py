@@ -26,8 +26,8 @@ from scipy.optimize import differential_evolution
 
 from ..geom.cst import Airfoil
 from ..printing import vase
-from .design import (BOUNDS, N_DIM, Evaluation, Mission, evaluate,
-                     physical_to_unit, unit_to_physical)
+from .design import (BOUNDS, LATTICE_NC, LATTICE_NS, N_DIM, Evaluation,
+                     Mission, evaluate, physical_to_unit, unit_to_physical)
 
 SEED_PHYSICAL = {
     "root_chord": 0.34, "kink_eta": 0.30, "kink_chord_frac": 0.62,
@@ -65,8 +65,8 @@ def run_search(
     popsize: int = 12,
     seed: int = 0,
     search_z_step_mm: float = 1.0,
-    ns: int = 16,
-    nc: int = 4,
+    ns: int = LATTICE_NS,
+    nc: int = LATTICE_NC,
     workers: int = 1,
     out_dir: Path | None = None,
     verbose: bool = True,
@@ -124,7 +124,9 @@ def run_search(
     chosen = (log.best_feasible_u if log.best_feasible_u is not None
               else log.best_u if log.best_u is not None else list(res.x))
     best_u = np.array(chosen)
-    best = evaluate(best_u, mission, base, settings, ns=28, nc=6,
+    # same lattice as the search: the final verdict must be the same
+    # calculation, only the print sampling gets refined to the real layer
+    best = evaluate(best_u, mission, base, settings, ns=ns, nc=nc,
                     want_panels=True)
     if out_dir:
         out_dir = Path(out_dir)

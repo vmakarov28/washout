@@ -107,8 +107,19 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
     etas = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, ns + 1)))  # 0..1 edges
     xc_edges = cosine_x(nc + 1)
 
+    # plan.at() blends two CST sections and allocates; build_lattice asks
+    # for the same span station five times per chordwise panel, so at
+    # 32x8 that is ~1300 blends of which ~33 are distinct. Cache them.
+    _stations: dict[float, object] = {}
+
+    def station(eta: float):
+        st = _stations.get(eta)
+        if st is None:
+            st = _stations[eta] = plan.at(eta)
+        return st
+
     def camber_point(eta: float, xc: float) -> np.ndarray:
-        st = plan.at(eta)
+        st = station(eta)
         yc = float(st.airfoil.camber(np.array([xc]))[0])
         p = np.array([xc - 0.25, yc])
         ang = np.radians(-st.twist_deg)
@@ -250,3 +261,32 @@ class VLM:
 
     def sweep(self, alphas, x_ref_m: float) -> list[AeroPoint]:
         return [self.solve(float(al), x_ref_m) for al in alphas]
+
+    def trim_alpha(self, x_ref_m: float,
+                   bounds: tuple[float, float] = (-6.0, 12.0),
+                   tol: float = 1e-7) -> float | None:
+        """Angle where Cm about x_ref is zero, by secant iteration.
+
+        Bisection was costing 40 iterations x 2 solves. The lattice is a
+        LINEAR system whose right-hand side depends on alpha only through
+        (cos a, sin a), so over a +/-12 degree bracket Cm is very nearly
+        straight and a secant lands in three or four solves. The bracket
+        is still checked first, so a design with no trim point is still
+        reported as having none rather than being extrapolated a root.
+        """
+        lo, hi = bounds
+        f_lo, f_hi = self.solve(lo, x_ref_m).Cm, self.solve(hi, x_ref_m).Cm
+        if f_lo * f_hi > 0:
+            return None
+        a0, a1, f0, f1 = lo, hi, f_lo, f_hi
+        for _ in range(12):
+            if abs(f1 - f0) < 1e-15:
+                break
+            a2 = a1 - f1 * (a1 - a0) / (f1 - f0)
+            if not (lo <= a2 <= hi):            # secant left the bracket
+                a2 = 0.5 * (a0 + a1)            # fall back to bisection
+            f2 = self.solve(a2, x_ref_m).Cm
+            a0, f0, a1, f1 = a1, f1, a2, f2
+            if abs(f2) < tol:
+                break
+        return float(a1)

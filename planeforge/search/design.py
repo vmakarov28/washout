@@ -166,6 +166,20 @@ def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
     )
 
 
+# The ONE lattice resolution, used by the search and by the final report
+# alike. It is not a tuning knob: the tailless trim solution converges far
+# more slowly than lift does, because trim is where a small MOMENT
+# difference is driven to zero. Measured on a converged design, cruise
+# speed reads 13.5 m/s at 12x4, 13.0 at 16x4, 11.3 at 24x6 and settles at
+# 10.6 by 32x8 -- a 27% error at the resolution the search was originally
+# using. Searching at one resolution and reporting at another let the
+# optimizer spend 7384 evaluations perfecting a design that the final
+# check then rejected. Same number everywhere, or the search is optimising
+# a different aeroplane from the one being judged.
+LATTICE_NS = 32
+LATTICE_NC = 8
+
+
 # ------------------------------------------------------------- evaluation
 
 
@@ -198,8 +212,8 @@ def evaluate(
     base: Airfoil,
     settings: vase.PrintSettings,
     drag: perf.DragModel | None = None,
-    ns: int = 20,
-    nc: int = 5,
+    ns: int = LATTICE_NS,
+    nc: int = LATTICE_NC,
     want_panels: bool = False,
     z_step_mm: float | None = None,
 ) -> Evaluation:
@@ -242,19 +256,11 @@ def evaluate(
     vlm = VLM(plan, ns=ns, nc=nc)
     x_np = perf.neutral_point(vlm, plan)
     sm = (x_np - mass.x_cg_m) / plan.mac_m
-    lo, hi = -6.0, 12.0
-    f_lo, f_hi = vlm.solve(lo, mass.x_cg_m).Cm, vlm.solve(hi, mass.x_cg_m).Cm
-    if f_lo * f_hi > 0:
+    alpha = vlm.trim_alpha(mass.x_cg_m)
+    if alpha is None:
         reasons.append("no trim angle in [-6, 12] deg")
         return Evaluation(False, -1e5 - 10 * len(reasons), reasons=tuple(reasons),
                           plan=plan, mass=mass, static_margin=sm)
-    for _ in range(40):
-        mid = 0.5 * (lo + hi)
-        if vlm.solve(mid, mass.x_cg_m).Cm * f_lo > 0:
-            lo, f_lo = mid, vlm.solve(mid, mass.x_cg_m).Cm
-        else:
-            hi = mid
-    alpha = 0.5 * (lo + hi)
     pt = vlm.solve(alpha, mass.x_cg_m)
 
     if pt.CL <= 0.02:

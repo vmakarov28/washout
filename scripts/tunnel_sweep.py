@@ -205,15 +205,31 @@ def main() -> int:
                        a.chord_cells, a.u_lat),
             encoding="utf-8")
         every = max(a.video_steps // 400, 1)
+        # --all-presets writes frames to <out>/<preset>/frames, NOT to
+        # <out>/frames, so make_video.py has to be pointed at each preset
+        # directory in turn. Pointing it at the run directory finds
+        # nothing, says "no frames", and exits 0 -- which looked like a
+        # failed simulation when in fact 1604 rendered PNGs were sitting
+        # on disk the whole time.
+        presets = ("vorticity", "speed", "dye", "streaklines")
         cmd = (f"cd {WSL_TUNNEL} && {WSL_PY} run.py --scene {name} --seed 0 "
                f"--steps {a.video_steps} --solver fused --all-presets "
-               f"--frame-every {every} --out /tmp/{name} && "
-               f"{WSL_PY} scripts/make_video.py /tmp/{name} 2>&1 | tail -5")
-        print(f"\n  video alpha {al:+g} ({a.video_steps} steps) ...", flush=True)
+               f"--frame-every {every} --out /tmp/{name}")
+        print(f"\n  video alpha {al:+g} ({a.video_steps} steps) ...",
+              flush=True)
         proc = wsl(cmd)
-        print(proc.stdout[-700:] if proc.returncode == 0 else proc.stderr[-900:])
-        got = wsl(f"cp -v /tmp/{name}/*.mp4 "
-                  f"/mnt/c/Users/aipla/Desktop/planeforge/out/tunnel/ 2>&1 | tail -5")
+        if proc.returncode != 0:
+            print(proc.stderr[-900:])
+            continue
+        for preset in presets:
+            wsl(f"cd {WSL_TUNNEL} && {WSL_PY} scripts/make_video.py "
+                f"/tmp/{name}/{preset} 2>&1 | tail -1")
+        tag = f"a{al:g}".replace("-", "m").replace(".", "p")
+        got = wsl(" ; ".join(
+            f"cp /tmp/{name}/{p}/{p}.mp4 "
+            f"/mnt/c/Users/aipla/Desktop/planeforge/out/tunnel/{tag}_{p}.mp4"
+            for p in presets) + " ; ls -la /mnt/c/Users/aipla/Desktop/"
+            f"planeforge/out/tunnel/{tag}_*.mp4 | wc -l")
         print(got.stdout.strip() or got.stderr.strip())
     return 0
 

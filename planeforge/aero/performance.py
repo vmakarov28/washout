@@ -225,3 +225,68 @@ def stall_speed_ms(mass: MassBudget, plan: Planform, cl_max: float = 0.9) -> flo
 
 def wing_loading_gm2(mass: MassBudget, plan: Planform) -> float:
     return mass.total_kg * 1000.0 / plan.area_m2
+
+
+@dataclass
+class MeasuredDrag:
+    """Profile drag from a measured LBM polar, by strip theory.
+
+    Drop-in for DragModel, and the correction it makes is the one this
+    program most needed. DragModel returns a single number for the whole
+    aircraft with NO alpha dependence whatsoever -- so trimming at 14 deg
+    cost the optimizer nothing, and it duly returned a trainer that
+    cruised there. The tunnel says otherwise: at Re 60k the section's cd
+    runs 0.056 at 8 deg and 0.163 at 14, a threefold rise, while lift is
+    still climbing. The wing has not stalled; it is separating, and the
+    drag bucket has fallen out from under it.
+
+    Each strip is charged the measured cd at ITS OWN local cl, which is
+    what strip theory is for -- a washed-out tip and a loaded root are at
+    different points on the same polar.
+
+    The absolute level is NOT trustworthy and is deliberately not treated
+    as if it were. At Re 60k with 340 cells the boundary layer is about
+    1.4 cells thick, and windtunnel-sim's own Phase 6 notes predict Cd
+    will read high for exactly that reason (staircase surface, unresolved
+    BL). What the measurement is good for is the SHAPE: where the drag
+    bucket sits and how fast it collapses. `scale` exists to reconcile
+    the level against a trusted reference if you ever have one, and
+    defaults to 1.0 -- unscaled and honest about it.
+    """
+
+    alpha_deg: np.ndarray
+    cl: np.ndarray
+    cd: np.ndarray
+    scale: float = 1.0
+    re_measured: float = 6.0e4
+
+    @staticmethod
+    def from_csv(path, scale: float = 1.0) -> "MeasuredDrag":
+        import csv as _csv
+        from pathlib import Path as _Path
+        rows = list(_csv.DictReader(_Path(path).open(encoding="utf-8")))
+        a = np.array([float(r["alpha"]) for r in rows])
+        cl = np.array([float(r["cl"]) for r in rows])
+        cd = np.array([float(r["cd"]) for r in rows])
+        o = np.argsort(cl)
+        return MeasuredDrag(a[o], cl[o], cd[o], scale)
+
+    def cd_at_cl(self, cl_local: float) -> float:
+        """Measured cd at a section lift coefficient.
+
+        Clamped at both ends rather than extrapolated: past the last
+        measured point the polar is rising steeply and a linear
+        extrapolation would invent numbers the tunnel never produced."""
+        return float(self.scale * np.interp(cl_local, self.cl, self.cd))
+
+    def cd0(self, plan, v_ms: float, n: int = 20, aero_point=None) -> float:
+        if aero_point is None:                 # no span loading: use the bucket
+            return float(self.scale * self.cd.min())
+        eta = np.abs(aero_point.y_strip) / plan.half_span_m
+        order = np.argsort(eta)
+        e = eta[order]
+        cl_loc = aero_point.cl_local[order]
+        chord = aero_point.chord_strip[order]
+        contrib = np.array([self.cd_at_cl(float(c)) for c in cl_loc]) * chord
+        y = e * plan.half_span_m
+        return float(2.0 * np.trapezoid(contrib, y) / plan.area_m2)

@@ -65,38 +65,49 @@ class Bay:
     name: str
     x_frac: float
     box_mm: tuple[float, float, float]        # length, width, height
+    x_var: str | None = None
+    """Design variable that sets this bay's seat, if it has one.
+
+    The battery is both a mass at a position and a box that must fit --
+    and they have to be the SAME position. Leaving the fit check free to
+    look elsewhere let a search pass a design whose pack sat 19 mm aft of
+    the root leading edge, in 5 mm of depth, hanging 19 mm off the nose,
+    while the checker cheerfully measured a different station 61 mm back."""
 
 
-def bay_fits(plan: Planform, bay: Bay, wall_mm: float) -> tuple[bool, float, float]:
-    """Does the box fit inside the skin? -> (ok, available_mm, needed_mm).
+def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
+             x_frac: float | None = None) -> tuple[bool, float, float]:
+    """Does the box fit AT ITS SEAT? -> (ok, available_mm, needed_mm).
 
-    The binding dimension is height measured across the box's own WIDTH,
-    not on the centreline: a blended body tapers fast, so the pack is
-    limited by how deep the shell still is at +/- w/2 of span, which is
-    always less than at the root. Checking the centreline only is how the
-    23.2 mm bay passed for a 26 mm pack."""
+    Checked at one station -- the one the mass model uses -- and never
+    swept for the most flattering one. A sweeping check answers "does
+    some seat exist", which is not the question: the CG that trims the
+    aircraft is computed from where the pack actually is. Sweeping passed
+    a design whose battery sat 19 mm aft of the root leading edge, in
+    5 mm of depth, hanging off the nose, while the checker measured a
+    different station 61 mm back and reported 26.3 mm.
+
+    The binding dimension is depth across the box's own WIDTH and along
+    its full LENGTH. The centreline always flatters -- measuring there
+    gave 23.2 mm for a bay that really had 17.7.
+    """
     length, width, height = bay.box_mm
     root_c_mm = plan.stations[0].chord_m * 1000.0
     half_span_mm = plan.half_span_m * 1000.0
     eta_edge = min(0.5 * width / half_span_mm, 1.0)
+    x_mm = (bay.x_frac if x_frac is None else x_frac) * root_c_mm
 
-    best = 0.0
-    for x_frac in np.linspace(0.12, 0.75, 22):     # the pack can slide
-        x_mm = x_frac * root_c_mm
-        worst = np.inf
-        for eta in np.linspace(0.0, eta_edge, 5):
-            st = plan.at(float(eta))
-            c_mm = st.chord_m * 1000.0
-            # the box needs `length` of chord centred on x_mm
-            x0, x1 = (x_mm - 0.5 * length) / c_mm, (x_mm + 0.5 * length) / c_mm
-            if x0 < 0.02 or x1 > 0.98:
-                worst = 0.0
-                break
-            xs = np.linspace(x0, x1, 7)
-            t = float(st.airfoil.thickness(xs).min()) * c_mm - 2.0 * wall_mm
-            worst = min(worst, t)
-        best = max(best, worst)
-    return bool(best >= height), float(best), float(height)
+    worst = np.inf
+    for eta in np.linspace(0.0, eta_edge, 5):
+        st = plan.at(float(eta))
+        c_mm = st.chord_m * 1000.0
+        x0, x1 = (x_mm - 0.5 * length) / c_mm, (x_mm + 0.5 * length) / c_mm
+        if x0 < 0.02 or x1 > 0.98:
+            return False, 0.0, float(height)      # hangs off the nose or tail
+        xs = np.linspace(x0, x1, 7)
+        t = float(st.airfoil.thickness(xs).min()) * c_mm - 2.0 * wall_mm
+        worst = min(worst, t)
+    return bool(worst >= height), float(worst), float(height)
 
 
 @dataclass(frozen=True)
@@ -134,7 +145,8 @@ class Mission:
                 Item("servos x2", 0.024, 0.72),
                 Item("spar+joints", 0.040, 0.30),
             ),
-            bays=(Bay("battery 4S 1500", 0.269, (76.0, 35.0, 26.0)),
+            bays=(Bay("battery 4S 1500", 0.269, (76.0, 35.0, 26.0),
+                      x_var="batt_x"),
                   Bay("fc stack", 0.38, (40.0, 40.0, 18.0))),
             cruise_band_ms=(13.0, 22.0),
             max_mass_kg=0.90,
@@ -277,6 +289,7 @@ def evaluate(
     drag = drag or perf.DragModel()
     reasons: list[str] = []
     penalty = 0.0
+    p_vec = unit_to_physical(u)
     try:
         plan = build(u, mission, base)
     except Exception as e:
@@ -297,7 +310,6 @@ def evaluate(
 
     root_c = plan.stations[0].chord_m
     items = tuple(i.at(root_c) for i in mission.payload)
-    p_vec = unit_to_physical(u)
     items += (perf.PointMass(BATTERY.name, BATTERY.mass_kg,
                              p_vec["batt_x"] * root_c),)
     mass = perf.MassBudget(shell_kg=shell_kg,
@@ -308,9 +320,12 @@ def evaluate(
                        f"{mission.max_mass_kg*1000:.0f} g")
 
     for bay in mission.bays:
-        ok_bay, have, need = bay_fits(plan, bay, settings.extrusion_width_mm)
+        seat = p_vec[bay.x_var] if bay.x_var else None
+        ok_bay, have, need = bay_fits(plan, bay, settings.extrusion_width_mm, seat)
         if not ok_bay:
-            reasons.append(f"{bay.name} bay {have:.1f} mm deep, needs {need:.0f}")
+            where = f" at {seat:.2f}c" if seat is not None else ""
+            reasons.append(f"{bay.name} bay{where} {have:.1f} mm deep, "
+                           f"needs {need:.0f}")
             penalty += 20.0 * (need - have) / need
 
     # --- trim fixes CL; CL fixes cruise speed ---

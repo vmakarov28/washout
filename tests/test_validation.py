@@ -265,3 +265,23 @@ def test_payload_bays_are_checked_for_volume_not_just_mass():
     assert not ok_thin, f"a 20 cm-chord body should not swallow a 26 mm pack ({have_thin:.1f})"
     assert ok_fat, f"a 36 cm-chord body at 1.9x thickness should ({have_fat:.1f})"
     assert have_fat > have_thin
+
+
+def test_bay_is_checked_where_the_mass_actually_sits():
+    """A sweeping fit check answers 'does some seat exist', which is the
+    wrong question -- the CG that trims the aircraft comes from where the
+    pack IS. A search exploited exactly that gap: battery at 0.085c for
+    trim, fit measured at 0.27c, and a 76 mm pack left hanging 19 mm off
+    the nose of a 227 mm chord."""
+    from planeforge.geom import cst as _cst
+    from planeforge.search.design import Bay, bay_fits
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    plan = planform.bwb(0.5, 0.227, 0.29, 0.46, 0.34, 22.4, 12.5, 1.7,
+                        -0.3, -1.0, af, af, 1.61, "run4")
+    pack = Bay("4S 1500", 0.27, (76.0, 35.0, 26.0), x_var="batt_x")
+    ok_good, have_good, _ = bay_fits(plan, pack, 0.45, x_frac=0.27)
+    ok_nose, have_nose, _ = bay_fits(plan, pack, 0.45, x_frac=0.085)
+    assert ok_good, f"0.27c is the seat that works ({have_good:.1f} mm)"
+    assert not ok_nose, "0.085c hangs the pack off the nose and must fail"
+    assert have_nose == 0.0

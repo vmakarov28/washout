@@ -239,3 +239,29 @@ def test_search_and_verdict_use_the_same_lattice():
     src = inspect.getsource(optimize.run_search)
     assert "ns=ns, nc=nc" in src, "final evaluation must reuse the search lattice"
     assert "ns: int = LATTICE_NS" in inspect.getsource(optimize)
+
+
+def test_payload_bays_are_checked_for_volume_not_just_mass():
+    """A search produced a 'feasible' 483 g aircraft whose battery bay was
+    17.7 mm deep for a 26 mm pack. Mass without volume is not a payload:
+    with only a mass budget the optimizer shrinks the centre body for
+    free, because nothing charges it for the space it removes.
+
+    The binding dimension is depth across the pack's own WIDTH and along
+    its full LENGTH, not on the centreline -- a blended body tapers fast
+    and the centreline is always the most flattering station."""
+    from planeforge.geom import cst as _cst
+    from planeforge.search.design import Bay, bay_fits
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    pack = Bay("4S 1500", 0.27, (76.0, 35.0, 26.0))
+
+    thin = planform.bwb(0.5, 0.20, 0.21, 0.47, 0.38, 24.0, 20.0, 1.1,
+                        -2.1, -1.5, af, af, 1.37, "thin")
+    fat = planform.bwb(0.5, 0.36, 0.32, 0.62, 0.28, 38.0, 24.0, 2.0,
+                       -3.0, -1.0, af, af, 1.9, "fat")
+    ok_thin, have_thin, _ = bay_fits(thin, pack, 0.45)
+    ok_fat, have_fat, _ = bay_fits(fat, pack, 0.45)
+    assert not ok_thin, f"a 20 cm-chord body should not swallow a 26 mm pack ({have_thin:.1f})"
+    assert ok_fat, f"a 36 cm-chord body at 1.9x thickness should ({have_fat:.1f})"
+    assert have_fat > have_thin

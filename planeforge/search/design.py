@@ -47,10 +47,56 @@ class Item:
     name: str
     mass_kg: float
     x_frac: float
+    box_mm: tuple[float, float, float] | None = None   # length, width, height
 
     def at(self, root_chord_m: float) -> perf.PointMass:
         return perf.PointMass(self.name, self.mass_kg,
                               self.x_frac * root_chord_m)
+
+
+@dataclass(frozen=True)
+class Bay:
+    """A rigid box that must physically fit inside the shell.
+
+    `x_frac` is a NOMINAL seat; the check sweeps chordwise to find the
+    best station, because a pack can slide fore and aft. What it cannot
+    do is get thinner."""
+
+    name: str
+    x_frac: float
+    box_mm: tuple[float, float, float]        # length, width, height
+
+
+def bay_fits(plan: Planform, bay: Bay, wall_mm: float) -> tuple[bool, float, float]:
+    """Does the box fit inside the skin? -> (ok, available_mm, needed_mm).
+
+    The binding dimension is height measured across the box's own WIDTH,
+    not on the centreline: a blended body tapers fast, so the pack is
+    limited by how deep the shell still is at +/- w/2 of span, which is
+    always less than at the root. Checking the centreline only is how the
+    23.2 mm bay passed for a 26 mm pack."""
+    length, width, height = bay.box_mm
+    root_c_mm = plan.stations[0].chord_m * 1000.0
+    half_span_mm = plan.half_span_m * 1000.0
+    eta_edge = min(0.5 * width / half_span_mm, 1.0)
+
+    best = 0.0
+    for x_frac in np.linspace(0.12, 0.75, 22):     # the pack can slide
+        x_mm = x_frac * root_c_mm
+        worst = np.inf
+        for eta in np.linspace(0.0, eta_edge, 5):
+            st = plan.at(float(eta))
+            c_mm = st.chord_m * 1000.0
+            # the box needs `length` of chord centred on x_mm
+            x0, x1 = (x_mm - 0.5 * length) / c_mm, (x_mm + 0.5 * length) / c_mm
+            if x0 < 0.02 or x1 > 0.98:
+                worst = 0.0
+                break
+            xs = np.linspace(x0, x1, 7)
+            t = float(st.airfoil.thickness(xs).min()) * c_mm - 2.0 * wall_mm
+            worst = min(worst, t)
+        best = max(best, worst)
+    return bool(best >= height), float(best), float(height)
 
 
 @dataclass(frozen=True)
@@ -59,6 +105,7 @@ class Mission:
 
     span_m: float = 1.0
     payload: tuple[Item, ...] = ()
+    bays: tuple[Bay, ...] = ()
     cruise_band_ms: tuple[float, float] = (12.0, 20.0)
     min_static_margin: float = 0.05
     max_static_margin: float = 0.18
@@ -76,12 +123,19 @@ class Mission:
         return Mission(
             span_m=1.0,
             payload=(
+                # box_mm is what makes a payload REAL. Without it the
+                # optimizer shrinks the centre body for free: a search
+                # run produced a "feasible" 483 g aircraft whose battery
+                # bay was 23.2 mm deep for a 26 mm pack. Mass without
+                # volume is not a payload, it is a number.
                 Item("motor+prop", 0.075, 0.98),   # pusher, at the TE
                 Item("esc+wiring", 0.045, 0.50),
                 Item("fc+rx+vtx", 0.055, 0.38),
                 Item("servos x2", 0.024, 0.72),
                 Item("spar+joints", 0.040, 0.30),
             ),
+            bays=(Bay("battery 4S 1500", 0.269, (76.0, 35.0, 26.0)),
+                  Bay("fc stack", 0.38, (40.0, 40.0, 18.0))),
             cruise_band_ms=(13.0, 22.0),
             max_mass_kg=0.90,
         )
@@ -222,6 +276,7 @@ def evaluate(
     population before any lattice is ever built."""
     drag = drag or perf.DragModel()
     reasons: list[str] = []
+    penalty = 0.0
     try:
         plan = build(u, mission, base)
     except Exception as e:
@@ -251,6 +306,12 @@ def evaluate(
     if mass.total_kg > mission.max_mass_kg:
         reasons.append(f"mass {mass.total_kg*1000:.0f} g over "
                        f"{mission.max_mass_kg*1000:.0f} g")
+
+    for bay in mission.bays:
+        ok_bay, have, need = bay_fits(plan, bay, settings.extrusion_width_mm)
+        if not ok_bay:
+            reasons.append(f"{bay.name} bay {have:.1f} mm deep, needs {need:.0f}")
+            penalty += 20.0 * (need - have) / need
 
     # --- trim fixes CL; CL fixes cruise speed ---
     vlm = VLM(plan, ns=ns, nc=nc)

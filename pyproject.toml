@@ -1,0 +1,13 @@
+[project]
+name = "planeforge"
+version = "0.1.0"
+description = "Automated blended-wing-body design: CFD-informed search to vase-mode printable STL"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy"]
+
+[project.optional-dependencies]
+dev = ["pytest", "matplotlib"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

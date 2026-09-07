@@ -54,6 +54,62 @@ diameter are all flags — see `python run.py --help`. Defaults are a
 256³ bed, 0.4 mm nozzle at 0.45 mm width, 0.25 mm layers, LW-PLA at
 0.60 g/cc.
 
+## Real structure, not just a shell
+
+Spiralize prints ONE contour per layer, so at first glance the shell can
+have no internal structure: a rib joined to the skin is a T-junction and
+the curve stops being simple. The way round it — the one
+[Vase Mode Wing](https://vmw.deneb-systems.com/#studio) uses — is that a
+rib is not a separate loop, it is a **detour of the skin loop**:
+
+```
+upper  ------.        .------------
+             |        |
+             |  rib   |     <- two legs, one bead apart
+             |        |
+lower  ------'--------'------------  (gap = one bead: welds, never touches)
+```
+
+Topologically still one simple closed curve; physically a welded web.
+Ribs sweep chordwise as Z rises, so the stack becomes a diamond truss.
+
+Two invariants hold the rest of the pipeline together. Point count per
+layer is **constant** — the skinner joins layer *k* index *i* to layer
+*k+1* index *i* — so the skin is reparametrised around the ribs rather
+than having vertices deleted. And the caps are **ear-clipped**, not
+laddered between upper and lower surfaces, because a rib detour doubles
+back in x.
+
+The rib sweep is a **budget, not an allowance**. A tapered swept panel
+already spends 37.9° of a 50° overhang limit moving its own section
+sideways before any rib exists; the truss gets the remainder. Sizing the
+rib against the full limit gave 58° of real overhang — and because the
+excess came from the wing, it was independent of rib pitch, which is
+what eventually identified it.
+
+`structure.py` then sizes the spar: the lightest stock carbon tube that
+passes ultimate load (1.5× limit) and a tip-deflection limit, from the
+VLM's own span loading rather than an assumed elliptical one. Rib pitch
+comes from plate-buckling of the compression skin. Both are calculations,
+not defaults.
+
+## Designing for a beginner
+
+`Mission.beginner_trainer()` is judged against one question: what happens
+when a first-time pilot lets go of the sticks? That needs a big static
+margin, real dihedral, low wing loading, and — the important one — a
+**stall-progression gate**: the tip must work at least 12% below the peak
+section cl, so the root lets go first and the nose drops instead of a
+wing. A flying wing that drops a tip on launch is how beginners lose them.
+
+Two things that gate turned up. Static margin is **pinned by sweep**, not
+by reflex or camber: it moves only with CG position, and the battery
+cannot go further forward without the pack hanging off the nose. Sweeping
+the leading edge moves the neutral point aft instead — 38° → SM 0.081,
+46° → 0.240, 54° → 0.390. And the optimizer will happily trim at +14.3°
+if you let it, because the lattice is inviscid and tier-0 drag has no
+alpha dependence, so `max_trim_alpha_deg` caps it.
+
 ## The fidelity ladder
 
 A D3Q19 run of a whole aircraft is hours; differential evolution wants

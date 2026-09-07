@@ -36,6 +36,7 @@ def print_settings(a) -> vase.PrintSettings:
         layer_h_mm=a.layer_h, extrusion_width_mm=a.width,
         nozzle_mm=a.nozzle, filament_density_gcc=a.density,
         spar_d_mm=a.spar,
+        ribs=a.ribs, rib_count=a.rib_count, rib_pitch_mm=a.rib_pitch,
     )
 
 
@@ -136,6 +137,12 @@ def main() -> int:
     ap.add_argument("--density", type=float, default=0.60,
                     help="g/cc; 0.60 LW-PLA foamed, 1.24 solid PLA")
     ap.add_argument("--spar", type=float, default=6.0)
+    ap.add_argument("--ribs", action="store_true",
+                    help="internal truss during the SEARCH too, so its mass "
+                         "is carried from the start rather than discovered "
+                         "afterwards")
+    ap.add_argument("--rib-count", type=int, default=3, dest="rib_count")
+    ap.add_argument("--rib-pitch", type=float, default=25.0, dest="rib_pitch")
     ap.add_argument("--no-structure", action="store_true", dest="no_structure",
                     help="skip spar/rib sizing; export a bare vase shell")
     a = ap.parse_args()

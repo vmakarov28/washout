@@ -144,6 +144,18 @@ class Mission:
     lets go first, the nose drops, and the aircraft recovers itself.
     This is the most important safety property in the whole file."""
     n_limit_g: float = 3.5
+    max_trim_alpha_deg: float = 90.0
+    """Cap on the angle of attack the aircraft settles at, hands off.
+
+    The lattice is INVISCID: its lift curve rises for ever and the
+    tier-0 drag model has no alpha dependence, so trimming at a huge
+    angle costs the optimizer nothing and it will duly do it -- the
+    trainer search returned a design that cruises at +14.3 deg, which a
+    12% section at Re 60k has long since stopped flying at.
+
+    This is a design choice as much as a model patch: a trainer should
+    cruise with real margin to the stall, so that the first time a
+    beginner pulls back, the aeroplane still has somewhere to go."""
 
     @staticmethod
     def beginner_trainer() -> "Mission":
@@ -175,6 +187,7 @@ class Mission:
             min_static_margin=0.14,        # deeply stable, not merely stable
             max_static_margin=0.30,
             cl_max_section=0.85,           # stay well clear of the stall
+            max_trim_alpha_deg=10.0,       # real margin to the stall
             max_mass_kg=0.50,
             battery_kg=0.110,              # 3S 1300, not the FPV wing's 4S
             max_wing_loading_gdm2=26.0,    # slow, and forgiving on arrival
@@ -434,6 +447,11 @@ def evaluate(
     if cl_pk > mission.cl_max_section:
         reasons.append(f"peak section cl {cl_pk:.2f} > {mission.cl_max_section}")
         penalty += 25.0 * (cl_pk - mission.cl_max_section)
+
+    if alpha > mission.max_trim_alpha_deg:
+        reasons.append(f"trims at {alpha:.1f} deg, over "
+                       f"{mission.max_trim_alpha_deg:.0f} deg")
+        penalty += 6.0 * (alpha - mission.max_trim_alpha_deg)
 
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:

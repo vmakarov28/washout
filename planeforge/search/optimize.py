@@ -30,16 +30,29 @@ from .design import (BOUNDS, LATTICE_NC, LATTICE_NS, N_DIM, Evaluation,
                      Mission, evaluate, physical_to_unit, unit_to_physical)
 
 TRAINER_SEED = {
-    # Verified feasible for Mission.beginner_trainer() AT THE WORKING
-    # 32x8 lattice -- an earlier version of this seed was found at 16x4
-    # and did not trim at all when checked properly. Washout and ~3 deg
-    # of reflex buy the stall progression; the pack sits well forward
-    # (0.18c) because that is what holds the static margin at +0.15.
-    "root_chord": 0.28, "kink_eta": 0.30, "kink_chord_frac": 0.62,
-    "tip_chord_frac": 0.45, "sweep_le": 38.0, "kink_sweep_le": 24.0,
-    "dihedral": 4.0, "twist_kink": -1.0, "twist_tip": -6.0,
-    "body_thickness": 1.80, "batt_x": 0.18,
-    "reflex_deg": 3.0, "camber_scale": 1.0,
+    # Feasible at the working 32x8 lattice WITH the internal truss and
+    # the 10 deg trim-alpha cap both active.
+    #
+    # The lever that made it possible is SWEEP, which was not obvious.
+    # Static margin sat pinned near 0.08 no matter what reflex or camber
+    # did, because on a tailless wing SM is set by where the CG sits
+    # relative to the neutral point -- and the battery could not move
+    # further forward without the 72 mm pack hanging off the nose (the
+    # bay gate). Sweeping the leading edge moves the NEUTRAL POINT aft
+    # instead: 38 deg -> SM 0.081, 46 deg -> 0.240, 54 deg -> 0.390.
+    "root_chord": 0.34,
+    "kink_eta": 0.3,
+    "kink_chord_frac": 0.62,
+    "tip_chord_frac": 0.4,
+    "sweep_le": 46.0,
+    "kink_sweep_le": 38.0,
+    "dihedral": 4.0,
+    "twist_kink": -1.0,
+    "twist_tip": -5.0,
+    "body_thickness": 1.9,
+    "batt_x": 0.14,
+    "reflex_deg": 3.5,
+    "camber_scale": 1.1,
 }
 
 SEED_PHYSICAL = {

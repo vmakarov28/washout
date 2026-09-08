@@ -114,7 +114,17 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
 class Mission:
     """What the aeroplane is for. Everything here is a constraint."""
 
+    name: str = "bwb"
     span_m: float = 1.0
+    span_free: bool = False
+    """Let the optimizer choose the span. Used by the micro mission,
+    where the whole question IS how small the aircraft can get around a
+    fixed motor and receiver."""
+    objective: str = "ld"
+    """What 'best' means: 'ld' cruise efficiency, 'speed' outright
+    velocity, 'small' the smallest flyable aeroplane. A trainer and a
+    racer are not the same design scored differently -- they are
+    different scores."""
     payload: tuple[Item, ...] = ()
     bays: tuple[Bay, ...] = ()
     cruise_band_ms: tuple[float, float] = (12.0, 20.0)
@@ -157,72 +167,105 @@ class Mission:
     cruise with real margin to the stall, so that the first time a
     beginner pulls back, the aeroplane still has somewhere to go."""
 
+    # ---------------------------------------------------------- the fleet
+    #
+    # Every aircraft here flies the SAME 2205 2300 kv motor and the SAME
+    # Spektrum AR630 receiver, and prints in Bambu PLA Aero on an X1C.
+    # Those are not incidental: a 36 g motor and an 8 g receiver are a
+    # fixed tax, and on the micro that tax IS the design problem.
+
     @staticmethod
-    def beginner_trainer() -> "Mission":
+    def _common(servo_g: float = 0.018, esc_g: float = 0.020,
+                spar_g: float = 0.030) -> tuple:
+        return (
+            Item("2205 2300kv + prop", 0.036, 0.97),   # pusher, at the TE
+            Item("AR630 rx", 0.008, 0.34),
+            Item("esc + wiring", esc_g, 0.50),
+            Item("servos x2", servo_g, 0.72),
+            Item("spar + joiners", spar_g, 0.30),
+        )
+
+    @staticmethod
+    def trainer_v3() -> "Mission":
         """Slow, self-righting, hard to hurt yourself with. Under 1 m.
 
-        Every number here is chosen against ONE question: what happens
-        when a first-time pilot lets go of the sticks? The answer has to
-        be "it flies away straight and slows down", which needs a big
-        static margin (nose-down when it speeds up), real dihedral (rolls
-        level on its own), low wing loading (slow, and gentle when it
-        lands), and a root that stalls before the tips.
+        Judged against one question: what happens when a first-time pilot
+        lets go of the sticks? It has to fly away straight and slow down.
+        That needs a big static margin (nose-down when it speeds up), real
+        dihedral (rolls level on its own), low wing loading (slow, and
+        gentle when it lands), and a root that stalls before the tips.
 
-        The cost is L/D and top speed, and that is the correct trade. A
-        trainer that is 20% more efficient and drops a wing on launch is
-        worth nothing."""
+        The 8 degree trim cap is MEASURED, not guessed: the tunnel polar
+        of this section at Re 60k peaks in L/D at 8 degrees and loses 40%
+        of it by 14, while lift is still rising. v2 was capped at 10 on a
+        hunch and duly trimmed at 9.95, hard against the constraint."""
         return Mission(
-            span_m=0.90,
-            payload=(
-                Item("motor+prop", 0.055, 0.97),      # 2205 pusher
-                Item("esc+wiring", 0.030, 0.50),
-                Item("fc+rx", 0.030, 0.38),
-                Item("servos x2", 0.020, 0.72),
-                Item("spar+joints", 0.030, 0.30),
-            ),
-            bays=(Bay("battery 3S 1300", 0.30, (72.0, 35.0, 24.0),
-                      x_var="batt_x"),
-                  Bay("fc+rx", 0.40, (36.0, 36.0, 15.0))),
-            cruise_band_ms=(7.5, 11.5),
-            min_static_margin=0.14,        # deeply stable, not merely stable
-            max_static_margin=0.30,
-            cl_max_section=0.85,           # stay well clear of the stall
-            max_trim_alpha_deg=10.0,       # real margin to the stall
-            max_mass_kg=0.50,
-            battery_kg=0.110,              # 3S 1300, not the FPV wing's 4S
-            max_wing_loading_gdm2=26.0,    # slow, and forgiving on arrival
-            tip_stall_margin=0.12,         # root stalls first, by 12%
-            n_limit_g=3.0,
+            name="trainer_v3", span_m=0.90, objective="ld",
+            payload=Mission._common(),
+            bays=(Bay("3S 1300", 0.28, (72.0, 35.0, 24.0), x_var="batt_x"),
+                  Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0))),
+            battery_kg=0.110,
+            cruise_band_ms=(7.0, 11.0),
+            min_static_margin=0.15, max_static_margin=0.32,
+            cl_max_section=0.85, max_mass_kg=0.50,
+            max_wing_loading_gdm2=26.0, tip_stall_margin=0.12,
+            n_limit_g=3.0, max_trim_alpha_deg=8.0,
         )
 
     @staticmethod
-    def fpv_1m() -> "Mission":
-        """A 1 m FPV flying wing: 2207 motor, 4S 1500, two elevon servos.
+    def demon1() -> "Mission":
+        """Everything for speed. Nothing for comfort.
 
-        Masses are the declared build; x positions are measured from the
-        root leading edge and are where these parts have to go -- the
-        battery forward for CG, the motor at the back for a pusher."""
+        The objective is outright velocity, not efficiency, and that
+        inverts most of the trainer's choices: minimal static margin
+        (a stable aircraft wastes lift trimming itself), high wing
+        loading (small wing, high speed), thin low-camber sections, and a
+        trim angle held down near the drag bucket because at 40 m/s
+        profile drag is the entire budget.
+
+        The load factor is 6 g rather than 3: this thing gets pulled out
+        of dives, and the spar is sized for it."""
         return Mission(
-            span_m=1.0,
-            payload=(
-                # box_mm is what makes a payload REAL. Without it the
-                # optimizer shrinks the centre body for free: a search
-                # run produced a "feasible" 483 g aircraft whose battery
-                # bay was 23.2 mm deep for a 26 mm pack. Mass without
-                # volume is not a payload, it is a number.
-                Item("motor+prop", 0.075, 0.98),   # pusher, at the TE
-                Item("esc+wiring", 0.045, 0.50),
-                Item("fc+rx+vtx", 0.055, 0.38),
-                Item("servos x2", 0.024, 0.72),
-                Item("spar+joints", 0.040, 0.30),
-            ),
-            bays=(Bay("battery 4S 1500", 0.269, (76.0, 35.0, 26.0),
-                      x_var="batt_x"),
-                  Bay("fc stack", 0.38, (40.0, 40.0, 18.0))),
-            cruise_band_ms=(13.0, 22.0),
-            max_mass_kg=0.90,
+            name="demon1", span_m=0.80, objective="speed",
+            payload=Mission._common(esc_g=0.026, spar_g=0.038),
+            bays=(Bay("4S 1300", 0.30, (76.0, 35.0, 27.0), x_var="batt_x"),
+                  Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0))),
+            battery_kg=0.150,
+            cruise_band_ms=(20.0, 48.0),
+            min_static_margin=0.05, max_static_margin=0.13,
+            cl_max_section=1.00, max_mass_kg=0.85,
+            max_wing_loading_gdm2=1e9,      # loading is the POINT here
+            tip_stall_margin=0.04,
+            n_limit_g=6.0, max_trim_alpha_deg=5.0,
         )
 
+    @staticmethod
+    def micro() -> "Mission":
+        """The smallest aeroplane that can carry the same motor and rx.
+
+        Span is a DESIGN VARIABLE here, because the whole question is how
+        small it can get. And the answer is dominated by a tax it cannot
+        negotiate: 36 g of motor and 8 g of receiver, before any wing
+        exists. Shrink the span and wing area falls as span squared while
+        that 44 g does not move, so wing loading runs away and the stall
+        speed with it. Somewhere there is a smallest span that still
+        flies slowly enough to land, and finding it is the mission."""
+        return Mission(
+            name="micro", span_m=0.55, span_free=True, objective="small",
+            payload=Mission._common(servo_g=0.010, esc_g=0.012, spar_g=0.014),
+            bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
+                  Bay("AR630", 0.44, (30.0, 20.0, 12.0))),
+            battery_kg=0.028,
+            cruise_band_ms=(8.0, 17.0),
+            min_static_margin=0.10, max_static_margin=0.26,
+            cl_max_section=0.90, max_mass_kg=0.22,
+            max_wing_loading_gdm2=42.0, tip_stall_margin=0.08,
+            n_limit_g=4.0, max_trim_alpha_deg=9.0,
+        )
+
+    @staticmethod
+    def beginner_trainer() -> "Mission":
+        return Mission.trainer_v3()
 
 # --------------------------------------------------------- the design vector
 
@@ -236,37 +279,35 @@ class Bound:
 
 
 PLANFORM_BOUNDS = (
-    Bound("root_chord", 0.15, 0.42, "m"),
-    Bound("kink_eta", 0.18, 0.50, ""),
-    Bound("kink_chord_frac", 0.45, 0.85, ""),
-    Bound("tip_chord_frac", 0.16, 0.45, ""),
-    Bound("sweep_le", 20.0, 55.0, "deg"),
-    Bound("kink_sweep_le", 10.0, 40.0, "deg"),
+    Bound("span_m", 0.35, 1.10, "m"),
+    Bound("root_chord", 0.13, 0.46, "m"),
+    Bound("body_eta", 0.10, 0.34, ""),
+    Bound("body_chord_frac", 0.70, 0.99, ""),
+    # kink is placed as a FRACTION of the span left outboard of the body,
+    # never as an absolute eta, so body_eta < kink_eta < 1 holds for every
+    # point in the unit cube. Ordering constraints the optimizer can
+    # violate become geometry exceptions it must be penalised for; this
+    # way the constraint cannot be expressed at all.
+    Bound("kink_gap", 0.18, 0.62, ""),
+    Bound("kink_chord_frac", 0.34, 0.86, ""),
+    Bound("tip_chord_frac", 0.16, 0.55, ""),
+    Bound("sweep_body", 20.0, 66.0, "deg"),
+    Bound("sweep_mid", 12.0, 50.0, "deg"),
+    Bound("sweep_outer", 4.0, 42.0, "deg"),
     Bound("dihedral", 0.0, 10.0, "deg"),
-    Bound("twist_kink", -3.0, 1.0, "deg"),
-    Bound("twist_tip", -8.0, 0.0, "deg"),
-    Bound("body_thickness", 1.15, 2.10, "x"),
-    # Where the battery sits is a DESIGN VARIABLE, not a constant. On a
-    # tailless aircraft the CG is the single strongest lever on trim --
-    # it decides the lift coefficient the wing settles at, and therefore
-    # the cruise speed. Fixing it by hand and then optimising the wing
-    # around it is solving the problem backwards; the pack is the one
-    # part of the aircraft that is trivial to slide.
+    Bound("twist_body", -2.0, 3.0, "deg"),
+    Bound("twist_kink", -4.0, 2.0, "deg"),
+    Bound("twist_tip", -9.0, 1.0, "deg"),
+    Bound("body_thickness", 1.10, 2.30, "x"),
     Bound("batt_x", 0.06, 0.72, "c_root"),
 )
 
+SECTION_BOUNDS = (
+    Bound("reflex_deg", -1.0, 9.0, "deg"),
+    Bound("camber_scale", 0.30, 1.70, "x"),
+)
 BATTERY_NAME = "battery"
 
-# Section shape: two interpretable knobs, not six coefficient nudges.
-# REFLEX is degrees of trailing-edge-up built into the moulded section --
-# the thing that buys Cm0 and therefore lets a tailless wing trim at
-# positive lift with the CG ahead of the neutral point. CAMBER_SCALE
-# trades cruise lift against that moment. Both are monotone in the
-# quantity they control, which raw CST coefficients emphatically are not.
-SECTION_BOUNDS = (
-    Bound("reflex_deg", -1.0, 8.0, "deg"),
-    Bound("camber_scale", 0.4, 1.6, "x"),
-)
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
 
@@ -285,21 +326,28 @@ def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
     produces geometry, valid or not. Validity is judged, not assumed."""
     p = unit_to_physical(u)
     tip = deflect_te(scale_camber(base, p["camber_scale"]), p["reflex_deg"])
+    span = p["span_m"] if mission.span_free else mission.span_m
+    body_eta = p["body_eta"]
+    kink_eta = body_eta + p["kink_gap"] * (1.0 - body_eta)
     return bwb(
-        half_span_m=0.5 * mission.span_m,
+        half_span_m=0.5 * span,
         root_chord_m=p["root_chord"],
-        kink_eta=p["kink_eta"],
+        body_eta=body_eta,
+        body_chord_frac=p["body_chord_frac"],
+        kink_eta=kink_eta,
         kink_chord_frac=p["kink_chord_frac"],
         tip_chord_frac=p["tip_chord_frac"],
-        sweep_le_deg=p["sweep_le"],
-        kink_sweep_le_deg=p["kink_sweep_le"],
+        sweep_body_deg=p["sweep_body"],
+        sweep_mid_deg=p["sweep_mid"],
+        sweep_outer_deg=p["sweep_outer"],
         dihedral_deg=p["dihedral"],
-        twist_tip_deg=p["twist_tip"],
+        twist_body_deg=p["twist_body"],
         twist_kink_deg=p["twist_kink"],
+        twist_tip_deg=p["twist_tip"],
         root_airfoil=tip,
         tip_airfoil=tip,
         body_thickness_scale=p["body_thickness"],
-        name="bwb",
+        name=mission.name,
     )
 
 
@@ -308,11 +356,9 @@ def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
 # more slowly than lift does, because trim is where a small MOMENT
 # difference is driven to zero. Measured on a converged design, cruise
 # speed reads 13.5 m/s at 12x4, 13.0 at 16x4, 11.3 at 24x6 and settles at
-# 10.6 by 32x8 -- a 27% error at the resolution the search was originally
-# using. Searching at one resolution and reporting at another let the
-# optimizer spend 7384 evaluations perfecting a design that the final
-# check then rejected. Same number everywhere, or the search is optimising
-# a different aeroplane from the one being judged.
+# 10.6 by 32x8 -- a 27% error at the resolution the search first used.
+# Searching at one resolution and reporting at another let an optimizer
+# spend 7384 evaluations perfecting a design the final check rejected.
 LATTICE_NS = 32
 LATTICE_NC = 8
 
@@ -422,7 +468,10 @@ def evaluate(
 
     v = float(np.sqrt(2 * mass.total_kg * perf.G
                       / (perf.RHO_AIR * plan.area_m2 * pt.CL)))
-    cd0 = drag.cd0(plan, v)
+    try:
+        cd0 = drag.cd0(plan, v, aero_point=pt)     # measured: per-strip cl
+    except TypeError:
+        cd0 = drag.cd0(plan, v)                    # tier-0: flat
     cd = cd0 + pt.CDi
     ld = pt.CL / cd
 
@@ -493,7 +542,15 @@ def evaluate(
     # could park 1 m/s below the cruise band, pay 1.5 points, and buy
     # more than that back in L/D by flying slow. It was maximising the
     # score exactly as written; the score was wrong.
-    score = ld if not reasons else -(100.0 + penalty)
+    if mission.objective == "speed":
+        merit = v                       # m/s, outright
+    elif mission.objective == "small":
+        # smallest flyable: span dominates, mass breaks ties. Negated
+        # because the optimizer maximises.
+        merit = -(plan.span_m * 100.0 + mass.total_kg * 10.0)
+    else:
+        merit = ld
+    score = merit if not reasons else -(1000.0 + penalty)
     return Evaluation(
         ok=not reasons, score=float(score), ld=float(ld), v_cruise=v,
         mass_kg=mass.total_kg, cl_trim=float(pt.CL), static_margin=float(sm),

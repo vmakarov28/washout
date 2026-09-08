@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""planeforge: search a blended wing body, print it in vase mode.
+"""loft: search a blended wing body, print it in vase mode.
 
     python run.py search  [--iters 60] [--span 1.0] [--out out/run1]
     python run.py export  --design out/run1/design.json
@@ -21,11 +21,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from planeforge.geom import cst
-from planeforge.printing import stl, vase
-from planeforge.search.design import (Mission, evaluate, physical_to_unit,
+from loft.geom import cst
+from loft.printing import stl, vase
+from loft.search.design import (Mission, evaluate, physical_to_unit,
                                       unit_to_physical)
-from planeforge.search.optimize import SEED_PHYSICAL, TRAINER_SEED, run_search
+from loft.search.optimize import SEEDS, run_search
 
 ROOT = Path(__file__).resolve().parent
 
@@ -68,9 +68,9 @@ def choose_structure(ev, mission, settings: vase.PrintSettings):
     aerodynamic search, not inside it: the loads depend on the span
     loading of the design that won, and no earlier point in the pipeline
     knows what that is."""
-    from planeforge import structure
-    from planeforge.aero.vlm import VLM
-    from planeforge.search.design import LATTICE_NC, LATTICE_NS
+    from loft import structure
+    from loft.aero.vlm import VLM
+    from loft.search.design import LATTICE_NC, LATTICE_NS
 
     pt = VLM(ev.plan, LATTICE_NS, LATTICE_NC).solve(ev.trim.alpha_deg,
                                                     ev.trim.x_cg_m)
@@ -87,9 +87,9 @@ def choose_structure(ev, mission, settings: vase.PrintSettings):
 def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
-        from planeforge.report import figure
+        from loft.report import figure
         fig = figure(ev, settings, out / "design.png",
-                     title=f"planeforge {ev.plan.span_m*1000:.0f} mm BWB")
+                     title=f"loft {ev.plan.span_m*1000:.0f} mm BWB")
         print(f"\nfigure: {fig}")
     except ImportError:
         pass
@@ -121,7 +121,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["search", "export", "seed"])
-    ap.add_argument("--mission", choices=["fpv_1m", "trainer"], default="fpv_1m")
+    ap.add_argument("--mission",
+                    choices=["trainer_v3", "demon1", "micro", "fpv_1m"],
+                    default="trainer_v3")
+    ap.add_argument("--polar", type=Path, default=None,
+                    help="measured LBM polar CSV; switches the search from "
+                         "the flat tier-0 drag model to strip theory on real "
+                         "data. Without it the optimizer is not charged for "
+                         "flying at a high angle of attack.")
     ap.add_argument("--span", type=float, default=None, help="m; overrides the mission")
     ap.add_argument("--iters", type=int, default=60)
     ap.add_argument("--popsize", type=int, default=10)
@@ -129,13 +136,13 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "run")
     ap.add_argument("--design", type=Path, default=None)
     ap.add_argument("--airfoil", type=Path, default=ROOT / "assets" / "mh45.dat")
-    ap.add_argument("--bed", type=float, default=256.0)
+    ap.add_argument("--bed", type=float, default=256.0, help="X1C bed")
     ap.add_argument("--bed-z", type=float, default=250.0, dest="bed_z")
     ap.add_argument("--layer-h", type=float, default=0.25, dest="layer_h")
     ap.add_argument("--width", type=float, default=0.45)
     ap.add_argument("--nozzle", type=float, default=0.4)
-    ap.add_argument("--density", type=float, default=0.60,
-                    help="g/cc; 0.60 LW-PLA foamed, 1.24 solid PLA")
+    ap.add_argument("--density", type=float, default=0.55,
+                    help="g/cc; 0.55 Bambu PLA Aero foamed, 1.24 solid PLA")
     ap.add_argument("--spar", type=float, default=6.0)
     ap.add_argument("--ribs", action="store_true",
                     help="internal truss during the SEARCH too, so its mass "
@@ -148,15 +155,17 @@ def main() -> int:
     a = ap.parse_args()
 
     base = cst.load_selig(a.airfoil)
-    mission = (Mission.beginner_trainer() if a.mission == "trainer"
-               else Mission.fpv_1m())
+    mission = getattr(Mission, a.mission)()
     if a.span is not None:
         mission = Mission(**{**mission.__dict__, "span_m": a.span})
     settings = print_settings(a)
     a.out.mkdir(parents=True, exist_ok=True)
 
     if a.command == "seed":
-        seed_phys = TRAINER_SEED if a.mission == "trainer" else SEED_PHYSICAL
+        seed_phys = SEEDS.get(a.mission)
+        if not seed_phys:
+            print("no seed recorded for this mission")
+            return 1
         ev = evaluate(physical_to_unit(seed_phys), mission, base, settings,
                       want_panels=True)
         print(report(ev, settings))
@@ -181,12 +190,17 @@ def main() -> int:
         do_export(ev, settings, a.out)
         return 0
 
-    print(f"planeforge search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
+    print(f"loft search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
-    seed_phys = TRAINER_SEED if a.mission == "trainer" else SEED_PHYSICAL
+    drag = None
+    if a.polar:
+        from loft.aero.performance import MeasuredDrag
+        drag = MeasuredDrag.from_csv(a.polar)
+        print(f"drag: measured polar {a.polar} "
+              f"(cd {drag.cd.min():.4f}..{drag.cd.max():.4f})")
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
-                                   popsize=a.popsize, seed=a.seed,
-                                   out_dir=a.out, seed_physical=seed_phys)
+                                   popsize=a.popsize, seed=a.seed, drag=drag,
+                                   out_dir=a.out, seed_physical=SEEDS.get(a.mission))
     (a.out / "design.json").write_text(json.dumps({
         "u": list(map(float, best_u)),
         "physical": unit_to_physical(best_u),

@@ -236,16 +236,31 @@ def build_stack(
                        max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs)
     if settings.ribs:
-        # Measure what the bare panel already spends of the overhang
-        # budget, and give the truss only the remainder. Taper and sweep
-        # move the section sideways on their own; the rib adds to that,
-        # it does not get its own allowance.
-        bare = build_stack(plan, replace(settings, ribs=False), eta0, eta1,
-                           name + "_bare", z_step_mm)
-        used = np.tan(np.radians(overhang_deg(bare)[0]))
+        # What the bare panel already spends of the overhang budget,
+        # computed rather than measured. A contour point at chord
+        # fraction s sits at x = x_le(eta) + s * chord(eta), so it
+        # travels
+        #     dx/dz = [dx_le/deta + s * dchord/deta] * deta/dz
+        # and the worst case is at one of the two chord ends, s = 0 or 1.
+        # Building a throwaway bare stack just to measure this made every
+        # ribbed evaluation 4.9x more expensive than a plain one (3.80 s
+        # against 0.78) and dominated a 3h 22m search.
+        de = 1e-3
+        e_mid = 0.5 * (eta0 + eta1)
+        s0, s1 = plan.at(max(e_mid - de, 0.0)), plan.at(min(e_mid + de, 1.0))
+        dxle = (s1.x_le_m - s0.x_le_m) / (2 * de)
+        dc = (s1.chord_m - s0.chord_m) / (2 * de)
+        deta_dz = (eta1 - eta0) / max(panel_len_mm / 1000.0, 1e-9)
+        used = max(abs(dxle), abs(dxle + dc)) * deta_dz
         allowed = np.tan(np.radians(settings.max_overhang_deg))
+        # The analytic bound is a LOWER bound: it tracks the leading and
+        # trailing edges but not twist, thickness change or the trailing-
+        # edge thickening, all of which also move contour points. Measured
+        # against the real overhang across nine panels it runs 1.21x to
+        # 1.82x low, so 2.0 is the factor that keeps it conservative. The
+        # cost is a shallower truss, which is the right way to be wrong.
         rib_spec = replace(rib_spec,
-                           rate_mm_per_mm=max(allowed - used, 0.02))
+                           rate_mm_per_mm=max(allowed - 2.0 * used, 0.02))
     n_pts = 2 * settings.contour_points - 1 + (
         POINTS_PER_RIB * settings.rib_count if settings.ribs else 0)
     contours = np.empty((len(z), n_pts, 2))

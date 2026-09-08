@@ -29,44 +29,15 @@ from ..printing import vase
 from .design import (BOUNDS, LATTICE_NC, LATTICE_NS, N_DIM, Evaluation,
                      Mission, evaluate, physical_to_unit, unit_to_physical)
 
-TRAINER_SEED = {
-    # Feasible at the working 32x8 lattice WITH the internal truss and
-    # the 10 deg trim-alpha cap both active.
-    #
-    # The lever that made it possible is SWEEP, which was not obvious.
-    # Static margin sat pinned near 0.08 no matter what reflex or camber
-    # did, because on a tailless wing SM is set by where the CG sits
-    # relative to the neutral point -- and the battery could not move
-    # further forward without the 72 mm pack hanging off the nose (the
-    # bay gate). Sweeping the leading edge moves the NEUTRAL POINT aft
-    # instead: 38 deg -> SM 0.081, 46 deg -> 0.240, 54 deg -> 0.390.
-    "root_chord": 0.34,
-    "kink_eta": 0.3,
-    "kink_chord_frac": 0.62,
-    "tip_chord_frac": 0.4,
-    "sweep_le": 46.0,
-    "kink_sweep_le": 38.0,
-    "dihedral": 4.0,
-    "twist_kink": -1.0,
-    "twist_tip": -5.0,
-    "body_thickness": 1.9,
-    "batt_x": 0.14,
-    "reflex_deg": 3.5,
-    "camber_scale": 1.1,
-}
-
-SEED_PHYSICAL = {
-    # A seed that FLIES at the working lattice, verified by a test. The
-    # previous one did not: it trimmed at 16x4 and, at the converged
-    # 32x8, its Cm never crossed zero anywhere in [-6, 12] deg. A seed
-    # that cannot trim teaches the first generations nothing, and the
-    # docstring below claimed otherwise for three runs.
-    "root_chord": 0.30, "kink_eta": 0.30, "kink_chord_frac": 0.62,
-    "tip_chord_frac": 0.28, "sweep_le": 38.0, "kink_sweep_le": 24.0,
-    "dihedral": 2.0, "twist_kink": -1.0, "twist_tip": -3.0,
-    "body_thickness": 1.85, "batt_x": 0.30,
-    "reflex_deg": 2.5, "camber_scale": 1.0,
-}
+# Seeds are OPTIONAL now. Earlier versions leaned on a hand-found seed
+# because the feasible set was hard to reach, and every geometry change
+# then invalidated it -- four times. With the 4-station planform and the
+# feasibility-dominant score, differential evolution finds feasibility on
+# its own from a random population; a seed only speeds that up. An empty
+# dict means "start from scratch", which is one less thing to keep true.
+SEEDS: dict[str, dict] = {}
+SEED_PHYSICAL: dict = {}
+TRAINER_SEED: dict = {}
 
 
 @dataclass
@@ -99,6 +70,7 @@ def run_search(
     ns: int = LATTICE_NS,
     nc: int = LATTICE_NC,
     workers: int = 1,
+    drag=None,
     out_dir: Path | None = None,
     verbose: bool = True,
     seed_physical: dict | None = None,
@@ -109,7 +81,7 @@ def run_search(
 
     def objective(u: np.ndarray) -> float:
         ev = evaluate(u, mission, base, settings, ns=ns, nc=nc,
-                      z_step_mm=search_z_step_mm)
+                      z_step_mm=search_z_step_mm, drag=drag)
         log.evaluations += 1
         log.feasible += int(ev.ok)
         if ev.ok and ev.score > log.best_feasible_score:
@@ -130,22 +102,18 @@ def run_search(
                       f"{ev.line()}", flush=True)
         return -ev.score
 
-    seed_u = np.clip(physical_to_unit(seed_physical or SEED_PHYSICAL), 0.0, 1.0)
     rng = np.random.default_rng(seed)
     n_pop = popsize * N_DIM
     init = rng.random((n_pop, N_DIM))
-    init[0] = seed_u
-    # a tight cloud around the seed keeps early generations near a wing
-    init[1:6] = np.clip(seed_u + 0.05 * rng.standard_normal((5, N_DIM)), 0, 1)
+    if seed_physical:
+        seed_u = np.clip(physical_to_unit(seed_physical), 0.0, 1.0)
+        init[0] = seed_u
+        init[1:6] = np.clip(seed_u + 0.05 * rng.standard_normal((5, N_DIM)), 0, 1)
 
     if verbose:
-        seed_ev = evaluate(seed_u, mission, base, settings, ns=ns, nc=nc,
-                           z_step_mm=search_z_step_mm)
-        print("seed design:", seed_ev.line().strip())
-        if seed_ev.reasons:
-            print("  seed issues:", "; ".join(seed_ev.reasons))
         print(f"searching {N_DIM} dimensions, population {n_pop}, "
-              f"maxiter {maxiter}\n")
+              f"maxiter {maxiter}, objective '{mission.objective}'"
+              + (", seeded" if seed_physical else ", from random") + "\n")
 
     res = differential_evolution(
         objective, bounds=[(0.0, 1.0)] * N_DIM, init=init, maxiter=maxiter,
@@ -159,7 +127,7 @@ def run_search(
     # same lattice as the search: the final verdict must be the same
     # calculation, only the print sampling gets refined to the real layer
     best = evaluate(best_u, mission, base, settings, ns=ns, nc=nc,
-                    want_panels=True)
+                    want_panels=True, drag=drag)
     if out_dir:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)

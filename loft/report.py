@@ -27,7 +27,7 @@ COOL = "#2c6fbb"
 
 
 def figure(ev, settings: vase.PrintSettings, path: str | Path,
-           title: str = "planeforge") -> Path:
+           title: str = "loft") -> Path:
     plan: Planform = ev.plan
     fig = plt.figure(figsize=(13.5, 8.5), facecolor="white")
     gs = fig.add_gridspec(2, 3, hspace=0.30, wspace=0.26)

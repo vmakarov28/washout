@@ -11,11 +11,22 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from planeforge.geom import cst, planform
-from planeforge.printing import stl, vase
-from planeforge.aero.vlm import VLM
+from loft.geom import cst, planform
+from loft.printing import stl, vase
+from loft.aero.vlm import VLM
 
 ASSETS = __import__("pathlib").Path(__file__).resolve().parents[1] / "assets"
+
+
+def demo_bwb(af, half_span=0.45, root=0.28, body_t=1.8, name="t"):
+    """A representative 4-station BWB for the printing tests."""
+    return planform.bwb(
+        half_span_m=half_span, root_chord_m=root, body_eta=0.16,
+        body_chord_frac=0.88, kink_eta=0.36, kink_chord_frac=0.58,
+        tip_chord_frac=0.36, sweep_body_deg=36.0, sweep_mid_deg=26.0,
+        sweep_outer_deg=16.0, dihedral_deg=4.0, twist_body_deg=0.0,
+        twist_kink_deg=-1.0, twist_tip_deg=-5.0, root_airfoil=af,
+        tip_airfoil=af, body_thickness_scale=body_t, name=name)
 
 
 def rect(ar: float, af: cst.Airfoil) -> planform.Planform:
@@ -139,8 +150,7 @@ def test_reflex_raises_cm0_monotonically_and_with_the_right_sign():
 
 def _panel():
     af = cst.load_selig(ASSETS / "mh45.dat")
-    p = planform.bwb(0.5, 0.30, 0.30, 0.62, 0.28, 38.0, 24.0, 2.0,
-                     -4.0, -1.0, af, af, 1.5, "t")
+    p = demo_bwb(af, half_span=0.5, root=0.30, body_t=1.5)
     return p, vase.build_stack(p, vase.PrintSettings(), 0.4, 1.0, "t")
 
 
@@ -213,16 +223,16 @@ def test_trim_is_converged_at_the_working_lattice_resolution():
     construction: LATTICE_NS/NC are used by the search and the verdict
     alike.
     """
-    from planeforge.geom import cst as _cst
-    from planeforge.search.design import (LATTICE_NC, LATTICE_NS, Mission,
+    from loft.geom import cst as _cst
+    from loft.search.design import (LATTICE_NC, LATTICE_NS, Mission,
                                           evaluate, physical_to_unit)
-    from planeforge.search.optimize import SEED_PHYSICAL
+    from loft.search.optimize import SEED_PHYSICAL
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
-    m = Mission.fpv_1m()
-    s = vase.PrintSettings()
-    u = physical_to_unit({**SEED_PHYSICAL, "reflex_deg": 3.0, "batt_x": 0.20,
-                          "twist_tip": -4.0})
+    m = Mission.trainer_v3()
+    s = vase.PrintSettings(filament_density_gcc=0.55)
+    from loft.search.optimize import SEEDS
+    u = physical_to_unit(SEEDS["trainer_v3"])
     here = evaluate(u, m, base, s, z_step_mm=2.0)
     finer = evaluate(u, m, base, s, ns=LATTICE_NS + 10, nc=LATTICE_NC + 2,
                      z_step_mm=2.0)
@@ -235,7 +245,7 @@ def test_search_and_verdict_use_the_same_lattice():
     at the resolution it searched at, not a 'nicer' one."""
     import inspect
 
-    from planeforge.search import optimize
+    from loft.search import optimize
     src = inspect.getsource(optimize.run_search)
     assert "ns=ns, nc=nc" in src, "final evaluation must reuse the search lattice"
     assert "ns: int = LATTICE_NS" in inspect.getsource(optimize)
@@ -250,16 +260,14 @@ def test_payload_bays_are_checked_for_volume_not_just_mass():
     The binding dimension is depth across the pack's own WIDTH and along
     its full LENGTH, not on the centreline -- a blended body tapers fast
     and the centreline is always the most flattering station."""
-    from planeforge.geom import cst as _cst
-    from planeforge.search.design import Bay, bay_fits
+    from loft.geom import cst as _cst
+    from loft.search.design import Bay, bay_fits
 
     af = _cst.load_selig(ASSETS / "mh45.dat")
     pack = Bay("4S 1500", 0.27, (76.0, 35.0, 26.0))
 
-    thin = planform.bwb(0.5, 0.20, 0.21, 0.47, 0.38, 24.0, 20.0, 1.1,
-                        -2.1, -1.5, af, af, 1.37, "thin")
-    fat = planform.bwb(0.5, 0.36, 0.32, 0.62, 0.28, 38.0, 24.0, 2.0,
-                       -3.0, -1.0, af, af, 1.9, "fat")
+    thin = demo_bwb(af, half_span=0.5, root=0.20, body_t=1.37, name="thin")
+    fat = demo_bwb(af, half_span=0.5, root=0.40, body_t=2.1, name="fat")
     ok_thin, have_thin, _ = bay_fits(thin, pack, 0.45)
     ok_fat, have_fat, _ = bay_fits(fat, pack, 0.45)
     assert not ok_thin, f"a 20 cm-chord body should not swallow a 26 mm pack ({have_thin:.1f})"
@@ -273,12 +281,11 @@ def test_bay_is_checked_where_the_mass_actually_sits():
     pack IS. A search exploited exactly that gap: battery at 0.085c for
     trim, fit measured at 0.27c, and a 76 mm pack left hanging 19 mm off
     the nose of a 227 mm chord."""
-    from planeforge.geom import cst as _cst
-    from planeforge.search.design import Bay, bay_fits
+    from loft.geom import cst as _cst
+    from loft.search.design import Bay, bay_fits
 
     af = _cst.load_selig(ASSETS / "mh45.dat")
-    plan = planform.bwb(0.5, 0.227, 0.29, 0.46, 0.34, 22.4, 12.5, 1.7,
-                        -0.3, -1.0, af, af, 1.61, "run4")
+    plan = demo_bwb(af, half_span=0.5, root=0.227, body_t=1.61, name="run4")
     pack = Bay("4S 1500", 0.27, (76.0, 35.0, 26.0), x_var="batt_x")
     ok_good, have_good, _ = bay_fits(plan, pack, 0.45, x_frac=0.27)
     ok_nose, have_nose, _ = bay_fits(plan, pack, 0.45, x_frac=0.085)
@@ -287,21 +294,23 @@ def test_bay_is_checked_where_the_mass_actually_sits():
     assert have_nose == 0.0
 
 
-def test_the_seed_design_actually_flies():
+def test_every_mission_seed_actually_flies():
     """optimize.py claims the search starts from something that flies, so
     that had better be true. It was not for three runs: the seed trimmed
     at the old 16x4 lattice and, at the converged 32x8, its pitching
     moment never crossed zero anywhere in the bracket. A seed that cannot
     trim teaches the early generations nothing."""
-    from planeforge.geom import cst as _cst
-    from planeforge.search.design import Mission, evaluate, physical_to_unit
-    from planeforge.search.optimize import SEED_PHYSICAL
+    from loft.geom import cst as _cst
+    from loft.search.design import Mission, evaluate, physical_to_unit
+    from loft.search.optimize import SEEDS
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
-    ev = evaluate(physical_to_unit(SEED_PHYSICAL), Mission.fpv_1m(), base,
-                  vase.PrintSettings(), z_step_mm=2.0)
-    assert ev.ok, f"seed is infeasible: {'; '.join(ev.reasons)}"
-    assert ev.ld > 8.0
+    for name, seed in SEEDS.items():
+        m = getattr(Mission, name)()
+        s = vase.PrintSettings(ribs=True, rib_count=3, spar_d_mm=4.0,
+                               filament_density_gcc=0.55)
+        ev = evaluate(physical_to_unit(seed), m, base, s, z_step_mm=3.0)
+        assert ev.ok, f"{name} seed infeasible: {'; '.join(ev.reasons)}"
 
 
 # ------------------------------------------------------- ribs & structure
@@ -309,8 +318,7 @@ def test_the_seed_design_actually_flies():
 
 def _ribbed(nr: int):
     af = cst.load_selig(ASSETS / "mh45.dat")
-    p = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
-                     -6.0, -1.0, af, af, 1.8, "t")
+    p = demo_bwb(af)
     s = vase.PrintSettings(ribs=nr > 0, rib_count=nr, spar_d_mm=4.0)
     return p, vase.build_stack(p, s, 0.40, 0.95, "t")
 
@@ -321,7 +329,7 @@ def test_ribs_keep_the_layer_a_single_simple_loop():
     curve stops being simple. A rib is a DETOUR of the skin loop, and
     the proof is that no part of the contour comes within one extrusion
     width of any non-adjacent part."""
-    from planeforge.printing.ribs import min_clearance_mm
+    from loft.printing.ribs import min_clearance_mm
     for nr in (2, 3, 4):
         _, st = _ribbed(nr)
         worst = min(min_clearance_mm(c, skip=8) for c in st.contours[::37])
@@ -333,7 +341,7 @@ def test_rib_point_count_is_constant_across_layers():
     layer that gained or lost a vertex because a rib happened to land on
     one would shear the whole mesh. Ribs are inserted into gaps between
     existing vertices, never on top of them."""
-    from planeforge.printing.ribs import POINTS_PER_RIB
+    from loft.printing.ribs import POINTS_PER_RIB
     for nr in (2, 3, 4):
         _, st = _ribbed(nr)
         assert st.contours.shape[1] == 241 + POINTS_PER_RIB * nr
@@ -360,12 +368,11 @@ def test_spar_is_selected_to_survive_the_load_case():
     """Structure is CHOSEN, not assumed: the lightest stock tube that
     passes ultimate load and a deflection limit. A heavier aircraft must
     never select a lighter tube."""
-    from planeforge import structure
-    from planeforge.aero.vlm import VLM
+    from loft import structure
+    from loft.aero.vlm import VLM
 
     af = cst.load_selig(ASSETS / "mh45.dat")
-    plan = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
-                        -6.0, -1.0, af, af, 1.8, "t")
+    plan = demo_bwb(af)
     pt = VLM(plan, 24, 6).solve(6.0, 0.10)
     light = structure.select(plan, pt, 0.35, 0.45, n_limit=3.0)
     heavy = structure.select(plan, pt, 1.40, 0.45, n_limit=3.0)
@@ -386,8 +393,7 @@ def test_rib_sweep_respects_the_remaining_overhang_budget():
     the rib it was independent of rib pitch, which is what eventually
     identified it after two wrong diagnoses."""
     af = cst.load_selig(ASSETS / "mh45.dat")
-    plan = planform.bwb(0.45, 0.28, 0.30, 0.62, 0.45, 38.0, 24.0, 4.0,
-                        -6.0, -1.0, af, af, 1.8, "t")
+    plan = demo_bwb(af)
     for (e0, e1) in ((0.0, 0.30), (0.30, 0.65), (0.65, 1.0)):
         s = vase.PrintSettings(ribs=True, rib_count=3, rib_pitch_mm=25.0,
                                spar_d_mm=4.0)

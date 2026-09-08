@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 import numpy as np
+from scipy.interpolate import PchipInterpolator
 
 from .cst import Airfoil, blend
 
@@ -41,6 +42,21 @@ class Planform:
     half_span_m: float
     stations: tuple[Station, ...]
     name: str = "bwb"
+    smooth: bool = True
+    """Interpolate between stations with a monotone cubic (PCHIP) rather
+    than straight lines.
+
+    This is what turns a polygon into an aircraft. Linear interpolation
+    puts a CREASE at every station: the leading edge kinks, the chord
+    distribution has corners, and the lofted skin carries a visible facet
+    down the span at each one. A blended wing body is defined by NOT
+    doing that -- the body has to flow into the wing.
+
+    PCHIP specifically, not a natural cubic spline, because it is
+    shape-preserving: it will not overshoot between stations. A spline
+    fitted through a fast chord taper happily returns a NEGATIVE chord
+    just outboard of the body, and the optimizer would find that hole
+    within a few hundred evaluations."""
 
     def __post_init__(self) -> None:
         etas = [s.eta for s in self.stations]
@@ -48,24 +64,56 @@ class Planform:
             raise ValueError("stations must span eta = 0 .. 1")
         if any(b <= a for a, b in zip(etas, etas[1:])):
             raise ValueError("station etas must strictly increase")
+        object.__setattr__(self, "_interp", None)
+
+    def _lofter(self):
+        """Build (once) the interpolators over every station quantity.
+
+        Everything is interpolated in one array -- planform numbers AND
+        the CST coefficients -- so the section morphs with exactly the
+        same smoothness as the chord does. Built lazily and cached
+        because `at()` is called tens of thousands of times per search
+        and rebuilding a PCHIP each time dominated the profile."""
+        cache = object.__getattribute__(self, "_interp")
+        if cache is not None:
+            return cache
+        st = self.stations
+        etas = np.array([s.eta for s in st])
+        n_c = len(st[0].airfoil.au)
+        rows = []
+        for s_ in st:
+            rows.append(np.concatenate([
+                [s_.chord_m, s_.x_le_m, s_.z_le_m, s_.twist_deg],
+                s_.airfoil.au, s_.airfoil.al,
+                [s_.airfoil.te_gap, s_.airfoil.te_camber]]))
+        data = np.array(rows)
+        if self.smooth and len(st) >= 3:
+            f = PchipInterpolator(etas, data, axis=0, extrapolate=True)
+        else:
+            def f(e, _e=etas, _d=data):
+                return np.array([np.interp(e, _e, _d[:, k])
+                                 for k in range(_d.shape[1])])
+        cache = (f, n_c)
+        object.__setattr__(self, "_interp", cache)
+        return cache
 
     # ---------------------------------------------------------------- loft
 
     def at(self, eta: float) -> Station:
         """The interpolated station at any span fraction."""
         eta = float(np.clip(eta, 0.0, 1.0))
-        st = self.stations
-        j = int(np.searchsorted([s.eta for s in st], eta, side="right"))
-        j = min(max(j, 1), len(st) - 1)
-        a, b = st[j - 1], st[j]
-        t = (eta - a.eta) / (b.eta - a.eta)
+        f, n_c = self._lofter()
+        v = np.asarray(f(eta)).ravel()
+        au = v[4:4 + n_c]
+        al = v[4 + n_c:4 + 2 * n_c]
         return Station(
             eta=eta,
-            chord_m=(1 - t) * a.chord_m + t * b.chord_m,
-            x_le_m=(1 - t) * a.x_le_m + t * b.x_le_m,
-            z_le_m=(1 - t) * a.z_le_m + t * b.z_le_m,
-            twist_deg=(1 - t) * a.twist_deg + t * b.twist_deg,
-            airfoil=blend(a.airfoil, b.airfoil, t),
+            chord_m=float(max(v[0], 1e-4)),
+            x_le_m=float(v[1]),
+            z_le_m=float(v[2]),
+            twist_deg=float(v[3]),
+            airfoil=Airfoil(au=au, al=al, te_gap=float(v[-2]),
+                            te_camber=float(v[-1]), name="lofted"),
         )
 
     def section_3d(self, eta: float, n: int = 121) -> np.ndarray:
@@ -179,44 +227,64 @@ class Planform:
 def bwb(
     half_span_m: float,
     root_chord_m: float,
+    body_eta: float,
+    body_chord_frac: float,
     kink_eta: float,
     kink_chord_frac: float,
     tip_chord_frac: float,
-    sweep_le_deg: float,
-    kink_sweep_le_deg: float,
+    sweep_body_deg: float,
+    sweep_mid_deg: float,
+    sweep_outer_deg: float,
     dihedral_deg: float,
-    twist_tip_deg: float,
+    twist_body_deg: float,
     twist_kink_deg: float,
+    twist_tip_deg: float,
     root_airfoil: Airfoil,
     tip_airfoil: Airfoil,
     body_thickness_scale: float = 1.6,
+    blend_thickness_scale: float | None = None,
     name: str = "bwb",
 ) -> Planform:
-    """Three-station blended wing body: thick body, blend kink, thin tip.
+    """Four-station blended wing body: centre body, body edge, kink, tip.
 
-    Three stations is a deliberate floor, not a limitation of the loft.
-    It is the smallest set that can express the shape a BWB actually
-    needs -- a fat centre body, a fast chord taper through the blend,
-    and a clean outer panel -- while keeping the design vector short
-    enough that a few hundred CFD-informed evaluations can search it.
+    Four rather than three, and it matters. Three stations can express a
+    fat middle and a thin tip but not the SHAPE of the transition between
+    them, so the body met the wing at a corner and the optimizer had to
+    choose between a thick body and a clean blend. A separate body-edge
+    station lets the centre section hold its depth out to `body_eta` and
+    then taper, which is what a blended wing body actually looks like --
+    and with the PCHIP loft the leading edge comes out as a continuous
+    curve rather than three straight segments.
+
+    Sweep is given per segment as an angle, which keeps the parameters
+    interpretable; the loft turns them into a smooth curve anyway.
     """
+    if not (0.0 < body_eta < kink_eta < 1.0):
+        raise ValueError(f"need 0 < body_eta {body_eta} < kink_eta {kink_eta} < 1")
+
+    y_body = body_eta * half_span_m
     y_kink = kink_eta * half_span_m
-    x_le_kink = y_kink * np.tan(np.radians(sweep_le_deg))
-    x_le_tip = x_le_kink + (half_span_m - y_kink) * np.tan(
-        np.radians(kink_sweep_le_deg))
+    x_body = y_body * np.tan(np.radians(sweep_body_deg))
+    x_kink = x_body + (y_kink - y_body) * np.tan(np.radians(sweep_mid_deg))
+    x_tip = x_kink + (half_span_m - y_kink) * np.tan(np.radians(sweep_outer_deg))
     tan_dih = np.tan(np.radians(dihedral_deg))
 
+    blend_scale = (blend_thickness_scale if blend_thickness_scale is not None
+                   else 1.0 + 0.75 * (body_thickness_scale - 1.0))
     body = root_airfoil.scaled_thickness(body_thickness_scale)
-    mid = blend(root_airfoil, tip_airfoil, 0.5).scaled_thickness(
-        1.0 + 0.5 * (body_thickness_scale - 1.0))
+    edge = root_airfoil.scaled_thickness(blend_scale)
+    mid = blend(root_airfoil, tip_airfoil, 0.6).scaled_thickness(
+        1.0 + 0.30 * (body_thickness_scale - 1.0))
 
     return Planform(
         half_span_m=half_span_m,
         stations=(
-            Station(0.0, root_chord_m, 0.0, 0.0, 0.0, body),
-            Station(kink_eta, root_chord_m * kink_chord_frac, x_le_kink,
+            Station(0.0, root_chord_m, 0.0, 0.0, twist_body_deg, body),
+            Station(body_eta, root_chord_m * body_chord_frac, x_body,
+                    y_body * tan_dih, twist_body_deg, edge),
+            Station(kink_eta, root_chord_m * kink_chord_frac, x_kink,
                     y_kink * tan_dih, twist_kink_deg, mid),
-            Station(1.0, root_chord_m * tip_chord_frac, x_le_tip,
+            Station(1.0, root_chord_m * tip_chord_frac, x_tip,
                     half_span_m * tan_dih, twist_tip_deg, tip_airfoil),
         ),
         name=name,

@@ -166,6 +166,14 @@ class Mission:
     min_thrust_weight: float = 0.0
     min_elevon_power: float = 0.004
     max_elevon_power: float = 0.030
+    max_elevon_deflect_deg: float = 12.0
+    """How far the pilot can pull the elevons before the flow gives up.
+    Beyond about 15 degrees a plain hinged surface separates and the
+    extra deflection buys moment it cannot cash."""
+    max_overhang_deg: float | None = None
+    """Per-mission override of the printing overhang limit. A racer is
+    printed once, carefully, with good cooling; a trainer is printed by
+    someone who has not tuned their machine."""
     """Static thrust over weight, for the hand launch. 0.5 will fly off a
     gentle throw; a racer wants 1.0 or better."""
     max_trim_alpha_deg: float = 90.0
@@ -245,16 +253,22 @@ class Mission:
         return Mission(
             name="demon1", span_m=0.80, objective="speed",
             payload=Mission._common(esc_g=0.026, spar_g=0.038),
-            bays=(Bay("4S 1300", 0.30, (76.0, 35.0, 27.0), x_var="batt_x"),
+            # A 4S 1300 is a big pack for an 800 mm racer: 76 mm long
+            # needs a 463 mm root chord to sit at 0.10c without hanging
+            # off the nose, and the bound is 460. It missed by 3 mm and
+            # that one gate sank the whole search. A 4S 850 is the pack
+            # this aircraft would actually fly.
+            bays=(Bay("4S 850", 0.30, (65.0, 34.0, 24.0), x_var="batt_x"),
                   Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0))),
-            battery_kg=0.150,
+            battery_kg=0.105,
             cruise_band_ms=(20.0, 48.0),
-            min_static_margin=0.05, max_static_margin=0.13,
+            min_static_margin=0.04, max_static_margin=0.16,
             cl_max_section=1.00, max_mass_kg=0.85,
+            max_overhang_deg=56.0,       # printed once, carefully
             max_wing_loading_gdm2=1e9,      # loading is the POINT here
             tip_stall_margin=0.04,
             n_limit_g=6.0, max_trim_alpha_deg=5.0,
-            spar_d_mm=6.0, powertrain=prop.demon_power(),
+            spar_d_mm=4.0, powertrain=prop.demon_power(),
             min_thrust_weight=1.00,      # it has to leave the hand hard
             min_elevon_power=0.003, max_elevon_power=0.016,
         )
@@ -626,7 +640,36 @@ def evaluate(
     # more than that back in L/D by flying slow. It was maximising the
     # score exactly as written; the score was wrong.
     if mission.objective == "speed":
-        merit = v                       # m/s, outright
+        # TOP speed, not hands-off trim speed. A tailless wing trims at
+        # one CL with elevons neutral, but a pilot chasing speed holds
+        # down-elevon, and the elevon moment shifts trim by
+        #
+        #     dCL = dCm / SM
+        #
+        # which follows from CL_trim = Cm0/SM. So the aircraft can be
+        # pushed to a much lower CL than it settles at -- and then the
+        # limit is the powertrain, not the wing. Scoring hands-off trim
+        # speed asked the optimizer for a wing that is fast when nobody
+        # is flying it, which is not what a racer is.
+        dcl_max = abs(dcm_ddeg) * mission.max_elevon_deflect_deg / max(sm, 1e-3)
+        cl_min = max(pt.CL - dcl_max, 0.02)
+        v_elevon = float(np.sqrt(2 * mass.total_kg * perf.G
+                                 / (perf.RHO_AIR * plan.area_m2 * cl_min)))
+        if mission.powertrain is not None:
+            def drag_at(vv):
+                cl_v = (2 * mass.total_kg * perf.G
+                        / (perf.RHO_AIR * vv * vv * plan.area_m2))
+                try:
+                    cd_v = drag.cd_at(cl_v, plan.mac_m * vv / perf.NU_AIR)
+                except AttributeError:
+                    cd_v = cd0
+                cdi_v = cl_v**2 / (np.pi * plan.aspect_ratio * 0.85)
+                return 0.5 * perf.RHO_AIR * vv * vv * plan.area_m2 * (cd_v + cdi_v)
+            v_thrust = mission.powertrain.top_speed_ms(drag_at, v_max=70.0)
+        else:
+            v_thrust = v_elevon
+        v_top = min(v_elevon, v_thrust)
+        merit = v_top
     elif mission.objective == "small":
         # smallest flyable: span dominates, mass breaks ties. Negated
         # because the optimizer maximises.

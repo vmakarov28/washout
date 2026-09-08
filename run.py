@@ -12,6 +12,19 @@ reported by its numbers and rebuilt from them.
 
 from __future__ import annotations
 
+# One BLAS thread per process, set before numpy is imported.
+#
+# The searches are run several at a time and each one's numpy tries to
+# use all 24 cores for its 512x512 AIC inverse. Oversubscribed, that
+# inverse took 7.05 SECONDS instead of milliseconds and was half of every
+# design evaluation. Single-threaded, the processes stop fighting and the
+# machine runs one search per core instead of three searches per machine.
+import os
+
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import argparse
 import json
 import sys
@@ -159,9 +172,11 @@ def main() -> int:
     if a.span is not None:
         mission = Mission(**{**mission.__dict__, "span_m": a.span})
     settings = print_settings(a)
-    if a.spar == 6.0:            # CLI default: defer to the mission's spar
-        settings = vase.PrintSettings(**{**settings.__dict__,
-                                         "spar_d_mm": mission.spar_d_mm})
+    over = {"spar_d_mm": mission.spar_d_mm} if a.spar == 6.0 else {}
+    if mission.max_overhang_deg is not None:
+        over["max_overhang_deg"] = mission.max_overhang_deg
+    if over:
+        settings = vase.PrintSettings(**{**settings.__dict__, **over})
     a.out.mkdir(parents=True, exist_ok=True)
 
     if a.command == "seed":

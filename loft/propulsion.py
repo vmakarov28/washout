@@ -187,6 +187,7 @@ PACKS = {
     "2S 450": Battery("2S 450", 2, 0.45, 0.028),
     "3S 1300": Battery("3S 1300", 3, 1.30, 0.110),
     "4S 1300": Battery("4S 1300", 4, 1.30, 0.150),
+    "4S 850": Battery("4S 850", 4, 0.85, 0.105),
 }
 
 
@@ -198,7 +199,7 @@ def trainer_power() -> Powertrain:
 
 def demon_power() -> Powertrain:
     # high pitch: thrust has to survive to 30 m/s and beyond
-    return Powertrain(M2205, Propeller(5.0, 5.0), PACKS["4S 1300"])
+    return Powertrain(M2205, Propeller(5.0, 5.0), PACKS["4S 850"])
 
 
 def micro_power() -> Powertrain:

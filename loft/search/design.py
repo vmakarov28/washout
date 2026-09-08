@@ -25,10 +25,13 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from ..geom.cst import Airfoil, deflect_te, scale_camber
+from ..geom.cst import (Airfoil, deflect_te, flap_effectiveness,
+                        scale_camber, scale_thickness_ratio,
+                        set_thickness_peak)
 from ..geom.planform import Planform, bwb
 from ..printing import vase
 from ..aero import performance as perf
+from .. import propulsion as prop
 from ..aero.vlm import VLM
 
 
@@ -154,6 +157,17 @@ class Mission:
     lets go first, the nose drops, and the aircraft recovers itself.
     This is the most important safety property in the whole file."""
     n_limit_g: float = 3.5
+    spar_d_mm: float = 4.0
+    """Spar the bore gate must clear. Belongs to the MISSION: micro's
+    tip panel is a few millimetres thick and cannot swallow the 4 mm tube
+    a 900 mm trainer wants, which is the single gate that rejected an
+    otherwise complete 363 mm aeroplane."""
+    powertrain: object | None = None
+    min_thrust_weight: float = 0.0
+    min_elevon_power: float = 0.004
+    max_elevon_power: float = 0.030
+    """Static thrust over weight, for the hand launch. 0.5 will fly off a
+    gentle throw; a racer wants 1.0 or better."""
     max_trim_alpha_deg: float = 90.0
     """Cap on the angle of attack the aircraft settles at, hands off.
 
@@ -210,6 +224,9 @@ class Mission:
             cl_max_section=0.85, max_mass_kg=0.50,
             max_wing_loading_gdm2=26.0, tip_stall_margin=0.12,
             n_limit_g=3.0, max_trim_alpha_deg=8.0,
+            spar_d_mm=4.0, powertrain=prop.trainer_power(),
+            min_thrust_weight=0.55,
+            min_elevon_power=0.004, max_elevon_power=0.022,
         )
 
     @staticmethod
@@ -237,6 +254,9 @@ class Mission:
             max_wing_loading_gdm2=1e9,      # loading is the POINT here
             tip_stall_margin=0.04,
             n_limit_g=6.0, max_trim_alpha_deg=5.0,
+            spar_d_mm=6.0, powertrain=prop.demon_power(),
+            min_thrust_weight=1.00,      # it has to leave the hand hard
+            min_elevon_power=0.003, max_elevon_power=0.016,
         )
 
     @staticmethod
@@ -261,6 +281,13 @@ class Mission:
             cl_max_section=0.90, max_mass_kg=0.22,
             max_wing_loading_gdm2=42.0, tip_stall_margin=0.08,
             n_limit_g=4.0, max_trim_alpha_deg=9.0,
+            # 2.5 mm carbon ROD, not a tube: micro's tip panel is a few
+            # millimetres thick and the 4 mm tube a 900 mm trainer wants
+            # is the single gate that rejected an otherwise complete
+            # 363 mm aeroplane.
+            spar_d_mm=2.5, powertrain=prop.micro_power(),
+            min_thrust_weight=0.75,
+            min_elevon_power=0.004, max_elevon_power=0.026,
         )
 
     @staticmethod
@@ -305,6 +332,17 @@ PLANFORM_BOUNDS = (
 SECTION_BOUNDS = (
     Bound("reflex_deg", -1.0, 9.0, "deg"),
     Bound("camber_scale", 0.30, 1.70, "x"),
+    # The SHAPE of the section, not just its camber. t/c trades drag
+    # against internal volume and spar depth; the thickness peak trades a
+    # gentle stall (forward) against lower drag and a deeper bay aft.
+    Bound("t_over_c", 0.075, 0.165, ""),
+    Bound("x_tmax", 0.20, 0.44, "c"),
+    # Elevons. Checked as a CONSTRAINT rather than assumed: a 25% chord
+    # elevon already recovers ~60% of the section lift slope, so a few
+    # degrees moves trim a long way, and too much authority is twitchy
+    # rather than safe.
+    Bound("elevon_chord", 0.16, 0.34, "c"),
+    Bound("elevon_eta", 0.30, 0.72, ""),
 )
 BATTERY_NAME = "battery"
 
@@ -325,7 +363,9 @@ def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
     """Design vector -> planform. Total function: every u in [0,1]^n
     produces geometry, valid or not. Validity is judged, not assumed."""
     p = unit_to_physical(u)
-    tip = deflect_te(scale_camber(base, p["camber_scale"]), p["reflex_deg"])
+    sec = scale_thickness_ratio(base, p["t_over_c"])
+    sec = set_thickness_peak(sec, p["x_tmax"])
+    tip = deflect_te(scale_camber(sec, p["camber_scale"]), p["reflex_deg"])
     span = p["span_m"] if mission.span_free else mission.span_m
     body_eta = p["body_eta"]
     kink_eta = body_eta + p["kink_gap"] * (1.0 - body_eta)
@@ -501,6 +541,49 @@ def evaluate(
         reasons.append(f"trims at {alpha:.1f} deg, over "
                        f"{mission.max_trim_alpha_deg:.0f} deg")
         penalty += 6.0 * (alpha - mission.max_trim_alpha_deg)
+
+    # --- can the powertrain actually hold this speed? ---
+    if mission.powertrain is not None:
+        drag_n = 0.5 * perf.RHO_AIR * v * v * plan.area_m2 * cd
+        thrust_n = mission.powertrain.power_limited_thrust_n(v)
+        if thrust_n < drag_n:
+            reasons.append(
+                f"needs {drag_n/perf.G*1000:.0f} gf at {v:.1f} m/s, "
+                f"powertrain gives {thrust_n/perf.G*1000:.0f}")
+            penalty += 25.0 * (drag_n - thrust_n) / max(drag_n, 1e-6)
+        tw = (mission.powertrain.power_limited_thrust_n(0.0)
+              / (mass.total_kg * perf.G))
+        if tw < mission.min_thrust_weight:
+            reasons.append(f"static thrust/weight {tw:.2f} below "
+                           f"{mission.min_thrust_weight:.2f}")
+            penalty += 20.0 * (mission.min_thrust_weight - tw)
+
+    # --- elevon authority: enough to trim, not so much it is twitchy ---
+    # Analytic rather than a second lattice solve: the flap-effectiveness
+    # tau is a closed-form thin-aerofoil result and a VLM rebuild would
+    # double the cost of every evaluation.
+    tau = flap_effectiveness(p_vec["elevon_chord"])
+    e_start = p_vec["elevon_eta"]
+    ele_area = 0.0
+    ele_arm = 0.0
+    for e_lo, e_hi in zip(np.linspace(e_start, 1.0, 9)[:-1],
+                          np.linspace(e_start, 1.0, 9)[1:]):
+        st_e = plan.at(0.5 * (e_lo + e_hi))
+        dA = st_e.chord_m * p_vec["elevon_chord"] * (e_hi - e_lo) * plan.half_span_m
+        x_e = st_e.x_le_m + (1.0 - 0.5 * p_vec["elevon_chord"]) * st_e.chord_m
+        ele_area += dA
+        ele_arm += dA * (x_e - mass.x_cg_m)
+    ele_arm = ele_arm / max(ele_area, 1e-9)
+    # dCm per degree of elevon, both surfaces
+    dcm_ddeg = (2.0 * ele_area / plan.area_m2) * (ele_arm / plan.mac_m)         * 2.0 * np.pi * tau * np.radians(1.0)
+    if abs(dcm_ddeg) < mission.min_elevon_power:
+        reasons.append(f"elevon dCm/ddeg {abs(dcm_ddeg):.4f} below "
+                       f"{mission.min_elevon_power:.4f}")
+        penalty += 40.0 * (mission.min_elevon_power - abs(dcm_ddeg))
+    if abs(dcm_ddeg) > mission.max_elevon_power:
+        reasons.append(f"elevon dCm/ddeg {abs(dcm_ddeg):.4f} above "
+                       f"{mission.max_elevon_power:.4f} (twitchy)")
+        penalty += 20.0 * (abs(dcm_ddeg) - mission.max_elevon_power)
 
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:

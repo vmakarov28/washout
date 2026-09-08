@@ -67,6 +67,9 @@ class SparTube:
 # The tubes a hobbyist actually has. Sizing is a CHOICE FROM THIS LIST,
 # not a continuous optimum, because you cannot buy a 7.3 mm tube.
 STOCK_TUBES = (
+    SparTube(2.0, 0.0, "2mm rod"),
+    SparTube(2.5, 0.0, "2.5mm rod"),
+    SparTube(3.0, 1.5, "3x1.5"),
     SparTube(4.0, 2.0, "4x2"),
     SparTube(5.0, 3.0, "5x3"),
     SparTube(6.0, 4.0, "6x4"),

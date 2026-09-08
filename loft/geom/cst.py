@@ -266,3 +266,53 @@ def scale_camber(af: Airfoil, factor: float) -> Airfoil:
     loop = np.concatenate([np.stack([x, cam + 0.5 * t], 1)[::-1],
                            np.stack([x, cam - 0.5 * t], 1)[1:]], 0)
     return fit(loop, order=af.order, name=f"{af.name}*cam{factor:.2f}")
+
+
+def set_thickness_peak(af: Airfoil, x_target: float) -> Airfoil:
+    """Move the point of maximum thickness, keeping camber and t/c.
+
+    A power-law remap of the thickness distribution: t_new(x) = t(x^p).
+    The old peak at x0 lands at x0^(1/p), so p = ln(x0)/ln(x_target) puts
+    it exactly where asked. Monotone for any positive p, so the section
+    stays valid.
+
+    Worth having as a design variable because it is the knob that trades
+    the two things a printed wing cares about: forward peak gives a
+    fuller nose and gentler stall, aft peak gives lower drag and more
+    internal depth further back -- which is where the battery goes."""
+    x = cosine_x(300)
+    cam = af.camber(x)
+    t = af.thickness(x)
+    x0 = float(x[int(np.argmax(t))])
+    x_target = float(np.clip(x_target, 0.15, 0.55))
+    if not (1e-3 < x0 < 1.0) or abs(x0 - x_target) < 1e-4:
+        return af
+    p = np.log(x0) / np.log(x_target)
+    t_new = np.interp(np.clip(x**p, 0.0, 1.0), x, t)
+    loop = np.concatenate([np.stack([x, cam + 0.5 * t_new], 1)[::-1],
+                           np.stack([x, cam - 0.5 * t_new], 1)[1:]], 0)
+    return fit(loop, order=af.order, name=f"{af.name}@xt{x_target:.2f}")
+
+
+def scale_thickness_ratio(af: Airfoil, t_over_c: float) -> Airfoil:
+    """Set the thickness ratio outright, leaving camber alone."""
+    cur = af.t_max
+    if cur < 1e-6:
+        return af
+    return af.scaled_thickness(float(t_over_c) / cur)
+
+
+def flap_effectiveness(chord_frac: float) -> float:
+    """Thin-aerofoil flap effectiveness tau: dcl/ddelta = a0 * tau.
+
+    tau = 1 - (theta - sin theta)/pi,  theta = acos(2 Ef - 1)
+
+    The classical result, and the reason elevons are so powerful on a
+    flying wing: a 25% chord elevon already recovers about half the
+    section's full lift slope, so a few degrees moves the trim point a
+    long way. That is worth checking as a CONSTRAINT rather than
+    assuming -- a wing with too much elevon authority is not safe, it is
+    twitchy."""
+    e = float(np.clip(chord_frac, 0.02, 0.6))
+    theta = np.arccos(2.0 * e - 1.0)
+    return float(1.0 - (theta - np.sin(theta)) / np.pi)

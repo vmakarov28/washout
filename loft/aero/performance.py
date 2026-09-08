@@ -290,3 +290,57 @@ class MeasuredDrag:
         contrib = np.array([self.cd_at_cl(float(c)) for c in cl_loc]) * chord
         y = e * plan.half_span_m
         return float(2.0 * np.trapezoid(contrib, y) / plan.area_m2)
+
+
+@dataclass
+class MultiRePolar:
+    """Measured drag interpolated in BOTH lift coefficient and Reynolds.
+
+    One polar is not enough for a fleet. The trainer's strips run near
+    Re 90k, micro's near 95k, demon1's past 200k, and a wing's own tip
+    sits at half the Reynolds number of its root. Charging every strip
+    the same curve -- which the single-polar MeasuredDrag does -- gets
+    the shape right and the level wrong wherever the aircraft is not the
+    one the polar was measured on.
+
+    Interpolation is linear in log(Re), which is how skin friction
+    actually scales, and CLAMPED at both ends: past the measured range
+    the honest answer is the nearest measured curve, not an
+    extrapolation into numbers the tunnel never produced.
+    """
+
+    polars: tuple                       # ((re, MeasuredDrag), ...) ascending
+    scale: float = 1.0
+
+    @staticmethod
+    def from_files(pairs) -> "MultiRePolar":
+        got = sorted(((float(re), MeasuredDrag.from_csv(path))
+                      for re, path in pairs), key=lambda t: t[0])
+        return MultiRePolar(tuple(got))
+
+    @property
+    def cd(self):
+        return np.concatenate([p.cd for _, p in self.polars])
+
+    def cd_at(self, cl_local: float, re: float) -> float:
+        res = np.array([r for r, _ in self.polars])
+        vals = np.array([p.cd_at_cl(cl_local) for _, p in self.polars])
+        if len(res) == 1:
+            return float(self.scale * vals[0])
+        lr = np.log(max(re, 1.0))
+        return float(self.scale * np.interp(lr, np.log(res), vals))
+
+    def cd0(self, plan, v_ms: float, n: int = 20, aero_point=None) -> float:
+        if aero_point is None:
+            return float(self.scale * min(p.cd.min() for _, p in self.polars))
+        eta = np.abs(aero_point.y_strip) / plan.half_span_m
+        order = np.argsort(eta)
+        e = eta[order]
+        cl_loc = aero_point.cl_local[order]
+        chord = aero_point.chord_strip[order]
+        # each strip at ITS OWN Reynolds number, from ITS OWN chord
+        re_loc = chord * v_ms / NU_AIR
+        contrib = np.array([self.cd_at(float(c), float(r))
+                            for c, r in zip(cl_loc, re_loc)]) * chord
+        return float(2.0 * np.trapezoid(contrib, e * plan.half_span_m)
+                     / plan.area_m2)

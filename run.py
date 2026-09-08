@@ -124,7 +124,7 @@ def main() -> int:
     ap.add_argument("--mission",
                     choices=["trainer_v3", "demon1", "micro", "fpv_1m"],
                     default="trainer_v3")
-    ap.add_argument("--polar", type=Path, default=None,
+    ap.add_argument("--polar", type=str, default=None,
                     help="measured LBM polar CSV; switches the search from "
                          "the flat tier-0 drag model to strip theory on real "
                          "data. Without it the optimizer is not charged for "
@@ -159,6 +159,9 @@ def main() -> int:
     if a.span is not None:
         mission = Mission(**{**mission.__dict__, "span_m": a.span})
     settings = print_settings(a)
+    if a.spar == 6.0:            # CLI default: defer to the mission's spar
+        settings = vase.PrintSettings(**{**settings.__dict__,
+                                         "spar_d_mm": mission.spar_d_mm})
     a.out.mkdir(parents=True, exist_ok=True)
 
     if a.command == "seed":
@@ -194,10 +197,23 @@ def main() -> int:
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
     drag = None
     if a.polar:
-        from loft.aero.performance import MeasuredDrag
-        drag = MeasuredDrag.from_csv(a.polar)
-        print(f"drag: measured polar {a.polar} "
-              f"(cd {drag.cd.min():.4f}..{drag.cd.max():.4f})")
+        from loft.aero.performance import MeasuredDrag, MultiRePolar
+        specs = []
+        for chunk in str(a.polar).split(","):
+            if "@" in chunk:                      # "path@Re"
+                path, re = chunk.rsplit("@", 1)
+                specs.append((float(re), Path(path)))
+            else:
+                specs.append((6.0e4, Path(chunk)))
+        if len(specs) > 1:
+            drag = MultiRePolar.from_files(specs)
+            print("drag: measured polars at Re "
+                  + ", ".join(f"{r:.0f}" for r, _ in drag.polars)
+                  + " -- each strip charged at its own chord Reynolds")
+        else:
+            drag = MeasuredDrag.from_csv(specs[0][1])
+            print(f"drag: measured polar {specs[0][1]} "
+                  f"(cd {drag.cd.min():.4f}..{drag.cd.max():.4f})")
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed, drag=drag,
                                    out_dir=a.out, seed_physical=SEEDS.get(a.mission))

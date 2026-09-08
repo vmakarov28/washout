@@ -144,13 +144,23 @@ class Powertrain:
         a 7 inch prop, and why every aircraft here uses a 5."""
         return float(np.pi * self.prop.d_m * self.rpm() / 60.0)
 
-    def top_speed_ms(self, drag_at: callable, v_max: float = 80.0) -> float:
-        """Where available thrust and drag cross. Bisection on
-        (thrust - drag), which is monotone decreasing over the range that
-        matters."""
+    def top_speed_ms(self, drag_at: callable, v_max: float = 80.0,
+                     v_lo: float = 1.0) -> float:
+        """Where available thrust and drag cross, going UP.
+
+        Excess thrust is NOT monotone and assuming it was cost a whole
+        search. Below stall the induced drag explodes, so excess is
+        negative; it turns positive through the middle of the envelope
+        and negative again at the top. Starting the bracket at 1 m/s
+        therefore hit `excess(lo) <= 0` and returned zero for every
+        design -- which made the speed objective perfectly flat, and
+        demon1's optimizer spent 4224 evaluations climbing nothing.
+
+        `v_lo` must be a speed the aircraft is known to fly at: pass its
+        trim speed, which by construction it holds."""
         def excess(v):
             return self.power_limited_thrust_n(v) - drag_at(v)
-        lo, hi = 1.0, v_max
+        lo, hi = max(v_lo, 1.0), v_max
         if excess(lo) <= 0:
             return 0.0
         if excess(hi) > 0:

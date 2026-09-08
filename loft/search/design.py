@@ -665,7 +665,10 @@ def evaluate(
                     cd_v = cd0
                 cdi_v = cl_v**2 / (np.pi * plan.aspect_ratio * 0.85)
                 return 0.5 * perf.RHO_AIR * vv * vv * plan.area_m2 * (cd_v + cdi_v)
-            v_thrust = mission.powertrain.top_speed_ms(drag_at, v_max=70.0)
+            # bracket from the trim speed: the aircraft demonstrably
+            # flies there, so excess thrust is positive by construction
+            v_thrust = mission.powertrain.top_speed_ms(
+                drag_at, v_max=70.0, v_lo=v)
         else:
             v_thrust = v_elevon
         v_top = min(v_elevon, v_thrust)

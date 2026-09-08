@@ -179,13 +179,34 @@ def main() -> int:
         settings = vase.PrintSettings(**{**settings.__dict__, **over})
     a.out.mkdir(parents=True, exist_ok=True)
 
+    # Build the drag model ONCE, before the command dispatch. It used to
+    # be constructed only inside the search branch, so `export` quietly
+    # fell back to the flat tier-0 model and reported L/D 12.63 for a
+    # design the search had scored at 7.62. Same design, two different
+    # physics, and the flattering one is the number that would have been
+    # handed over.
+    drag = None
+    if a.polar:
+        from loft.aero.performance import MeasuredDrag, MultiRePolar
+        specs = []
+        for chunk in str(a.polar).split(","):
+            if "@" in chunk:
+                path, re_ = chunk.rsplit("@", 1)
+                specs.append((float(re_), Path(path)))
+            else:
+                specs.append((6.0e4, Path(chunk)))
+        drag = (MultiRePolar.from_files(specs) if len(specs) > 1
+                else MeasuredDrag.from_csv(specs[0][1]))
+        print("drag: measured, Re "
+              + ", ".join(f"{r:.0f}" for r, _ in specs))
+
     if a.command == "seed":
         seed_phys = SEEDS.get(a.mission)
         if not seed_phys:
             print("no seed recorded for this mission")
             return 1
         ev = evaluate(physical_to_unit(seed_phys), mission, base, settings,
-                      want_panels=True)
+                      want_panels=True, drag=drag)
         print(report(ev, settings))
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons))
@@ -194,7 +215,7 @@ def main() -> int:
     if a.command == "export":
         d = json.loads((a.design or (a.out / "design.json")).read_text())
         u = np.array(d["u"])
-        ev = evaluate(u, mission, base, settings, want_panels=True)
+        ev = evaluate(u, mission, base, settings, want_panels=True, drag=drag)
         print(report(ev, settings))
         if ev.trim and not a.no_structure:
             st, settings = choose_structure(ev, mission, settings)
@@ -202,7 +223,8 @@ def main() -> int:
             print()
             # the spar just got chosen, so the bore gate must be re-run
             # against the tube we actually intend to slide in
-            ev = evaluate(u, mission, base, settings, want_panels=True)
+            ev = evaluate(u, mission, base, settings, want_panels=True,
+                          drag=drag)
             if ev.reasons:
                 print("after structure sizing:", "; ".join(ev.reasons), "\n")
         do_export(ev, settings, a.out)
@@ -210,25 +232,6 @@ def main() -> int:
 
     print(f"loft search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
-    drag = None
-    if a.polar:
-        from loft.aero.performance import MeasuredDrag, MultiRePolar
-        specs = []
-        for chunk in str(a.polar).split(","):
-            if "@" in chunk:                      # "path@Re"
-                path, re = chunk.rsplit("@", 1)
-                specs.append((float(re), Path(path)))
-            else:
-                specs.append((6.0e4, Path(chunk)))
-        if len(specs) > 1:
-            drag = MultiRePolar.from_files(specs)
-            print("drag: measured polars at Re "
-                  + ", ".join(f"{r:.0f}" for r, _ in drag.polars)
-                  + " -- each strip charged at its own chord Reynolds")
-        else:
-            drag = MeasuredDrag.from_csv(specs[0][1])
-            print(f"drag: measured polar {specs[0][1]} "
-                  f"(cd {drag.cd.min():.4f}..{drag.cd.max():.4f})")
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed, drag=drag,
                                    out_dir=a.out, seed_physical=SEEDS.get(a.mission))

@@ -57,7 +57,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--polar", type=Path, default=ROOT / "out/tunnel/polar.csv")
     ap.add_argument("--design", type=Path, default=None)
-    ap.add_argument("--mission", default="trainer")
+    ap.add_argument("--mission", default="trainer_v3")
     ap.add_argument("--airfoil", type=Path, default=ROOT / "assets/mh45.dat")
     ap.add_argument("--re", type=float, default=6.0e4)
     ap.add_argument("--out", type=Path, default=ROOT / "out/tunnel/polar.png")
@@ -69,8 +69,7 @@ def main() -> int:
     # the VLM's view of the SAME section, as a near-2D wing
     if a.design:
         d = json.loads(a.design.read_text())
-        mission = (Mission.beginner_trainer() if a.mission == "trainer"
-                   else Mission.fpv_1m())
+        mission = getattr(Mission, a.mission)()
         section = build(np.array(d["u"]), mission, base).at(0.5).airfoil
     else:
         section = base

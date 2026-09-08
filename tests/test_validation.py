@@ -231,8 +231,15 @@ def test_trim_is_converged_at_the_working_lattice_resolution():
     base = _cst.load_selig(ASSETS / "mh45.dat")
     m = Mission.trainer_v3()
     s = vase.PrintSettings(filament_density_gcc=0.55)
-    from loft.search.optimize import SEEDS
-    u = physical_to_unit(SEEDS["trainer_v3"])
+    # An explicit design, not whatever seed happens to be recorded: this
+    # test is about the LATTICE, so its geometry must not move when the
+    # optimizer's starting point does.
+    u = physical_to_unit(dict(
+        span_m=0.90, root_chord=0.30, body_eta=0.18, body_chord_frac=0.90,
+        kink_gap=0.35, kink_chord_frac=0.60, tip_chord_frac=0.35,
+        sweep_body=42.0, sweep_mid=30.0, sweep_outer=18.0, dihedral=5.0,
+        twist_body=0.0, twist_kink=-1.0, twist_tip=-4.0,
+        body_thickness=1.80, batt_x=0.20, reflex_deg=3.5, camber_scale=1.10))
     here = evaluate(u, m, base, s, z_step_mm=2.0)
     finer = evaluate(u, m, base, s, ns=LATTICE_NS + 10, nc=LATTICE_NC + 2,
                      z_step_mm=2.0)

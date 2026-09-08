@@ -116,7 +116,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--design", type=Path, default=None)
     ap.add_argument("--airfoil", type=Path, default=ROOT / "assets" / "mh45.dat")
-    ap.add_argument("--mission", default="trainer")
+    ap.add_argument("--mission", default="trainer_v3")
     ap.add_argument("--alphas", default="-2,0,2,4,6,8,10,12,14")
     ap.add_argument("--re", type=float, default=6.0e4,
                     help="60k is the trainer OUTER panel at 9 m/s -- where "
@@ -143,8 +143,7 @@ def main() -> int:
     base = cst.load_selig(a.airfoil)
     if a.design:
         d = json.loads(a.design.read_text())
-        mission = (Mission.beginner_trainer() if a.mission == "trainer"
-                   else Mission.fpv_1m())
+        mission = getattr(Mission, a.mission)()
         plan = build(np.array(d["u"]), mission, base)
         section = plan.at(0.5).airfoil          # the mid-span working section
         label = "trainer mid-span section"

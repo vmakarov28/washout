@@ -32,6 +32,7 @@ from ..geom.planform import Planform, bwb
 from ..printing import vase
 from ..aero import performance as perf
 from .. import propulsion as prop
+from .. import spars as sp
 from ..aero.vlm import VLM
 
 
@@ -157,6 +158,15 @@ class Mission:
     lets go first, the nose drops, and the aircraft recovers itself.
     This is the most important safety property in the whole file."""
     n_limit_g: float = 3.5
+    spars: tuple = ()
+    """Spanwise spars to fit. Empty means the old single-bore check."""
+    min_spar_reach_frac: float = 0.55
+    """How far along the half span the shortest spar must reach. The tip
+    panel is allowed to outrun it -- insisting a spar reach the tip would
+    force the whole wing thick to satisfy its thinnest tenth -- but the
+    outer JOINT has to be carried."""
+    motor: object | None = None
+    battery: object | None = None
     spar_d_mm: float = 4.0
     """Spar the bore gate must clear. Belongs to the MISSION: micro's
     tip panel is a few millimetres thick and cannot swallow the 4 mm tube
@@ -232,7 +242,10 @@ class Mission:
             cl_max_section=0.85, max_mass_kg=0.50,
             max_wing_loading_gdm2=26.0, tip_stall_margin=0.12,
             n_limit_g=3.0, max_trim_alpha_deg=8.0,
-            spar_d_mm=4.0, powertrain=prop.trainer_power(),
+            spar_d_mm=8.0, motor=prop.M2205, battery=prop.PACKS["3S 1300"],
+            spars=(sp.SparSpec("LE spar", 8.0, 0.12, 0.30),
+                   sp.SparSpec("TE spar", 8.0, 0.54, 0.74)),
+            powertrain=prop.trainer_power(),
             min_thrust_weight=0.55,
             min_elevon_power=0.004, max_elevon_power=0.022,
         )
@@ -268,7 +281,10 @@ class Mission:
             max_wing_loading_gdm2=1e9,      # loading is the POINT here
             tip_stall_margin=0.04,
             n_limit_g=6.0, max_trim_alpha_deg=5.0,
-            spar_d_mm=4.0, powertrain=prop.demon_power(),
+            spar_d_mm=8.0, motor=prop.M2205, battery=prop.PACKS["4S 850"],
+            spars=(sp.SparSpec("LE spar", 8.0, 0.12, 0.30),
+                   sp.SparSpec("TE spar", 8.0, 0.54, 0.74)),
+            powertrain=prop.demon_power(),
             min_thrust_weight=1.00,      # it has to leave the hand hard
             min_elevon_power=0.003, max_elevon_power=0.016,
         )
@@ -299,7 +315,10 @@ class Mission:
             # millimetres thick and the 4 mm tube a 900 mm trainer wants
             # is the single gate that rejected an otherwise complete
             # 363 mm aeroplane.
-            spar_d_mm=2.5, powertrain=prop.micro_power(),
+            spar_d_mm=8.0, motor=prop.M2205, battery=prop.PACKS["2S 450"],
+            spars=(sp.SparSpec("main spar", 8.0, 0.18, 0.40),),
+            powertrain=prop.micro_power(),
+            min_spar_reach_frac=0.45,
             min_thrust_weight=0.75,
             min_elevon_power=0.004, max_elevon_power=0.026,
         )
@@ -357,6 +376,11 @@ SECTION_BOUNDS = (
     # rather than safe.
     Bound("elevon_chord", 0.16, 0.34, "c"),
     Bound("elevon_eta", 0.30, 0.72, ""),
+    # The propeller. demon1's top speed is thrust-limited, so pitch is
+    # worth more to it than any change to the wing -- leaving it hardcoded
+    # meant the optimizer could not buy the one thing it most needed.
+    Bound("prop_diam_in", 4.0, 7.0, "in"),
+    Bound("prop_pitch_in", 2.5, 6.5, "in"),
 )
 BATTERY_NAME = "battery"
 
@@ -461,6 +485,16 @@ def evaluate(
     reasons: list[str] = []
     penalty = 0.0
     p_vec = unit_to_physical(u)
+    if mission.motor is not None and mission.battery is not None:
+        mission = replace(mission, powertrain=prop.Powertrain(
+            mission.motor,
+            prop.Propeller(p_vec["prop_diam_in"], p_vec["prop_pitch_in"]),
+            mission.battery))
+        if mission.powertrain.tip_speed_ms() > prop.MAX_TIP_SPEED_MS:
+            reasons.append(
+                f"prop tip {mission.powertrain.tip_speed_ms():.0f} m/s over "
+                f"{prop.MAX_TIP_SPEED_MS:.0f}")
+            penalty += 15.0
     try:
         plan = build(u, mission, base)
     except Exception as e:
@@ -469,6 +503,20 @@ def evaluate(
     good, why = plan.is_valid()
     if not good:
         return Evaluation(False, -1e6, reasons=(why,), plan=plan)
+
+    # Spar corridors first: the ribs have to be told where the spars go
+    # BEFORE the panels are built, because a chordwise web at a spar's
+    # station is a web through the spar.
+    joint_etas = vase.panel_etas(plan, settings)
+    spar_fits = []
+    if mission.spars:
+        spar_fits = sp.fit_all(plan, mission.spars,
+                               settings.extrusion_width_mm, joint_etas)
+        avoid = tuple((f.x_frac,
+                       0.6 * f.spec.d_mm
+                       / (plan.stations[0].chord_m * 1000.0))
+                      for f in spar_fits)
+        settings = replace(settings, spar_avoid=avoid)
 
     # --- printable? the shell mass comes out of this, so it runs early ---
     panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
@@ -555,6 +603,17 @@ def evaluate(
         reasons.append(f"trims at {alpha:.1f} deg, over "
                        f"{mission.max_trim_alpha_deg:.0f} deg")
         penalty += 6.0 * (alpha - mission.max_trim_alpha_deg)
+
+    # --- spar gates ---
+    for f in spar_fits:
+        if f.joints_blocked:
+            reasons.append(f"{f.spec.name}: joints too shallow at "
+                           + ",".join(f"{e:.2f}" for e in f.joints_blocked))
+            penalty += 30.0 * len(f.joints_blocked)
+        if f.reach_eta < mission.min_spar_reach_frac:
+            reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
+                           f"(need {mission.min_spar_reach_frac:.2f})")
+            penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
 
     # --- can the powertrain actually hold this speed? ---
     if mission.powertrain is not None:

@@ -66,6 +66,9 @@ class PrintSettings:
     rib_count: int = 3
     rib_pitch_mm: float = 30.0
     rib_clearance_factor: float = 1.10
+    spar_avoid: tuple = ()
+    """(centre, half_width) chord-fraction bands the ribs must keep out
+    of -- the spar corridors, from loft.spars."""
     """Rib slit and floor gap, as a multiple of extrusion width.
 
     One bead exactly is the physical requirement -- the beads must touch
@@ -234,7 +237,8 @@ def build_stack(
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
-                       enabled=settings.ribs)
+                       enabled=settings.ribs,
+                       avoid=tuple(settings.spar_avoid))
     if settings.ribs:
         # What the bare panel already spends of the overhang budget,
         # computed rather than measured. A contour point at chord

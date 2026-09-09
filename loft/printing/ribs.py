@@ -70,6 +70,15 @@ class RibSpec:
     x_first: float = 0.20
     x_last: float = 0.72
     enabled: bool = True
+    avoid: tuple = ()
+    """Chordwise bands the ribs must not enter, as (centre, half_width)
+    in chord fractions -- the spar corridors.
+
+    Ribs are chordwise webs running skin to skin, and they sweep with Z.
+    A spanwise tube at a fixed chord fraction is therefore GUARANTEED to
+    meet one somewhere unless the rib pattern is told where it is. This
+    is the whole of 'cut a spar hole': there is no hole, there is a
+    corridor the truss is not allowed to cross."""
 
     rate_mm_per_mm: float | None = None
     """Chordwise travel per mm of Z that the truss is allowed to use.
@@ -103,7 +112,26 @@ class RibSpec:
         phase = (z_mm / max(self.pitch_mm, 1e-6)) % 1.0
         tri = 4.0 * np.abs(phase - 0.5) - 1.0          # -1 .. +1
         sign = np.where(np.arange(self.n_ribs) % 2 == 0, 1.0, -1.0)
-        return base + sign * tri * amp_mm / max(chord_mm, 1e-6)
+        x = base + sign * tri * amp_mm / max(chord_mm, 1e-6)
+        return self._push_clear(x)
+
+    def _push_clear(self, x: np.ndarray) -> np.ndarray:
+        """Shove any rib that has wandered into a spar corridor out to the
+        nearer edge of it. Nudged rather than dropped, because the layer's
+        vertex count must stay constant -- the STL skinner joins layer k
+        index i to layer k+1 index i, and a layer that lost a rib would
+        shear the whole mesh."""
+        if not self.avoid:
+            return x
+        x = np.asarray(x, dtype=float).copy()
+        for c, half in self.avoid:
+            lo, hi = c - half, c + half
+            inside = (x > lo) & (x < hi)
+            if inside.any():
+                nearer_lo = np.abs(x - lo) <= np.abs(x - hi)
+                x = np.where(inside & nearer_lo, lo, x)
+                x = np.where(inside & ~nearer_lo, hi, x)
+        return x
 
 
 def segment_counts(n_up: int, n_seg: int) -> list[int]:

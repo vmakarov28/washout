@@ -1,5 +1,12 @@
 # What is left between here and a flying wing nobody touched
 
+> Two roadmaps, two axes. **This one is whether the numbers are true.**
+> [`ROADMAP-BUILD.md`](ROADMAP-BUILD.md) is whether the parts are
+> buildable without a CAD step. They meet in two places: opening a
+> battery bay destroys the closed torsion box that item 9's flutter
+> gate depends on, and the linkage gate there is what finally proves
+> the elevon deflection demon1's speed objective assumes.
+
 washout already goes from a 35-number design vector to STLs a slicer will
 print in spiral-vase mode, and judges the whole way with a lattice, a
 structural sizing, a stability analysis and a stack of printability and

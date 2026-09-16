@@ -4,6 +4,12 @@
   wing nobody touched, in value order, with the evidence for each item.
   Start here. It supersedes the old `next-session-prompt.md` and carries
   its hard constraints forward unchanged.
+- **[ROADMAP-BUILD.md](ROADMAP-BUILD.md)** — the other axis: everything
+  that has to exist before an export can be printed, assembled and flown
+  with no CAD step in between. Bays, hatches, hinges, servo pockets,
+  horns, mounts, wiring, FPV. Starts from the constraint that decides
+  every answer — one closed contour per layer — and classifies every
+  feature by what that constraint allows.
 - **[how-washout-designs-aircraft.html](how-washout-designs-aircraft.html)**
   — the long-form narrative: the pipeline, every model in it, and every
   bug found so far with what it cost. Open it in a browser.

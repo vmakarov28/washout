@@ -14,8 +14,11 @@
 #
 # micro is not rerun: gen4 micro_v92 already passes with ribs, and its
 # ribbed parts are in out/gen4/micro_v92_sized.
-cd "$(dirname "$0")/.." || exit 1
-POLAR="out/tunnel/polar.csv@60000,out/tunnel_re100/polar.csv@100000"
+cd "$(dirname "$0")/../.." || exit 1
+# The same two files as before, now tracked in the repo so a fresh clone
+# can run a measured-drag search. See data/polars/README.md: these are two
+# DIFFERENT sections, and the Re trend between them is partly thickness.
+POLAR="data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000"
 mkdir -p out/gen5
 
 declare -A SEED_DESIGN=(

@@ -1,0 +1,42 @@
+# The validation suite is the specification: every bug this project has
+# found is pinned there with the physical reason in its docstring. Run it
+# on every push, on the two Python versions the package claims to support.
+#
+# Numpy and scipy only -- the search deliberately has no CFD dependency,
+# which is exactly why it can be tested in CI at all. The tunnel rungs of
+# the fidelity ladder need CUDA and are not exercised here.
+name: gates
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+
+      - name: validation gates
+        run: python -m pytest -q
+
+      # End to end, on a design that is under version control: build ->
+      # lattice -> every gate -> spar and rib sizing -> panels -> STL. The
+      # unit tests exercise the modules; this exercises the pipeline, which
+      # is where this project's bugs actually live.
+      - name: export the tracked trainer, end to end
+        env:
+          DESIGN: results/fleet/gen5_trainer_v3_v101/design.json
+          POLAR: data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000
+        run: python run.py export --mission trainer_v3 --design "$DESIGN" --polar "$POLAR" --out "$RUNNER_TEMP/export"

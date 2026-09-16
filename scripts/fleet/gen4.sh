@@ -11,8 +11,11 @@
 #   * vertical tip fins (aero/fins.py) are three new design variables:
 #     flat plates printed on the bed, charged for mass and drag, and
 #     exported as their own STL when a design uses them
-cd "$(dirname "$0")/.." || exit 1
-POLAR="out/tunnel/polar.csv@60000,out/tunnel_re100/polar.csv@100000"
+cd "$(dirname "$0")/../.." || exit 1
+# The same two files as before, now tracked in the repo so a fresh clone
+# can run a measured-drag search. See data/polars/README.md: these are two
+# DIFFERENT sections, and the Re trend between them is partly thickness.
+POLAR="data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000"
 mkdir -p out/gen4
 pids=()
 for m in trainer_v3 demon1 micro; do

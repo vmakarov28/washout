@@ -1,10 +1,14 @@
 # Project conventions (read before touching anything)
 
 Automated blended-wing-body design: a search over planform + section
-that produces vase-mode-printable STLs. Companion to `windtunnel-sim`
-(same Desktop) — that repo owns the physics of the tunnel, this one owns
-the aircraft. Target machine: RTX 5080, WSL2 Ubuntu on Win 11; the search
-itself is numpy/scipy only and runs on the Windows side too.
+that produces vase-mode-printable STLs. Companion to the wind tunnel in
+`~/Desktop/windtunnel` — that repo owns the physics of the tunnel, this
+one owns the aircraft. Target machine: RTX 5080, WSL2 Ubuntu on Win 11;
+the search itself is numpy/scipy only and runs on the Windows side too.
+
+`docs/ROADMAP.md` is the current plan and the list of known debts, in
+value order. Read it before starting anything; the top items mean some
+reported numbers are not yet the numbers that would be built.
 
 ## Non-negotiable rules
 

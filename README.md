@@ -43,11 +43,21 @@ own cavity *is* the channel; a carbon tube slides in after the print.
 ## Run it
 
 ```bash
-python run.py seed                                  # evaluate the seed design
-python run.py search --iters 90 --out out/run1      # overnight -> design.json + STLs
-python run.py export --design out/run1/design.json  # rebuild STLs from a design
-python -m pytest -q                                 # 16 validation gates
+python run.py search --mission trainer_v3 --iters 90 --out out/run1
+python run.py export --mission trainer_v3 --design out/run1/design.json --out out/run1
+python -m pytest -q                                 # the validation gates
 ```
+
+Missions are `trainer_v3`, `demon1`, `micro` and `fpv_1m`. To rebuild a
+design already in the repo, and to see the whole pipeline run end to end:
+
+```bash
+python run.py export --mission trainer_v3 --design results/fleet/gen5_trainer_v3_v101/design.json --polar data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000 --out out/rebuild
+```
+
+Pass `export` the **same `--polar` the search used**. Without it the
+export falls back to the flat tier-0 drag model and reports a different,
+flattering L/D for the same aeroplane.
 
 Printer envelope, nozzle, layer height, filament density and spar
 diameter are all flags — see `python run.py --help`. Defaults are a
@@ -210,23 +220,50 @@ for a rectangular one, and reproduces published NACA 4412 Cm.
 - MH45's own reflex sits close to the CST fit's resolution. The seed does
   not perfectly reproduce its published Cm0, which is why reflex is an
   explicit design variable rather than something inherited from the seed.
-- Structural strength is **not modelled at all**. The spar bore is
-  checked for fit, not for bending. Nothing here says the wing survives a
-  launch.
+- Structure is sized against **bending, ultimate load, tip deflection and
+  skin buckling** (`structure.py`) — but not against **torsional
+  divergence, control reversal or flutter**, which are unmodelled
+  entirely. demon1 is scored at 44 m/s on a single-wall foamed-PLA shell,
+  so this is the gap that matters most on the fastest aircraft.
+- The **hand launch** is not modelled. `min_thrust_weight` is a proxy for
+  it, and for a trainer the launch is the flight phase most likely to end
+  the aeroplane.
+- The **spar mass in the budget is a flat guess**, not the tube that was
+  sized and fitted. Weighing the real tubes puts the gen5 trainer near
+  355 g rather than 331, which moves it outside its own wing-loading
+  gate. See `docs/ROADMAP.md`, item 1 — it is the first thing to fix.
+- The measured polars are of **two different sections** (28% apart in
+  t/c), so the Reynolds trend between them is partly a thickness
+  difference, and the search can reshape a section without the drag model
+  noticing. `docs/ROADMAP.md`, item 5.
 
 ## Layout
 
 ```
 washout/
-  geom/      cst.py        CST sections, fitting, blending, reflex deflection
-             planform.py   BWB stations, lofting, planform integrals
-  aero/      vlm.py        vortex lattice on the mean camber surface
+  geom/      cst.py         CST sections, fitting, blending, reflex deflection
+             planform.py    BWB stations, lofting, planform integrals
+             fairness.py    is it one continuous shape? checked before anything expensive
+  aero/      vlm.py         vortex lattice on the mean camber surface
              performance.py mass budget, trim, static margin, drag build-up
-             tunnel.py     bridge to windtunnel-sim; cached section polars
-  printing/  vase.py       layer stacks, TE thickening, printability gates
-             stl.py        watertight skinning, binary STL
-  search/    design.py     design vector, mission, scoring
-             optimize.py   differential evolution
-run.py       CLI
-tests/       the gates above
+             lateral.py     Cn_beta, Cl_beta, the roll/yaw ratio
+             dynamics.py    Dutch roll, spiral and roll modes as eigenvalues
+             fins.py        tip fins: area, drag, mass, yaw stiffness
+             tunnel.py      bridge to the LBM tunnel; cached section polars
+  printing/  vase.py        layer stacks, TE thickening, printability gates
+             ribs.py        the internal truss as a detour of the skin loop
+             stl.py         watertight skinning, binary STL
+  search/    design.py      design vector, mission, gates, scoring
+             optimize.py    differential evolution
+  structure.py              spar sizing, skin buckling, tip deflection
+  spars.py                  where the spanwise tubes go and how far they reach
+  propulsion.py             motor, propeller, battery: thrust against airspeed
+  report.py                 the design sheet -- does it look like an aeroplane?
+run.py                      CLI: search, export
+data/polars/                the only measured data here, with its sections
+results/fleet/              the three aircraft, as design vectors
+scripts/                    tunnel sweeps, reports, contact sheets
+scripts/fleet/              the generation runners, gen1 to gen5
+tests/                      the gates above
+docs/ROADMAP.md             what is missing, in value order
 ```

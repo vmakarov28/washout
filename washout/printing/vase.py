@@ -68,7 +68,7 @@ class PrintSettings:
     rib_clearance_factor: float = 1.10
     spar_avoid: tuple = ()
     """(centre, half_width) chord-fraction bands the ribs must keep out
-    of -- the spar corridors, from loft.spars."""
+    of -- the spar corridors, from washout.spars."""
     """Rib slit and floor gap, as a multiple of extrusion width.
 
     One bead exactly is the physical requirement -- the beads must touch
@@ -450,7 +450,10 @@ def panel_etas(plan: Planform, settings: PrintSettings,
     pieces. Equal pieces, not greedy-fill, so the joints stay symmetric
     and one spar length serves them all."""
     limit = settings.bed_z_mm - z_margin_mm
-    breaks = sorted({0.0, 1.0} | {s.eta for s in plan.stations})
+    # CONTROL stations, not every station: the faired loft emits ~35
+    # dense stations to carry its curves, and splitting the print at
+    # each of them would turn three panels into thirty.
+    breaks = sorted({0.0, 1.0} | set(plan.controls))
     out: list[tuple[float, float]] = []
     for a, b in zip(breaks, breaks[1:]):
         length = arc_length_mm(plan, a, b)

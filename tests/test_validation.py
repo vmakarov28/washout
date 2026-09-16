@@ -11,9 +11,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from loft.geom import cst, planform
-from loft.printing import stl, vase
-from loft.aero.vlm import VLM
+from washout.geom import cst, planform
+from washout.printing import stl, vase
+from washout.aero.vlm import VLM
 
 ASSETS = __import__("pathlib").Path(__file__).resolve().parents[1] / "assets"
 
@@ -223,10 +223,10 @@ def test_trim_is_converged_at_the_working_lattice_resolution():
     construction: LATTICE_NS/NC are used by the search and the verdict
     alike.
     """
-    from loft.geom import cst as _cst
-    from loft.search.design import (LATTICE_NC, LATTICE_NS, Mission,
+    from washout.geom import cst as _cst
+    from washout.search.design import (LATTICE_NC, LATTICE_NS, Mission,
                                           evaluate, physical_to_unit)
-    from loft.search.optimize import SEED_PHYSICAL
+    from washout.search.optimize import SEED_PHYSICAL
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
     m = Mission.trainer_v3()
@@ -234,12 +234,26 @@ def test_trim_is_converged_at_the_working_lattice_resolution():
     # An explicit design, not whatever seed happens to be recorded: this
     # test is about the LATTICE, so its geometry must not move when the
     # optimizer's starting point does.
-    u = physical_to_unit(dict(
+    # Every bound gets its midpoint, then the handful this test actually
+    # cares about are overridden. Naming all of them explicitly broke
+    # this test three separate times as the design vector grew -- once
+    # for the airfoil/elevon/prop variables, once for the fifth station
+    # and polyhedral. The test is about the LATTICE; it should not have
+    # an opinion about how many design variables exist.
+    from washout.search.design import BOUNDS as _B
+    phys = {b.name: 0.5 * (b.lo + b.hi) for b in _B}
+    phys.update(
         span_m=0.90, root_chord=0.30, body_eta=0.18, body_chord_frac=0.90,
-        kink_gap=0.35, kink_chord_frac=0.60, tip_chord_frac=0.35,
-        sweep_body=42.0, sweep_mid=30.0, sweep_outer=18.0, dihedral=5.0,
-        twist_body=0.0, twist_kink=-1.0, twist_tip=-4.0,
-        body_thickness=1.80, batt_x=0.20, reflex_deg=3.5, camber_scale=1.10))
+        kink_gap=0.35, kink_taper=0.67, outer_taper=0.72, tip_taper=0.80,
+        sweep_body=42.0, sweep_mid_delta=-12.0, sweep_outer_delta=-6.0,
+        sweep_tip_delta=0.0, dihedral=5.0, winglet_cant=5.0,
+        twist_root=0.0, washout=4.0, washout_exp=1.0,
+        body_thickness=1.80, batt_x=0.20, reflex_deg=3.5, camber_scale=1.10)
+    # Guard against the silent failure above: an override that names a
+    # variable which no longer exists does nothing at all.
+    assert set(phys) == {b.name for b in _B}, (
+        f"unknown design variables: {set(phys) - {b.name for b in _B}}")
+    u = physical_to_unit(phys)
     here = evaluate(u, m, base, s, z_step_mm=2.0)
     finer = evaluate(u, m, base, s, ns=LATTICE_NS + 10, nc=LATTICE_NC + 2,
                      z_step_mm=2.0)
@@ -252,7 +266,7 @@ def test_search_and_verdict_use_the_same_lattice():
     at the resolution it searched at, not a 'nicer' one."""
     import inspect
 
-    from loft.search import optimize
+    from washout.search import optimize
     src = inspect.getsource(optimize.run_search)
     assert "ns=ns, nc=nc" in src, "final evaluation must reuse the search lattice"
     assert "ns: int = LATTICE_NS" in inspect.getsource(optimize)
@@ -267,8 +281,8 @@ def test_payload_bays_are_checked_for_volume_not_just_mass():
     The binding dimension is depth across the pack's own WIDTH and along
     its full LENGTH, not on the centreline -- a blended body tapers fast
     and the centreline is always the most flattering station."""
-    from loft.geom import cst as _cst
-    from loft.search.design import Bay, bay_fits
+    from washout.geom import cst as _cst
+    from washout.search.design import Bay, bay_fits
 
     af = _cst.load_selig(ASSETS / "mh45.dat")
     pack = Bay("4S 1500", 0.27, (76.0, 35.0, 26.0))
@@ -288,8 +302,8 @@ def test_bay_is_checked_where_the_mass_actually_sits():
     pack IS. A search exploited exactly that gap: battery at 0.085c for
     trim, fit measured at 0.27c, and a 76 mm pack left hanging 19 mm off
     the nose of a 227 mm chord."""
-    from loft.geom import cst as _cst
-    from loft.search.design import Bay, bay_fits
+    from washout.geom import cst as _cst
+    from washout.search.design import Bay, bay_fits
 
     af = _cst.load_selig(ASSETS / "mh45.dat")
     plan = demo_bwb(af, half_span=0.5, root=0.227, body_t=1.61, name="run4")
@@ -307,9 +321,9 @@ def test_every_mission_seed_actually_flies():
     at the old 16x4 lattice and, at the converged 32x8, its pitching
     moment never crossed zero anywhere in the bracket. A seed that cannot
     trim teaches the early generations nothing."""
-    from loft.geom import cst as _cst
-    from loft.search.design import Mission, evaluate, physical_to_unit
-    from loft.search.optimize import SEEDS
+    from washout.geom import cst as _cst
+    from washout.search.design import Mission, evaluate, physical_to_unit
+    from washout.search.optimize import SEEDS
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
     for name, seed in SEEDS.items():
@@ -336,7 +350,7 @@ def test_ribs_keep_the_layer_a_single_simple_loop():
     curve stops being simple. A rib is a DETOUR of the skin loop, and
     the proof is that no part of the contour comes within one extrusion
     width of any non-adjacent part."""
-    from loft.printing.ribs import min_clearance_mm
+    from washout.printing.ribs import min_clearance_mm
     for nr in (2, 3, 4):
         _, st = _ribbed(nr)
         worst = min(min_clearance_mm(c, skip=8) for c in st.contours[::37])
@@ -348,7 +362,7 @@ def test_rib_point_count_is_constant_across_layers():
     layer that gained or lost a vertex because a rib happened to land on
     one would shear the whole mesh. Ribs are inserted into gaps between
     existing vertices, never on top of them."""
-    from loft.printing.ribs import POINTS_PER_RIB
+    from washout.printing.ribs import POINTS_PER_RIB
     for nr in (2, 3, 4):
         _, st = _ribbed(nr)
         assert st.contours.shape[1] == 241 + POINTS_PER_RIB * nr
@@ -375,8 +389,8 @@ def test_spar_is_selected_to_survive_the_load_case():
     """Structure is CHOSEN, not assumed: the lightest stock tube that
     passes ultimate load and a deflection limit. A heavier aircraft must
     never select a lighter tube."""
-    from loft import structure
-    from loft.aero.vlm import VLM
+    from washout import structure
+    from washout.aero.vlm import VLM
 
     af = cst.load_selig(ASSETS / "mh45.dat")
     plan = demo_bwb(af)
@@ -408,3 +422,348 @@ def test_rib_sweep_respects_the_remaining_overhang_budget():
         ang, _ = vase.overhang_deg(st)
         assert ang <= s.max_overhang_deg, (
             f"panel {e0}-{e1}: {ang:.1f} deg of overhang with ribs")
+
+
+def test_search_and_verdict_sample_the_print_identically():
+    """The search must be scored against the check that decides.
+
+    micro searched 6000 designs at 1.0 mm z sampling, found thousands
+    'feasible', and exported none: run_search re-evaluated the winner
+    WITHOUT passing z_step_mm, so the verdict re-checked overhang at the
+    0.25 mm layer height and saw slopes the coarse pass had smoothed
+    over. The optimizer was not wrong -- it was answering a question
+    nobody was going to ask again.
+
+    This pins the interface, not the number: whatever z step the search
+    uses, the final evaluation must use the same one.
+    """
+    import inspect
+    from washout.search import optimize
+
+    src = inspect.getsource(optimize.run_search)
+    verdict = src[src.index("best = evaluate("):]
+    verdict = verdict[:verdict.index(")") + 1]
+    assert "z_step_mm=search_z_step_mm" in verdict, (
+        "the final evaluate() must inherit the search's z sampling; "
+        f"got:\n{verdict}")
+
+    # and the default must be the real layer height, not a coarse proxy
+    sig = inspect.signature(optimize.run_search)
+    assert sig.parameters["search_z_step_mm"].default is None, (
+        "default z step must be None (= use the true layer height), so "
+        "the search cannot pass a print check the slicer would fail")
+
+
+def test_the_section_actually_changes_along_the_span():
+    """A blended wing body must be able to blend.
+
+    design.py used to pass ONE airfoil object as both root_airfoil and
+    tip_airfoil, which made bwb()'s internal blend() a lerp between a
+    shape and itself. Measured on a finished design, camber_max was
+    identical at all four stations to five decimal places: the aircraft
+    had one aerodynamic section, stretched in thickness. Nothing failed,
+    no gate fired -- the optimizer just returned the best member of a
+    family that could not express the answer.
+    """
+    from washout.geom import cst as _cst
+    from washout.search.design import BOUNDS as _B, Mission, build, physical_to_unit
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    phys = {b.name: 0.5 * (b.lo + b.hi) for b in _B}
+    phys.update(camber_scale=1.40, tip_camber_scale=0.40,
+                reflex_deg=6.0, tip_reflex_deg=0.0, blend_exp=1.0)
+    plan = build(physical_to_unit(phys), Mission.trainer_v3(), base)
+
+    cam = [plan.at(e).airfoil.camber_max for e in plan.controls]
+    assert cam[0] > cam[-1], f"camber must fall outboard, got {cam}"
+    assert cam[0] - cam[-1] > 1e-3, (
+        f"root and tip camber differ by only {cam[0]-cam[-1]:.2e} -- the "
+        f"blend is a no-op again: {cam}")
+    # and it must be monotone, not oscillating through the loft
+    assert all(a >= b - 1e-9 for a, b in zip(cam, cam[1:])), cam
+
+
+def test_polyhedral_puts_the_dihedral_where_it_was_asked_for():
+    """Per-segment dihedral, not one angle for the whole span."""
+    from washout.geom import cst as _cst
+    from washout.geom.planform import Segment, lofted
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    half = 0.5
+    p = lofted(half, 0.2, 0.0, af, af, (
+        Segment(0.5, 1.0, 0.0, 0.0, 0.0),      # flat inboard
+        Segment(1.0, 1.0, 0.0, 45.0, 0.0),     # 45 deg outboard
+    ))
+    z = [s.z_le_m for s in p.stations]
+    assert z[1] == pytest.approx(0.0, abs=1e-12), "inboard must stay flat"
+    # outboard segment spans half the half-span at 45 deg -> rise == run
+    run = half * 0.5
+    assert z[2] == pytest.approx(run, rel=1e-9), f"{z}"
+
+
+def test_a_winglet_reduces_induced_drag():
+    """The Trefftz plane has to be two-dimensional to see a winglet.
+
+    Induced drag was computed by projecting the whole wake onto the y
+    axis, which is exact for a planar wing and blind to everything else.
+    A winglet's entire purpose is to move shed vorticity OUT of that
+    plane, so the planar version priced one at precisely zero -- the
+    optimizer would have paid its mass and wetted area for nothing and
+    correctly refused to fit one.
+    """
+    from washout.geom import cst as _cst
+    from washout.geom.planform import Segment, lofted
+    from washout.aero.vlm import VLM
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+
+    def wing(tip_dihedral):
+        return lofted(0.45, 0.20, 1.0, af, af, (
+            Segment(0.50, 0.85, 20.0, 2.0, 0.0),
+            Segment(0.85, 0.55, 20.0, 2.0, -1.0),
+            Segment(1.00, 0.45, 20.0, tip_dihedral, -2.0),
+        ))
+    out = {}
+    for d in (2.0, 60.0):
+        p = wing(d)
+        pt = VLM(p, ns=32, nc=8).solve(5.0, p.x_mac_le_m + 0.25 * p.mac_m)
+        out[d] = (pt.CL, pt.CDi)
+    (cl_f, cdi_f), (cl_w, cdi_w) = out[2.0], out[60.0]
+    # compare at equal CL: CDi ~ CL^2, so normalise
+    eff_flat = cl_f ** 2 / cdi_f
+    eff_wing = cl_w ** 2 / cdi_w
+    assert eff_wing > eff_flat * 1.02, (
+        f"winglet must improve CL^2/CDi by >2%: flat {eff_flat:.2f} "
+        f"vs winglet {eff_wing:.2f}")
+
+
+def test_dihedral_effect_matches_its_own_closed_form():
+    """Cl_beta by strip integration, checked against the textbook limit.
+
+    With constant chord and constant dihedral the integral collapses to
+    -a*Gamma/4. If this drifts, the integration or the lift slope is
+    wrong -- and the 3D slope matters: using the section's 2*pi here put
+    Cl_beta about 30% above published values.
+    """
+    from washout.geom import cst as _cst
+    from washout.geom.planform import Segment, lofted
+    from washout.aero import lateral as _lat
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    gamma_deg = 5.0
+    p = lofted(0.5, 0.2, 0.0, af, af, (
+        Segment(0.5, 1.0, 0.0, gamma_deg, 0.0),
+        Segment(1.0, 1.0, 0.0, gamma_deg, 0.0),
+    ))
+    # LINEAR loft, deliberately. The production loft is mirrored about
+    # the centreline so the two halves join tangent, which rounds the
+    # root: local dihedral runs 0 -> ~1.5 Gamma -> Gamma across the first
+    # segment. That is the right shape for an aircraft and the wrong one
+    # for this test, which checks the INTEGRAL against a closed form that
+    # assumes Gamma is constant all the way in.
+    from dataclasses import replace as _replace
+    p = _replace(p, smooth=False)
+    _tot, dihedral_part, _sweep = _lat.cl_beta(p, 0.0)
+    a3d = 2.0 * np.pi * p.aspect_ratio / (p.aspect_ratio + 2.0)
+    closed = -a3d * np.radians(gamma_deg) / 4.0
+    assert dihedral_part == pytest.approx(closed, rel=0.02), (
+        f"integrated {dihedral_part:+.5f} vs closed form {closed:+.5f}")
+
+
+def test_the_structure_uses_the_spar_the_geometry_was_built_around():
+    """The bore is printed to a fixed size; the tube has to match it.
+
+    The search keeps rib corridors clear for an 8 mm tube and checks
+    every panel joint is deep enough to pass one. structure.select()
+    then chose the lightest tube that carried the load, which on micro
+    was 4x2 -- a 4 mm tube in an 8 mm hole. Both halves were right on
+    their own terms and the pair was wrong.
+    """
+    from washout.geom import cst as _cst
+    from washout import structure
+    from washout.aero.vlm import VLM
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    plan = demo_bwb(af)
+    pt = VLM(plan, 24, 6).solve(4.0, plan.x_mac_le_m + 0.2 * plan.mac_m)
+    free = structure.select(plan, pt, 0.30, skin_t_mm=0.45, n_limit=3.0)
+    held = structure.select(plan, pt, 0.30, skin_t_mm=0.45, n_limit=3.0,
+                            min_od_mm=8.0)
+    assert held.spar.od_mm >= 8.0, (
+        f"asked for >= 8 mm, got {held.spar.od_mm} mm ({held.spar.name})")
+    # the free choice is allowed to be lighter; that is the whole point
+    assert free.spar.od_mm <= held.spar.od_mm
+
+
+def _plan_from_fixture(d):
+    from washout.geom.cst import Airfoil
+    from washout.geom.planform import Planform, Station
+    return Planform(d["half_span_m"], tuple(
+        Station(s["eta"], s["chord_m"], s["x_le_m"], s["z_le_m"], s["twist_deg"],
+                Airfoil(au=np.array(s["au"]), al=np.array(s["al"]),
+                        te_gap=s["te_gap"], te_camber=s["te_camber"]))
+        for s in d["stations"]))
+
+
+def test_the_designs_called_goofy_fail_the_fairness_gate():
+    """The three gen2 winners, frozen as built, must stay rejected.
+
+    They passed every gate that existed and were described, correctly,
+    as goofy: sweep that waved between segments, trailing edges that
+    hooked, twist that zig-zagged, 200 mm winglets on a 900 mm wing.
+    This pins the fairness gate to the actual shapes that prompted it,
+    rather than to shapes invented to fail it.
+    """
+    import json
+    import pathlib
+    from washout.geom import fairness as fz
+
+    path = pathlib.Path(__file__).parent / "fixtures" / "gen2_goofy.json"
+    fx = json.loads(path.read_text())
+    assert set(fx) == {"trainer_v3_v72", "demon1_v71", "micro_v71"}
+    for name, d in fx.items():
+        bad = fz.measure(_plan_from_fixture(d)).violations(fz.Limits())
+        reasons = " | ".join(r for r, _ in bad)
+        assert len(bad) >= 3, f"{name} should fail on several counts: {reasons}"
+        assert "leading edge waves" in reasons, f"{name}: {reasons}"
+
+
+def test_faired_loft_does_not_overshoot_the_sweep_it_was_given():
+    """PCHIP on station POSITIONS overshot the SLOPES between them.
+
+    A random draw with monotone sweeps of 21, 19, 16 and 12.5 degrees
+    produced a leading edge sweeping 27 degrees just outboard of the
+    nose. faired() interpolates the slopes themselves, linearly between
+    segment midpoints, so the leading edge stays within about a degree
+    of the steepest segment -- the residue is the Planform
+    re-interpolating the dense stations it emits.
+    """
+    from washout.geom import cst as _cst
+    from washout.geom.planform import Segment, faired
+
+    af = _cst.load_selig(ASSETS / "mh45.dat")
+    sweeps = (21.0, 19.0, 16.0, 12.5)
+    p = faired(0.45, 0.24, 1.0, af, af, (
+        Segment(0.14, 0.86, sweeps[0], 3.0, 0.5),
+        Segment(0.41, 0.60, sweeps[1], 3.0, -1.0),
+        Segment(0.75, 0.47, sweeps[2], 8.0, -2.0),
+        Segment(1.00, 0.39, sweeps[3], 18.0, -3.0)))
+    eta = np.linspace(0.0, 1.0, 401)
+    x = np.array([p.at(float(e)).x_le_m for e in eta])
+    lam = np.degrees(np.arctan(np.gradient(x, eta * p.half_span_m)))
+    assert lam.max() <= max(sweeps) + 1.5, f"peak LE sweep {lam.max():.2f} deg"
+
+
+def test_the_halves_join_tangent_on_the_centreline():
+    """No V at the nose, no notch in the trailing edge.
+
+    PCHIP fitted to the right half alone estimated its slope at eta = 0
+    from one side, so the mirrored halves met at an angle: demon1's nose
+    spike and micro's trailing-edge notch. Both edges must now leave the
+    centreline square to the span.
+    """
+    from washout.geom import cst as _cst
+    from washout.search.design import Mission, N_DIM, build
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        p = build(rng.random(N_DIM), Mission.demon1(), base)
+        d = 0.001
+        a, b = p.at(0.0), p.at(d)
+        dy = d * p.half_span_m
+        le = np.degrees(np.arctan((b.x_le_m - a.x_le_m) / dy))
+        te = np.degrees(np.arctan(((b.x_le_m + b.chord_m)
+                                   - (a.x_le_m + a.chord_m)) / dy))
+        assert abs(le) < 2.0 and abs(te) < 2.0, (
+            f"edges leave the root at LE {le:.2f}, TE {te:.2f} deg")
+
+
+def test_most_random_designs_are_one_fair_shape():
+    """The generator's space must be mostly aeroplanes.
+
+    With every station independent, 0 of 300 random draws passed the
+    fairness gate, so the optimizer would have spent its budget hunting
+    a corner of the space. With chord monotone, sweep one-humped and
+    twist monotone by construction, and the loft run through the slopes,
+    over half pass. The floor sits well below the measured rate so it
+    catches a regression, not noise.
+    """
+    from washout.geom import cst as _cst
+    from washout.geom import fairness as fz
+    from washout.search.design import Mission, N_DIM, build
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    m = Mission.trainer_v3()
+    rng = np.random.default_rng(11)
+    fair = total = 0
+    for _ in range(120):
+        p = build(rng.random(N_DIM), m, base)
+        if not p.is_valid()[0]:
+            continue
+        total += 1
+        fair += not fz.measure(p).violations(m.fairness)
+    assert total >= 100
+    assert fair / total >= 0.35, f"only {fair}/{total} random draws are fair"
+
+
+def test_printed_panels_break_at_control_stations_only():
+    """The faired loft emits ~35 dense stations; the printer must not care.
+
+    panel_etas() splits the print at the planform's stations. Pointed at
+    the dense stations it would have turned four printed panels into
+    thirty-odd. Breaks belong to the stations a designer placed.
+    """
+    from washout.geom import cst as _cst
+    from washout.search.design import Mission, N_DIM, build
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    p = build(np.random.default_rng(1).random(N_DIM), Mission.trainer_v3(), base)
+    assert len(p.stations) > 2 * len(p.controls)
+    spans = vase.panel_etas(p, vase.PrintSettings())
+    assert len(spans) <= 2 * len(p.controls)
+    breaks = {round(b, 9) for _, b in spans}
+    for e in p.controls[1:]:
+        assert round(e, 9) in breaks, f"control station {e:.3f} is not a panel break"
+
+
+def test_the_design_sheet_never_takes_the_export_down(tmp_path, monkeypatch):
+    """A plotting bug must not cost the printable parts.
+
+    do_export draws the figure BEFORE it writes the STLs, and caught only
+    ImportError -- so any exception inside the plotting code at the end
+    of a two-hour search would have aborted the export with nothing
+    written. The 3D panel is the most fragile part (it is the newest and
+    leans on the most matplotlib), so it is forced to fail here: the sheet
+    must still be written without it. Then the whole sheet is forced to
+    fail: figure() must return rather than raise.
+    """
+    from washout import report
+    from washout.geom import cst as _cst
+    from washout.geom import fairness as fz
+    from washout.search.design import Mission, N_DIM, build, evaluate
+
+    base = _cst.load_selig(ASSETS / "mh45.dat")
+    m = Mission.micro()
+    rng = np.random.default_rng(2)
+    u = None
+    for _ in range(200):
+        cand = rng.random(N_DIM)
+        p = build(cand, m, base)
+        if p.is_valid()[0] and not fz.measure(p).violations(m.fairness):
+            u = cand
+            break
+    assert u is not None, "no fair micro design in 200 draws"
+    s = vase.PrintSettings()
+    ev = evaluate(u, m, base, s)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("simulated 3D failure")
+
+    monkeypatch.setattr(report, "_draw_3d", boom)
+    out = report.figure(ev, s, tmp_path / "no3d.png", title="t")
+    assert out.exists(), "sheet must still be written when the 3D view fails"
+
+    monkeypatch.setattr(report, "_figure", boom)
+    out = report.figure(ev, s, tmp_path / "none.png", title="t")
+    assert out == tmp_path / "none.png"          # returned, did not raise

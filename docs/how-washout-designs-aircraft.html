@@ -1,0 +1,792 @@
+<title>How Washout Designs Aircraft</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+  :root {
+    --ground: #f4f6f5;
+    --surface: #ffffff;
+    --sunk: #eceff0;
+    --ink: #12191b;
+    --muted: #5c6b6e;
+    --line: #d2dad9;
+    --line-soft: #e4e9e8;
+    --accent: #0e6e6e;
+    --accent-soft: #d8eae7;
+    --pass: #2e7d4f;
+    --warn: #a96a12;
+    --fail: #b03a2e;
+    --display: "IBM Plex Sans Condensed", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  }
+  :root:not([data-theme="light"]) {
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0d1315;
+      --surface: #141c1e;
+      --sunk: #101819;
+      --ink: #e7eeec;
+      --muted: #94a6a6;
+      --line: #27383a;
+      --line-soft: #1d2a2c;
+      --accent: #45b3ab;
+      --accent-soft: #12312f;
+      --pass: #5fb98a;
+      --warn: #d6a052;
+      --fail: #e0766a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0d1315;
+    --surface: #141c1e;
+    --sunk: #101819;
+    --ink: #e7eeec;
+    --muted: #94a6a6;
+    --line: #27383a;
+    --line-soft: #1d2a2c;
+    --accent: #45b3ab;
+    --accent-soft: #12312f;
+    --pass: #5fb98a;
+    --warn: #d6a052;
+    --fail: #e0766a;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding-inline: 20px;
+    padding-block: 0 72px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  .col { max-width: 66ch; }
+
+  /* ---------- masthead ---------- */
+  header.masthead {
+    border-bottom: 2px solid var(--ink);
+    padding-block: 56px 20px;
+    margin-bottom: 40px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(38px, 7vw, 66px);
+    line-height: 1.02;
+    letter-spacing: -0.015em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 20px;
+    line-height: 1.5;
+    color: var(--ink);
+    margin: 0 0 30px;
+    max-width: 62ch;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .stat { background: var(--surface); padding: 14px 16px; }
+  .stat b {
+    display: block;
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 26px;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-block: 56px; }
+  h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(26px, 3.6vw, 34px);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  h2 + .lede { color: var(--muted); margin-top: 0; }
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 21px;
+    margin: 32px 0 6px;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 16px; }
+  .col > p:last-child { margin-bottom: 0; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  strong { font-weight: 600; }
+  em.term { font-style: italic; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--sunk);
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  /* ---------- figures ---------- */
+  figure { margin: 34px 0; }
+  .fig-frame {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 22px 20px 16px;
+    overflow-x: auto;
+  }
+  figure svg { display: block; width: 100%; height: auto; min-width: 560px; }
+  figcaption {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--muted);
+    margin-top: 12px;
+    max-width: 78ch;
+  }
+  figcaption b { color: var(--ink); font-weight: 500; }
+
+  /* ---------- tables ---------- */
+  .scroller { overflow-x: auto; margin: 26px 0; border: 1px solid var(--line); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 520px; }
+  caption {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 16px 8px;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 16px;
+    border-top: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.name { font-family: var(--mono); font-size: 12.5px; }
+  tbody tr:hover { background: var(--sunk); }
+  .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 2px 7px;
+    border-radius: 2px;
+    white-space: nowrap;
+    border: 1px solid currentColor;
+  }
+  .tag.pass { color: var(--pass); }
+  .tag.warn { color: var(--warn); }
+  .tag.fail { color: var(--fail); }
+
+  /* ---------- pipeline stage list ---------- */
+  ol.stages { list-style: none; counter-reset: stage; padding: 0; margin: 26px 0; }
+  ol.stages > li {
+    counter-increment: stage;
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 14px;
+    padding: 14px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  ol.stages > li::before {
+    content: counter(stage, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    padding-top: 4px;
+  }
+  ol.stages h4 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 17px;
+    margin: 0 0 3px;
+  }
+  ol.stages p { margin: 0; font-size: 15.5px; color: var(--muted); }
+  ol.stages p b { color: var(--ink); font-weight: 500; }
+
+  /* ---------- callout ---------- */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 16px 18px;
+    margin: 28px 0;
+    font-size: 16px;
+  }
+  .note p { margin: 0; }
+  .note p + p { margin-top: 10px; }
+
+  ul.plain { padding-left: 20px; margin: 0 0 16px; }
+  ul.plain li { margin-bottom: 7px; }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--sunk);
+    border: 1px solid var(--line-soft);
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 20px 0;
+  }
+  footer {
+    border-top: 1px solid var(--line);
+    margin-top: 64px;
+    padding-top: 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    a { transition: opacity .15s ease; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="kicker">Washout &middot; blended wing body pipeline</p>
+  <h1>How Washout Designs Aircraft</h1>
+  <p class="standfirst">A program that takes 35 numbers, turns them into a flying wing, proves the aeroplane flies and prints, and repeats that half a million times &mdash; then hands you STL files. Here is every part of it, what each part is worth, and what went wrong along the way.</p>
+  <div class="stats">
+    <div class="stat"><b>35</b><span>design variables</span></div>
+    <div class="stat"><b>30</b><span>gates to pass</span></div>
+    <div class="stat"><b>460,286</b><span>designs evaluated</span></div>
+    <div class="stat"><b>59</b><span>tests</span></div>
+    <div class="stat"><b>8,063</b><span>lines of python</span></div>
+  </div>
+</header>
+
+<section>
+  <div class="col">
+    <h2>The idea in one paragraph</h2>
+    <p>You asked for aircraft that design themselves, get tested in your own wind tunnel, and come out as printable files. The program does that by writing down an aeroplane as a list of numbers, building the real geometry from those numbers, and then running every check a person would run &mdash; does it balance, does it fly at a sensible speed, will the wing hold, will it fit on the bed, does it wobble &mdash; and scoring the result. A search algorithm then spends hundreds of thousands of guesses hunting for the numbers that pass everything and fly best.</p>
+    <p>The interesting part is not the search. It is that <strong>every check has to be true of the aircraft you would actually build</strong>. Nearly every problem in this project came from some check quietly judging a different aeroplane than the one being exported.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The pipeline</h2>
+  <p class="col lede">One design, from 35 numbers to a verdict. The cheap checks come first on purpose, and the expensive ones only run on shapes that have earned them.</p>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 920 330" role="img" aria-label="Flow diagram: 35 numbers build geometry, pass a fairness gate, then panels and mass, trim, flight gates, structure sizing, a second pass with ribs, and a verdict that either exports STLs or feeds the differential evolution loop back to the numbers.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"></polygon>
+          </marker>
+          <marker id="ah-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <polygon points="0,0 10,5 0,10" fill="#0e6e6e"></polygon>
+          </marker>
+        </defs>
+        <g font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor">
+
+          <!-- row 1 -->
+          <rect x="16" y="34" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="76" y="54" text-anchor="middle" font-size="12.5">35 numbers</text>
+          <text x="76" y="70" text-anchor="middle" font-size="11" opacity="0.65">the design</text>
+
+          <rect x="186" y="34" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="246" y="54" text-anchor="middle" font-size="12.5">geometry</text>
+          <text x="246" y="70" text-anchor="middle" font-size="11" opacity="0.65">5 stations</text>
+
+          <rect x="356" y="34" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="416" y="54" text-anchor="middle" font-size="12.5">fairness</text>
+          <text x="416" y="70" text-anchor="middle" font-size="11" opacity="0.65">50 ms</text>
+
+          <rect x="526" y="34" width="130" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="591" y="54" text-anchor="middle" font-size="12.5">panels + mass</text>
+          <text x="591" y="70" text-anchor="middle" font-size="11" opacity="0.65">shell, CG</text>
+
+          <rect x="706" y="34" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="766" y="54" text-anchor="middle" font-size="12.5">trim</text>
+          <text x="766" y="70" text-anchor="middle" font-size="11" opacity="0.65">lattice</text>
+
+          <line x1="136" y1="58" x2="180" y2="58" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></line>
+          <line x1="306" y1="58" x2="350" y2="58" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></line>
+          <line x1="476" y1="58" x2="520" y2="58" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></line>
+          <text x="498" y="50" text-anchor="middle" font-size="10.5" opacity="0.75">fair only</text>
+          <line x1="656" y1="58" x2="700" y2="58" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></line>
+
+          <!-- reject drop -->
+          <line x1="416" y1="82" x2="416" y2="112" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah)"></line>
+          <text x="424" y="106" font-size="10.5" opacity="0.75">45% rejected here</text>
+
+          <!-- row 1 to row 2 -->
+          <path d="M 766 82 L 766 128 L 766 150" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></path>
+
+          <!-- row 2, right to left -->
+          <rect x="706" y="152" width="120" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="766" y="172" text-anchor="middle" font-size="12.5">flight gates</text>
+          <text x="766" y="188" text-anchor="middle" font-size="11" opacity="0.65">drag, thrust</text>
+
+          <rect x="496" y="152" width="160" height="48" fill="none" stroke="#0e6e6e" stroke-width="1.6"></rect>
+          <text x="576" y="172" text-anchor="middle" font-size="12.5" fill="#0e6e6e">size spar + ribs</text>
+          <text x="576" y="188" text-anchor="middle" font-size="11" fill="#0e6e6e" opacity="0.8">from the loads</text>
+
+          <rect x="286" y="152" width="160" height="48" fill="none" stroke="#0e6e6e" stroke-width="1.6"></rect>
+          <text x="366" y="172" text-anchor="middle" font-size="12.5" fill="#0e6e6e">second pass</text>
+          <text x="366" y="188" text-anchor="middle" font-size="11" fill="#0e6e6e" opacity="0.8">ribs included</text>
+
+          <rect x="96" y="152" width="140" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="166" y="172" text-anchor="middle" font-size="12.5">verdict</text>
+          <text x="166" y="188" text-anchor="middle" font-size="11" opacity="0.65">pass or penalty</text>
+
+          <line x1="700" y1="176" x2="662" y2="176" stroke="#0e6e6e" stroke-width="1.4" marker-end="url(#ah-a)"></line>
+          <line x1="490" y1="176" x2="452" y2="176" stroke="#0e6e6e" stroke-width="1.4" marker-end="url(#ah-a)"></line>
+          <text x="471" y="168" text-anchor="middle" font-size="10.5" fill="#0e6e6e">8 mm spar</text>
+          <line x1="280" y1="176" x2="242" y2="176" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></line>
+          <text x="261" y="168" text-anchor="middle" font-size="10.5" opacity="0.75">as built</text>
+
+          <!-- feedback -->
+          <path d="M 96 176 L 60 176 L 60 100 L 60 88" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ah)"></path>
+          <text x="16" y="120" font-size="10.5" opacity="0.8">differential evolution</text>
+          <text x="16" y="134" font-size="10.5" opacity="0.8">9,660 designs per run</text>
+
+          <!-- export -->
+          <rect x="96" y="252" width="200" height="48" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="196" y="272" text-anchor="middle" font-size="12.5">STL + fin plate</text>
+          <text x="196" y="288" text-anchor="middle" font-size="11" opacity="0.65">watertight checked</text>
+          <path d="M 166 200 L 166 246" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"></path>
+          <text x="176" y="228" font-size="10.5" opacity="0.75">if it passes everything</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Figure 1.</b> One evaluation. The teal path is the fix from the last run: the spar and ribs are sized from the trimmed loads, then the whole aeroplane is judged again with that weight on board. Before it existed, the search scored a hollow shell and the exported parts carried ribs nobody had accounted for.</figcaption>
+  </figure>
+
+  <div class="col">
+    <ol class="stages">
+      <li>
+        <div>
+          <h4>Geometry from numbers</h4>
+          <p>Five stations along the half-wing set chord, sweep, dihedral, twist and section shape. The loft runs through the <b>slopes</b> and integrates them, so sweep and dihedral can never overshoot what was asked for, and the two halves meet smoothly at the centreline.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h4>Is it one shape?</h4>
+          <p>A fairness check measures the built surface for waves, hooks, reversals and lumps. It costs <b>50 ms</b> and rejects about 45% of random designs before any physics runs.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h4>Slice it and weigh it</h4>
+          <p>The wing is cut into printable panels and the shell weight comes from the <b>actual length of plastic bead</b> in the sliced layers, not an estimate. Battery, motor, receiver, servos, spars and fins are added at their real positions to get the balance point.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h4>Make it fly</h4>
+          <p>A vortex lattice finds the angle where the wing balances itself, which fixes the lift coefficient, which fixes the flying speed. Drag comes from <b>wind-tunnel measurements</b>, charged strip by strip at each strip's own Reynolds number.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h4>Check everything else</h4>
+          <p>Thrust available against drag needed, elevon authority, battery bay depth, spar reach, stall behaviour, wing loading, balance margin, heading stability and the <b>Dutch roll damping</b>.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h4>Add the structure, then judge again</h4>
+          <p>The spar is picked from stock carbon tube and the rib spacing from what the skin needs to not buckle. Those add <b>8&ndash;22 g</b>, mostly behind the balance point, so the whole evaluation runs a second time with them fitted. That verdict is the one that counts.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <h2>What the aeroplane is, as numbers</h2>
+  <p class="col lede">Thirty-five values, each bounded. Wherever a bad aeroplane can be made impossible to express, it is &mdash; that beats penalising it after the fact.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>The design vector</caption>
+      <thead>
+        <tr><th>Group</th><th class="num">Count</th><th>What it controls</th><th>Made impossible by construction</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Planform</td><td class="num">9</td><td>Span, root chord, and where the body, kink and outer stations sit, each as a share of the span left outboard</td><td>Stations out of order; chord growing towards the tip</td></tr>
+        <tr><td>Sweep</td><td class="num">4</td><td>Body sweep, then three increments outboard</td><td>Sweep that rises, falls and rises again &mdash; a wavy leading edge</td></tr>
+        <tr><td>Dihedral</td><td class="num">3</td><td>Inboard dihedral, final tip cant, and how the turn-up is split between them</td><td>A wing that snaps from 5&deg; to 60&deg; at one station</td></tr>
+        <tr><td>Twist</td><td class="num">3</td><td>Root incidence, total washout, and where along the span it is spent</td><td>Twist that zig-zags station to station</td></tr>
+        <tr><td>Section</td><td class="num">8</td><td>Thickness, camber and reflex at root and tip, plus how fast one becomes the other</td><td>&mdash;</td></tr>
+        <tr><td>Body</td><td class="num">2</td><td>Centre-body thickness and where the battery sits</td><td>A root thicker than the mission allows; a body that falls away too steeply</td></tr>
+        <tr><td>Elevons</td><td class="num">2</td><td>Control surface chord and span start</td><td>&mdash;</td></tr>
+        <tr><td>Propeller</td><td class="num">2</td><td>Diameter and pitch</td><td>&mdash;</td></tr>
+        <tr><td>Tip fins</td><td class="num">3</td><td>Area, shape and how far each fin drops below the wing</td><td>&mdash;</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>That principle is the reason the geometry got rebuilt: in the previous version every station had its own independent sweep, chord and twist, so nothing tied one section to the next and the optimizer produced shapes that were aerodynamically valid and visibly wrong. Making waves unrepresentable worked better than adding another penalty.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The physics, and what each piece is worth</h2>
+  <p class="col lede">Every model here is checked against something that was already known before it was trusted. Where a number is calibrated rather than derived, the code says so.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Models and their evidence</caption>
+      <thead>
+        <tr><th>Model</th><th>What it gives</th><th>Checked against</th><th class="num">Result</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Vortex lattice</td>
+          <td>Lift, balance point, trim angle, spanwise loading</td>
+          <td>Thin-aerofoil theory; an elliptic wing's ideal efficiency</td>
+          <td class="num">0.2473c vs 0.25c<br>e = 0.99</td>
+        </tr>
+        <tr>
+          <td>Wake in the crossflow plane</td>
+          <td>Induced drag, and the credit a winglet earns</td>
+          <td>Reduces exactly to the flat-wing formula</td>
+          <td class="num">&minus;11% drag<br>at 70&deg; tip</td>
+        </tr>
+        <tr>
+          <td>Measured section drag</td>
+          <td>Profile drag at the real angle of attack</td>
+          <td>Your own lattice-Boltzmann tunnel runs at Re 60k and 100k</td>
+          <td class="num">2.2&times; the<br>textbook estimate</td>
+        </tr>
+        <tr>
+          <td>Lateral dynamics</td>
+          <td>Dutch roll damping, spiral and roll modes</td>
+          <td>Nelson's Navion worked example</td>
+          <td class="num">&lt;1% error</td>
+        </tr>
+        <tr>
+          <td>Roll damping</td>
+          <td>How fast a roll rate is resisted</td>
+          <td>Lifting-line theory on an elliptic wing</td>
+          <td class="num">&minus;0.415 vs &minus;0.471</td>
+        </tr>
+        <tr>
+          <td>Yaw damping from drag</td>
+          <td>The part of yaw damping that is just drag</td>
+          <td>Textbook closed form for a rectangular wing</td>
+          <td class="num">&minus;cd/3, exact</td>
+        </tr>
+        <tr>
+          <td>Dihedral effect</td>
+          <td>Roll produced by sideslip</td>
+          <td>Its own closed form, and the lattice</td>
+          <td class="num">exact; strip theory<br>runs 65% high</td>
+        </tr>
+        <tr>
+          <td>Propulsion</td>
+          <td>Thrust against airspeed, top speed</td>
+          <td>Momentum theory ceiling on a real motor</td>
+          <td class="num">2205 at 2300 kv</td>
+        </tr>
+        <tr>
+          <td>Structure</td>
+          <td>Spar choice, rib spacing, tip deflection</td>
+          <td>Stock tube catalogue, skin buckling</td>
+          <td class="num">8&times;6 tube</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <h3>What the models cannot see</h3>
+    <p>The lattice is inviscid: it has no stall and no separation, so maximum lift comes from the measured section data instead. Spanwise boundary-layer drift is invisible to both models, which is why I advised against wing fences &mdash; their benefit cannot be scored here, so the optimizer would pay real weight and drag for an invented gain. The 3D tunnel run that could see it never completed; it hung the virtual machine your trading bot runs in, and I stopped rather than retry.</p>
+  </div>
+</section>
+
+<section>
+  <h2>What "the wobble dies out" means</h2>
+  <p class="col lede">A gust makes a tailless wing yaw and roll together. The damping ratio says whether that oscillation shrinks or grows, and it is the check that reshaped the whole fleet.</p>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 660 250" role="img" aria-label="Three damped oscillation traces over six seconds. The gen3 trainer's oscillation grows until it clips the panel. The gen5 trainer and demon1 traces both shrink toward the centreline, demon1 fastest.">
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor">
+
+          <g transform="translate(70,10)">
+            <line x1="0" y1="35" x2="560" y2="35" stroke="currentColor" stroke-width="0.8" opacity="0.28"></line>
+            <polyline fill="none" stroke="#b03a2e" stroke-width="1.6" points="0,7.0 5,7.3 10,9.0 15,11.9 20,16.0 25,21.2 30,27.1 35,33.6 40,40.3 45,46.9 50,53.1 55,58.6 60,63.1 65,66.3 70,67.0 75,67.0 80,67.0 85,64.3 90,60.0 95,54.3 100,47.6 105,40.1 110,32.2 115,24.2 120,16.5 125,9.5 130,3.6 135,3.0 140,3.0 145,3.0 150,3.0 155,3.0 160,3.0 165,8.8 170,16.3 175,24.9 180,34.2 185,43.8 190,53.2 195,62.0 200,67.0 205,67.0 210,67.0 215,67.0 220,67.0 225,67.0 230,67.0 235,67.0 240,61.4 245,51.6 250,40.8 255,29.4 260,18.0 265,7.1 270,3.0 275,3.0 280,3.0 285,3.0 290,3.0 295,3.0 300,3.0 305,3.0 310,3.0 315,9.8 320,22.3 325,35.8 330,49.5 335,62.9 340,67.0 345,67.0 350,67.0 355,67.0 360,67.0 365,67.0 370,67.0 375,67.0 380,67.0 385,67.0 390,56.8 395,41.1 400,24.8 405,8.5 410,3.0 415,3.0 420,3.0 425,3.0 430,3.0 435,3.0 440,3.0 445,3.0 450,3.0 455,3.0 460,3.0 465,19.4 470,38.8 475,58.4 480,67.0 485,67.0 490,67.0 495,67.0 500,67.0 505,67.0 510,67.0 515,67.0 520,67.0 525,67.0 530,67.0 535,63.2 540,40.6 545,17.1 550,3.0 555,3.0 560,3.0"></polyline>
+          </g>
+          <text x="62" y="40" text-anchor="end" font-size="11">gen3 trainer</text>
+          <text x="62" y="54" text-anchor="end" font-size="11" fill="#b03a2e">&zeta; &minus;0.057</text>
+
+          <g transform="translate(70,95)">
+            <line x1="0" y1="35" x2="560" y2="35" stroke="currentColor" stroke-width="0.8" opacity="0.28"></line>
+            <polyline fill="none" stroke="currentColor" stroke-width="1.6" points="0,7.0 5,9.7 10,15.6 15,23.8 20,33.0 25,41.9 30,49.4 35,54.5 40,56.7 45,55.8 50,52.2 55,46.5 60,39.6 65,32.5 70,26.1 75,21.3 80,18.6 85,18.3 90,20.2 95,24.0 100,29.1 105,34.6 110,39.9 115,44.2 120,47.0 125,48.1 130,47.3 135,44.9 140,41.4 145,37.2 150,32.9 155,29.2 160,26.5 165,25.1 170,25.1 175,26.4 180,28.8 185,31.9 190,35.2 195,38.3 200,40.8 205,42.4 210,42.8 215,42.2 220,40.7 225,38.5 230,35.9 235,33.4 240,31.2 245,29.7 250,29.0 255,29.1 260,30.0 265,31.5 270,33.4 275,35.4 280,37.2 285,38.7 290,39.5 295,39.7 300,39.2 305,38.2 310,36.9 315,35.3 320,33.8 325,32.6 330,31.7 335,31.4 340,31.5 345,32.1 350,33.1 355,34.2 360,35.4 365,36.5 370,37.3 375,37.7 380,37.8 385,37.5 390,36.8 395,36.0 400,35.1 405,34.2 410,33.5 415,33.0 420,32.8 425,32.9 430,33.3 435,33.9 440,34.6 445,35.3 450,36.0 455,36.4 460,36.7 465,36.7 470,36.4 475,36.0 480,35.5 485,35.0 490,34.4 495,34.0 500,33.8 505,33.7 510,33.8 515,34.0 520,34.4 525,34.8 530,35.3 535,35.6 540,35.9 545,36.0 550,36.0 555,35.8 560,35.6"></polyline>
+          </g>
+          <text x="62" y="125" text-anchor="end" font-size="11">gen5 trainer</text>
+          <text x="62" y="139" text-anchor="end" font-size="11" fill="#0e6e6e">&zeta; +0.081</text>
+
+          <g transform="translate(70,180)">
+            <line x1="0" y1="35" x2="560" y2="35" stroke="currentColor" stroke-width="0.8" opacity="0.28"></line>
+            <polyline fill="none" stroke="#0e6e6e" stroke-width="1.6" points="0,7.0 5,12.2 10,23.0 15,35.8 20,47.0 25,53.8 30,54.9 35,50.5 40,42.5 45,33.4 50,25.7 55,21.3 60,21.0 65,24.5 70,30.4 75,36.9 80,42.2 85,45.0 90,44.9 95,42.1 100,37.7 105,33.1 110,29.5 115,27.7 120,28.1 125,30.3 130,33.5 135,36.7 140,39.2 145,40.2 150,39.8 155,38.1 160,35.8 165,33.5 170,31.9 175,31.2 180,31.7 185,32.9 190,34.6 195,36.2 200,37.3 205,37.7 210,37.3 215,36.3 220,35.1 225,34.0 230,33.3 235,33.1 240,33.4 245,34.1 250,35.0 255,35.8 260,36.3 265,36.4 270,36.1 275,35.5 280,34.9 285,34.4 290,34.1 295,34.0 300,34.3 305,34.7 310,35.1 315,35.5 320,35.7 325,35.7 330,35.5 335,35.2 340,34.9 345,34.6 350,34.5 355,34.5 360,34.7 365,34.9 370,35.1 375,35.3 380,35.4 385,35.3 390,35.2 395,35.1 400,34.9 405,34.8 410,34.7 415,34.8 420,34.9 425,35.0 430,35.1 435,35.2 440,35.2 445,35.2 450,35.1 455,35.0 460,34.9 465,34.9 470,34.9 475,34.9 480,34.9 485,35.0 490,35.1 495,35.1 500,35.1 505,35.1 510,35.0 515,35.0 520,35.0 525,34.9 530,34.9 535,34.9 540,35.0 545,35.0 550,35.0 555,35.0 560,35.0"></polyline>
+          </g>
+          <text x="62" y="210" text-anchor="end" font-size="11">gen5 demon1</text>
+          <text x="62" y="224" text-anchor="end" font-size="11" fill="#0e6e6e">&zeta; +0.106</text>
+
+          <line x1="70" y1="240" x2="630" y2="240" stroke="currentColor" stroke-width="0.8" opacity="0.5"></line>
+          <text x="70" y="252" font-size="10.5" opacity="0.7">0 s</text>
+          <text x="257" y="252" font-size="10.5" opacity="0.7">2 s</text>
+          <text x="443" y="252" font-size="10.5" opacity="0.7">4 s</text>
+          <text x="630" y="252" font-size="10.5" text-anchor="end" opacity="0.7">6 s</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Figure 2.</b> The same gust, three aircraft, six seconds. The gen3 trainer's oscillation grows &mdash; the trace runs off the panel because the wobble keeps getting bigger. Both gen5 aircraft settle back to level. The requirement is <b>&zeta; &ge; 0.08</b>, the military standard's threshold for handling that is clearly adequate rather than merely flyable. The two gen5 traces are drawn at the damping the search reported; with the spar mass corrected they decay slightly faster still, at +0.101 and +0.114.</figcaption>
+  </figure>
+
+  <div class="col">
+    <p>Nothing checked this until two days ago. The old measure compared two stiffnesses and called it stability, which passed a trainer whose wobble grows. The replacement solves the actual motion &mdash; sideslip, roll rate, yaw rate and bank angle together &mdash; and reports how fast the oscillation decays. That single check is why the fleet now carries tip fins.</p>
+  </div>
+</section>
+
+<section>
+  <h2>The gates</h2>
+  <p class="col lede">Thirty reasons a design can be rejected. Ten are about shape, twenty about flight, structure and printing. Each mission sets its own limits.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Mission limits</caption>
+      <thead>
+        <tr><th>Limit</th><th class="num">trainer_v3</th><th class="num">demon1</th><th class="num">micro</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Goal</td><td class="num">best glide</td><td class="num">top speed</td><td class="num">smallest</td></tr>
+        <tr><td>Span</td><td class="num">900 mm</td><td class="num">800 mm</td><td class="num">chosen by search</td></tr>
+        <tr><td>Balance margin</td><td class="num">0.15 &ndash; 0.32</td><td class="num">0.04 &ndash; 0.16</td><td class="num">0.10 &ndash; 0.26</td></tr>
+        <tr><td>Cruise speed</td><td class="num">7 &ndash; 11 m/s</td><td class="num">15 &ndash; 32 m/s</td><td class="num">8 &ndash; 17 m/s</td></tr>
+        <tr><td>Trim angle</td><td class="num">&le; 8&deg;</td><td class="num">&le; 5&deg;</td><td class="num">&le; 9&deg;</td></tr>
+        <tr><td>Wing loading</td><td class="num">&le; 26 g/dm&sup2;</td><td class="num">unlimited</td><td class="num">&le; 42 g/dm&sup2;</td></tr>
+        <tr><td>Mass</td><td class="num">&le; 500 g</td><td class="num">&le; 850 g</td><td class="num">&le; 220 g</td></tr>
+        <tr><td>Load factor</td><td class="num">3 g</td><td class="num">6 g</td><td class="num">4 g</td></tr>
+        <tr><td>Tip stall margin</td><td class="num">12%</td><td class="num">4%</td><td class="num">8%</td></tr>
+        <tr><td>Heading stiffness</td><td class="num">&ge; 0.025</td><td class="num">&ge; 0.020</td><td class="num">&ge; 0.018</td></tr>
+        <tr><td>Dutch roll &zeta;</td><td class="num">&ge; 0.08</td><td class="num">&ge; 0.08</td><td class="num">&ge; 0.08</td></tr>
+        <tr><td>Spiral divergence</td><td class="num">&ge; 20 s to double</td><td class="num">not checked</td><td class="num">not checked</td></tr>
+        <tr><td>Spars</td><td class="num">two 8 mm</td><td class="num">two 8 mm</td><td class="num">one 8 mm</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>Scoring is strictly ordered rather than weighted. Any fair shape outranks any unfair one; among fair shapes, any flyable design outranks any unflyable one; only then does performance decide. A weighted sum lets the optimizer buy its way past a rule it should not be allowed to break &mdash; which it did, early on, by flying slightly too slowly and paying for it in efficiency.</p>
+  </div>
+</section>
+
+<section>
+  <h2>How it gets printed</h2>
+  <div class="col">
+    <p>Each wing half is cut into four panels, printed on end so the span runs up the Z axis, in spiral vase mode: one continuous bead, no infill, no top or bottom layers. That gives a light, seamless skin, but it allows exactly one closed loop per layer &mdash; which is what makes the internals interesting.</p>
+    <ul class="plain">
+      <li><strong>Ribs</strong> are not separate parts. The single loop detours inward, runs across to within one bead of the far skin, and comes back, so the two legs weld into a web. As the detour moves layer by layer, the webs sweep into a diagonal truss. Spacing comes from what the skin needs to resist buckling: 16&ndash;46 mm depending on the aircraft.</li>
+      <li><strong>Spars</strong> need no hole. The shell's own cavity is the bore, because the span is the print axis. The search keeps a clear corridor for an 8 mm tube and checks every panel joint is deep enough to pass one; ribs are nudged aside so they never cross it.</li>
+      <li><strong>Tip fins</strong> are the exception: a plate standing across the span cannot come out of that spiral, so they print flat on the bed in normal mode and glue to the tips.</li>
+    </ul>
+    <p>Every exported mesh is checked watertight before it is written, and each panel is fitted to the bed at the angle that makes it fit.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Five generations</h2>
+  <p class="col lede">Each one is a rerun of the whole fleet after the generator or the physics changed. The numbers only became comparable at the end, when every check finally described the same aeroplane.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>History</caption>
+      <thead>
+        <tr><th class="num">Dates</th><th>Generation</th><th>What changed</th><th>What it cost</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="num">9&ndash;10 Sep</td><td>gen1</td>
+          <td>Thrust model, measured drag polars, elevon and airfoil shape as variables, spar corridors</td>
+          <td>L/D fell 2.2&times; when real drag replaced the estimate</td>
+        </tr>
+        <tr>
+          <td class="num">10&ndash;11 Sep</td><td>gen2</td>
+          <td>Five stations, polyhedral, root and tip sections differ, winglets earn credit, lateral stability checked</td>
+          <td>Winglets appeared on all three; trainer gained L/D</td>
+        </tr>
+        <tr>
+          <td class="num">13 Sep</td><td>gen3</td>
+          <td>Geometry rebuilt for continuity after you called the shapes goofy; fairness gate added</td>
+          <td>Trainer &minus;0.05 L/D, micro slightly larger</td>
+        </tr>
+        <tr>
+          <td class="num">14 Sep</td><td>gen4</td>
+          <td>Dutch roll damping and spiral checked; optional glued-on tip fins</td>
+          <td>Looked good, then failed: ribs were still uncounted</td>
+        </tr>
+        <tr>
+          <td class="num">15 Sep</td><td>gen5</td>
+          <td>Spar and ribs sized inside the search; export uses what was scored; searches seeded from previous winners</td>
+          <td>First numbers that describe a buildable aircraft</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Bugs that changed the answer</h2>
+  <p class="col lede">Almost all of them were the same mistake wearing different clothes: the search scored one aeroplane and the verdict described another. Each is now pinned by a test.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Found and fixed</caption>
+      <thead>
+        <tr><th>The bug</th><th>How it showed up</th><th class="num">Size of the error</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Airfoils could not be reflexed</td><td>The maths pinned the trailing edge to the chord line, so a tailless wing could not trim itself</td><td class="num">whole design space</td></tr>
+        <tr><td>Two lattice resolutions</td><td>The search used a coarse grid, the final check a fine one</td><td class="num">27% cruise speed</td></tr>
+        <tr><td>Export used different drag</td><td>Search charged measured drag, export the flattering estimate</td><td class="num">L/D 7.62 vs 12.63</td></tr>
+        <tr><td>Two print samplings</td><td>Overhangs checked at 1 mm during search, 0.25 mm at export</td><td class="num">thousands of designs<br>found, none exportable</td></tr>
+        <tr><td>Flat wake model</td><td>Winglets were priced at exactly zero benefit</td><td class="num">11% induced drag</td></tr>
+        <tr><td>A 4 mm tube in an 8 mm hole</td><td>Geometry reserved 8 mm; the structure picked the lightest tube that carried the load</td><td class="num">half the bore</td></tr>
+        <tr><td>Body and stability axes mixed</td><td>Every aircraft looked violently unstable</td><td class="num">&zeta; &minus;0.20 vs &minus;0.06</td></tr>
+        <tr><td>Ribs never counted</td><td>Four generations of searches scored a hollow shell</td><td class="num">8&ndash;22 g, and two<br>winners turned infeasible</td></tr>
+        <tr><td>Spar allowance never updated <span class="tag fail">open</span></td><td>The budget carries a fixed "spar + joiners" figure written before the structure sizer existed, so the real tubes are never charged</td><td class="num">+24 g trainer, +16 g demon1,<br>&minus;3 g micro; all three<br>winners miss a gate</td></tr>
+        <tr><td>Wing loading shown 100&times; high</td><td>Grams per square metre labelled per square decimetre</td><td class="num">display only</td></tr>
+        <tr><td>A syntax error I introduced</td><td>No test imported the entry point, so 47 passing tests missed it</td><td class="num">would have killed<br>every search</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>The fleet, as built</h2>
+  <p class="col lede">Every figure below includes the ribs, the fins, and the real mass of the carbon the build actually calls for. Print the wing panels in vase mode and the fin plates flat, two per aircraft.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Final designs</caption>
+      <thead>
+        <tr><th>Aircraft</th><th class="num">Headline</th><th class="num">Mass</th><th class="num">&zeta;</th><th class="num">Carbon</th><th class="num">Ribs</th><th class="num">Shell</th><th>Files</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>trainer_v3_v101 <span class="tag warn">over its brief</span></td>
+          <td class="num">L/D 7.02</td><td class="num">355 g</td><td class="num">+0.101</td>
+          <td class="num">8&times;6: 900 + 685 mm</td><td class="num">27 mm</td><td class="num">94 g, 3.5 h</td>
+          <td class="name">out/gen5/trainer_v3_v101/</td>
+        </tr>
+        <tr>
+          <td>demon1_v102 <span class="tag warn">trims flat</span></td>
+          <td class="num">44.2 m/s</td><td class="num">334 g</td><td class="num">+0.114</td>
+          <td class="num">8&times;6: 800 + 800 mm</td><td class="num">16 mm</td><td class="num">73 g, 2.7 h</td>
+          <td class="name">out/gen5/demon1_v102/</td>
+        </tr>
+        <tr>
+          <td>micro_v92 <span class="tag warn">under-damped</span></td>
+          <td class="num">352 mm span</td><td class="num">137 g</td><td class="num">+0.070</td>
+          <td class="num">8&times;6: 330 mm</td><td class="num">46 mm</td><td class="num">29 g, 1.1 h</td>
+          <td class="name">out/gen4/micro_v92_sized/</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <p><strong>Do not print parts from any earlier folder.</strong> No search before gen5 exported the ribs, so those shells are missing the internal structure the skin needs.</p>
+    <p><strong>These three each miss one gate.</strong> The masses above are the corrected ones; the figures the search logged were 331 / 317 / 140 g, because the budget never charged the real carbon. All three still trim with positive damping, so they fly &mdash; the trainer is 27.5 g/dm&sup2; against a 26 limit, demon1 trims hands-off at CL 0.136 against a 0.15 floor, and the micro damps at &zeta; +0.070 against the 0.08 threshold. They were printed as-is by choice, rather than re-searched.</p>
+  </div>
+
+  <div class="col">
+    <h3>The fuselage</h3>
+    <p>There isn't one. The centre body is part of the wing, and the panel split sits exactly at the body/wing junction &mdash; the <code>p0</code> pair, mirrored and glued at the centreline, <em class="term">is</em> the fuselage. Everything lives inside it: battery, receiver, ESC and servos, each with a volume the search checked would fit.</p>
+    <p>Print <code>p0</code> with <strong>zero bottom layers</strong>. The exported mesh is a closed solid, capped at both ends, so default vase settings would seal the root &mdash; and the spar has to run tip to tip straight through that face, with the electronics loaded through it before the halves are joined.</p>
+  </div>
+
+  <div class="col">
+    <h3>Known weak spots</h3>
+    <ul class="plain">
+      <li>The micro is the one to watch on a first flight: &zeta; +0.070 is below the Level 1 threshold, so its yaw-roll wobble damps out slowly. The AR630's AS3X gyro will cover it in practice; the model does not count gyros.</li>
+      <li>Every aircraft here needs nearly the largest tip fins allowed to reach the damping it has. Fins are the only lateral lever the search has, and it spends all of it.</li>
+      <li>demon1 is the hardest mission to satisfy &mdash; one of its three attempts found nothing flyable, tripping over battery bay depth and propeller tip speed.</li>
+      <li>The micro is still pinned against the smallest span I allowed it, so the true minimum size is smaller and unknown.</li>
+      <li>Elevon hinges, servo mounting and the motor firewall are not in the geometry. They are real mechanical decisions and I left them for you rather than invent them.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <h2>Running it</h2>
+    <pre># search one mission, seeded from a previous winner
+python run.py search --mission trainer_v3 --iters 45 --popsize 6 --seed 0 \
+    --polar "out/tunnel/polar.csv@60000,out/tunnel_re100/polar.csv@100000" \
+    --seed-design out/gen5/trainer_v3_v101/design.json --out out/gen6/trainer
+
+# re-export a saved design (spar and ribs sized the same way)
+python run.py export --design out/gen5/demon1_v102/design.json --mission demon1 \
+    --polar "out/tunnel/polar.csv@60000,out/tunnel_re100/polar.csv@100000" \
+    --out out/gen5/demon1_v102
+
+# the whole fleet, one search per core
+bash scripts/run_fleet_gen5.sh
+
+# every check that pins a past mistake
+python -m pytest tests/ -q</pre>
+    <p>A full search is 9,660 designs and takes six to ten hours on your machine, run several at a time, one core each.</p>
+  </div>
+</section>
+
+<footer>
+  Washout &middot; 8,063 lines of Python &middot; 59 tests &middot; 460,286 designs evaluated across 67 searches &middot; 9&ndash;15 September 2026
+</footer>
+
+</div>

@@ -1,4 +1,4 @@
-# loft
+# washout
 
 Automated blended-wing-body design, from a design vector to a
 vase-mode-printable STL, judged the whole way by physics rather than by
@@ -217,7 +217,7 @@ for a rectangular one, and reproduces published NACA 4412 Cm.
 ## Layout
 
 ```
-loft/
+washout/
   geom/      cst.py        CST sections, fitting, blending, reflex deflection
              planform.py   BWB stations, lofting, planform integrals
   aero/      vlm.py        vortex lattice on the mean camber surface

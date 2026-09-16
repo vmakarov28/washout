@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""loft: search a blended wing body, print it in vase mode.
+"""washout: search a blended wing body, print it in vase mode.
 
     python run.py search  [--iters 60] [--span 1.0] [--out out/run1]
     python run.py export  --design out/run1/design.json
@@ -34,11 +34,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from loft.geom import cst
-from loft.printing import stl, vase
-from loft.search.design import (Mission, evaluate, physical_to_unit,
-                                      unit_to_physical)
-from loft.search.optimize import SEEDS, run_search
+from washout import spars as sp
+from washout.geom import cst
+from washout.printing import stl, vase
+from washout.search.design import (BOUNDS, Mission, choose_structure,  # noqa: F401
+                                evaluate, physical_to_unit, unit_to_physical)
+from washout.search.optimize import SEEDS, run_search
 
 ROOT = Path(__file__).resolve().parent
 
@@ -51,6 +52,33 @@ def print_settings(a) -> vase.PrintSettings:
         spar_d_mm=a.spar,
         ribs=a.ribs, rib_count=a.rib_count, rib_pitch_mm=a.rib_pitch,
     )
+
+
+FIN_DEFAULTS = {"fin_area_frac": 0.0, "fin_aspect": 1.3, "fin_below": 0.0}
+
+
+def load_seed_physical(path: Path) -> dict:
+    """A previous run's design, as a starting point for this search.
+
+    Seeding stops a generation backsliding. gen4's micro search finished
+    behind gen3's winner even though, by the gen4 search's own gates, that
+    winner was feasible: differential evolution starts from random designs
+    and never found its way back to it. With the old winner in the starting
+    population, the best feasible design can only be at least as good --
+    provided the old winner is still feasible under the new gates.
+
+    Reads the name-keyed `physical` dict, never `u`: `u` is positional and
+    changes meaning every time a design variable is added. Designs from
+    before the tip-fin variables are lifted with no fins; any other missing
+    variable is an error rather than a guess."""
+    phys = dict(json.loads(Path(path).read_text())["physical"])
+    for k, v in FIN_DEFAULTS.items():
+        phys.setdefault(k, v)
+    missing = [b.name for b in BOUNDS if b.name not in phys]
+    if missing:
+        raise SystemExit(f"{path}: design predates variables {missing}; "
+                         f"cannot seed from it")
+    return {b.name: float(np.clip(phys[b.name], b.lo, b.hi)) for b in BOUNDS}
 
 
 def report(ev, settings: vase.PrintSettings) -> str:
@@ -70,42 +98,32 @@ def report(ev, settings: vase.PrintSettings) -> str:
             f"        peak section cl {t.cl_local_max:.2f} | verdict: {t.reason}",
             "",
         ]
+    if getattr(ev, "structure", None) is not None:
+        lines += [ev.structure.report(), ""]
+    if getattr(ev, "fins", None) is not None:
+        lines += [ev.fins.report(), ""]
+    if getattr(ev, "dynamics", None) is not None:
+        lines += [ev.dynamics.report(), ""]
+    if getattr(ev, "fairness", None) is not None:
+        lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
+    if getattr(ev, "lateral", None) is not None:
+        lines += [ev.lateral.report(), ""]
+    if getattr(ev, "spar_fits", None):
+        lines += [sp.report(ev.spar_fits, ev.plan), ""]
     return "\n".join(lines)
-
-
-def choose_structure(ev, mission, settings: vase.PrintSettings):
-    """Size the spar and the rib pitch from the trimmed flight condition,
-    then hand back the print settings that follow from them.
-
-    This is the 'pick the best settings' step and it runs AFTER the
-    aerodynamic search, not inside it: the loads depend on the span
-    loading of the design that won, and no earlier point in the pipeline
-    knows what that is."""
-    from loft import structure
-    from loft.aero.vlm import VLM
-    from loft.search.design import LATTICE_NC, LATTICE_NS
-
-    pt = VLM(ev.plan, LATTICE_NS, LATTICE_NC).solve(ev.trim.alpha_deg,
-                                                    ev.trim.x_cg_m)
-    st = structure.select(ev.plan, pt, ev.mass_kg,
-                          skin_t_mm=settings.extrusion_width_mm,
-                          n_limit=mission.n_limit_g)
-    tuned = vase.PrintSettings(**{**settings.__dict__,
-                                  "spar_d_mm": st.spar.od_mm,
-                                  "ribs": True,
-                                  "rib_pitch_mm": st.rib_pitch_mm})
-    return st, tuned
 
 
 def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
-        from loft.report import figure
+        from washout.report import figure
         fig = figure(ev, settings, out / "design.png",
-                     title=f"loft {ev.plan.span_m*1000:.0f} mm BWB")
+                     title=f"washout {ev.plan.span_m*1000:.0f} mm BWB")
         print(f"\nfigure: {fig}")
-    except ImportError:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # Any plotting failure, not just a missing matplotlib: the figure
+        # is drawn BEFORE the STLs, and must never cost the parts.
+        print(f"\nfigure skipped ({type(e).__name__}: {e})")
     panels = vase.build_panels(ev.plan, settings)
     total_g = total_min = 0.0
     print(f"\nprintable parts (one half wing; mirror for the other side):")
@@ -123,6 +141,15 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         total_g += pan.mass_g()
         total_min += pan.print_time_min()
     print(f"  {'TOTAL x2':<12} {'':22} {2*total_g:5.1f} g  {2*total_min:4.0f} min")
+    fins = getattr(ev, "fins", None)
+    if fins is not None:
+        rep = fins.export_stl(out / f"{ev.plan.name}_tip_fin.stl")
+        o = fins.outline()
+        w_mm = float(o[:, 0].max() - o[:, 0].min()) * 1000.0
+        h_mm = float(o[:, 1].max() - o[:, 1].min()) * 1000.0
+        print(f"  {ev.plan.name + '_tip_fin':<14} flat plate {w_mm:.0f}x{h_mm:.0f} mm, "
+              f"{fins.thickness_m*1000:.1f} mm -- print TWO in normal (not vase) "
+              f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
     print(f"\n  slice with SPIRAL VASE / spiralize outer contour ON, 0 top "
           f"layers,\n  1 bottom layer, {settings.extrusion_width_mm} mm "
           f"extrusion width, {settings.layer_h_mm} mm layers.")
@@ -165,6 +192,9 @@ def main() -> int:
     ap.add_argument("--rib-pitch", type=float, default=25.0, dest="rib_pitch")
     ap.add_argument("--no-structure", action="store_true", dest="no_structure",
                     help="skip spar/rib sizing; export a bare vase shell")
+    ap.add_argument("--seed-design", type=Path, default=None, dest="seed_design",
+                    help="design.json from an earlier run to put in the starting "
+                         "population, so the search cannot finish behind it")
     a = ap.parse_args()
 
     base = cst.load_selig(a.airfoil)
@@ -187,7 +217,7 @@ def main() -> int:
     # handed over.
     drag = None
     if a.polar:
-        from loft.aero.performance import MeasuredDrag, MultiRePolar
+        from washout.aero.performance import MeasuredDrag, MultiRePolar
         specs = []
         for chunk in str(a.polar).split(","):
             if "@" in chunk:
@@ -215,32 +245,32 @@ def main() -> int:
     if a.command == "export":
         d = json.loads((a.design or (a.out / "design.json")).read_text())
         u = np.array(d["u"])
-        ev = evaluate(u, mission, base, settings, want_panels=True, drag=drag)
+        # Spar and ribs are sized inside evaluate(), so this is the same
+        # verdict the search scored -- one pipeline, not two.
+        ev = evaluate(u, mission, base, settings, want_panels=True, drag=drag,
+                      size_structure=not a.no_structure)
         print(report(ev, settings))
-        if ev.trim and not a.no_structure:
-            st, settings = choose_structure(ev, mission, settings)
-            print(st.report())
-            print()
-            # the spar just got chosen, so the bore gate must be re-run
-            # against the tube we actually intend to slide in
-            ev = evaluate(u, mission, base, settings, want_panels=True,
-                          drag=drag)
-            if ev.reasons:
-                print("after structure sizing:", "; ".join(ev.reasons), "\n")
-        do_export(ev, settings, a.out)
+        if ev.reasons:
+            print("issues:", "; ".join(ev.reasons), "\n")
+        do_export(ev, ev.print_settings or settings, a.out)
         return 0
 
-    print(f"loft search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
+    seed_phys = (load_seed_physical(a.seed_design) if a.seed_design
+                 else SEEDS.get(a.mission))
+    if a.seed_design:
+        print(f"seeded from {a.seed_design}")
+    print(f"washout search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed, drag=drag,
-                                   out_dir=a.out, seed_physical=SEEDS.get(a.mission))
+                                   out_dir=a.out, seed_physical=seed_phys)
     (a.out / "design.json").write_text(json.dumps({
         "u": list(map(float, best_u)),
         "physical": unit_to_physical(best_u),
         "score": best.score, "ld": best.ld, "v_cruise": best.v_cruise,
         "mass_kg": best.mass_kg, "static_margin": best.static_margin,
         "feasible": best.ok, "reasons": list(best.reasons),
+        "seeded_from": str(a.seed_design) if a.seed_design else None,
     }, indent=2), encoding="utf-8")
 
     print(f"\n{'='*66}\n{log.evaluations} evaluations, "
@@ -249,7 +279,8 @@ def main() -> int:
     for k, v in unit_to_physical(best_u).items():
         print(f"    {k:<16} {v:8.3f}")
     if best.ok:
-        do_export(best, settings, a.out)
+        # the settings the verdict was reached with: spar and ribs sized
+        do_export(best, best.print_settings or settings, a.out)
     else:
         print("\nbest design still violates:", "; ".join(best.reasons))
         print("no STL written -- fix the mission or widen the bounds")

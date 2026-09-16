@@ -1,0 +1,13 @@
+# Normalise text in the repository to LF. Shell scripts are declared
+# explicitly because they are run under WSL bash: a CRLF `run_fleet.sh`
+# fails with `\r: command not found`, which is a real break, not churn.
+* text=auto
+*.sh   text eol=lf
+*.py   text
+*.md   text
+*.yaml text
+*.dat  text
+
+*.stl binary
+*.png binary
+*.mp4 binary

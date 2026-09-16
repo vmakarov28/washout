@@ -235,11 +235,23 @@ def select(plan, aero_point, mass_kg: float, skin_t_mm: float,
            skin: SkinMaterial | None = None,
            n_limit: float = 3.5, ult_factor: float = 1.5,
            max_tip_defl_pct: float = 6.0,
-           tubes=STOCK_TUBES) -> Structure:
+           tubes=STOCK_TUBES, min_od_mm: float = 0.0) -> Structure:
     """The lightest stock tube that survives the load case, plus the rib
     pitch its skin needs. This is the 'pick the best settings' step, and
-    it is a search over a catalogue, not a continuous optimum."""
+    it is a search over a catalogue, not a continuous optimum.
+
+    `min_od_mm` is not an optimisation hint, it is a HARDWARE FACT. The
+    search gates the geometry on a specific tube diameter -- the spar
+    corridor is kept clear of ribs at that size and every panel joint is
+    checked deep enough to pass it -- and then this function used to go
+    and pick whatever was lightest, which on micro meant a 4x2 tube
+    rattling around inside a bore designed for 8 mm. Asking 'is the
+    tube I own strong enough' is the right question; 'which tube would
+    you like' is not, when the answer has to fit a hole already sized.
+    """
     skin = skin or SkinMaterial()
+    if min_od_mm > 0.0:
+        tubes = tuple(t for t in tubes if t.od_mm >= min_od_mm - 1e-9) or tubes[-1:]
     n_ult = n_limit * ult_factor
     loads_lim = span_loads(plan, aero_point, mass_kg, n_limit)
     loads_ult = span_loads(plan, aero_point, mass_kg, n_ult)

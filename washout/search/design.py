@@ -28,11 +28,17 @@ import numpy as np
 from ..geom.cst import (Airfoil, deflect_te, flap_effectiveness,
                         scale_camber, scale_thickness_ratio,
                         set_thickness_peak)
-from ..geom.planform import Planform, bwb
+from ..geom.planform import Planform, Segment, bwb, faired, lofted
+from ..geom import fairness as fz
 from ..printing import vase
 from ..aero import performance as perf
+from ..aero import lateral
+from ..aero import dynamics as dyn
+from ..aero import fins as fn
 from .. import propulsion as prop
 from .. import spars as sp
+from .. import structure as struct
+from collections import OrderedDict
 from ..aero.vlm import VLM
 
 
@@ -187,6 +193,47 @@ class Mission:
     """Static thrust over weight, for the hand launch. 0.5 will fly off a
     gentle throw; a racer wants 1.0 or better."""
     max_trim_alpha_deg: float = 90.0
+    min_cl_trim: float = 0.0
+    min_cn_beta: float = 0.0
+    """Directional stiffness floor, per radian of sideslip.
+
+    Zero means 'not checked', which is what every design before this one
+    got. A swept tailless wing with too little Cn_beta does not fail
+    dramatically -- it will not hold a heading, and because sweep couples
+    yaw into roll it drops a wing whenever it skids. Nothing in the
+    longitudinal gates can see any of that, so the optimizer was free to
+    spend sweep and dihedral purely on drag."""
+    max_roll_yaw_ratio: float = 1e9
+    """Ceiling on |Cl_beta / Cn_beta|.
+
+    Deliberately LOOSE. The Cl_beta model is strip theory on real
+    geometry and the Cn_beta sweep term carries a published coefficient,
+    so the ratio is good for rejecting the pathological corner -- a huge
+    winglet on a heavily dihedralled wing -- and is not a handling
+    qualities prediction. Treated as a sanity bound, not a target."""
+    fairness: fz.Limits = field(default_factory=fz.Limits)
+    """How far the SHAPE may depart from one continuous surface. Checked
+    before anything expensive: an unfair loft is rejected in ~50 ms and
+    never pays for a lattice, panels or a print check."""
+    min_dutch_roll_zeta: float | None = None
+    """Floor on the Dutch-roll damping ratio (aero/dynamics.py); None means
+    not checked. MIL-F-8785C puts Level 1 at 0.08. Negative is a wobble
+    that grows. This is the gate the roll/yaw ratio was standing in for:
+    the gen3 trainer passed the ratio at 10.8 with a DIVERGENT Dutch roll."""
+    min_spiral_t2_s: float = 0.0
+    """Fastest acceptable spiral divergence, as time to double; 0 is off.
+    Yaw stiffness -- fins especially -- pushes the spiral mode toward
+    neutral, and a trainer that tightens into a spiral hands-off is not a
+    trainer."""
+    """Floor on the HANDS-OFF trim lift coefficient.
+
+    The speed objective scores top speed with down-elevon held, which is
+    correct and thrust-bounded -- but nothing stopped the optimizer from
+    also placing the hands-off trim point at the top end. demon1 duly
+    trimmed at CL 0.032, meaning that with the sticks centred it flies at
+    41 m/s and the pilot must hold UP elevator to slow down. That is not
+    a racer, it is a dart. A racer trims somewhere sane and is PUSHED
+    fast; this floor says where sane is."""
     """Cap on the angle of attack the aircraft settles at, hands off.
 
     The lattice is INVISCID: its lift curve rises for ever and the
@@ -242,6 +289,20 @@ class Mission:
             cl_max_section=0.85, max_mass_kg=0.50,
             max_wing_loading_gdm2=26.0, tip_stall_margin=0.12,
             n_limit_g=3.0, max_trim_alpha_deg=8.0,
+            # Calibrated against 3000 random designs: Cn_beta runs a
+            # median of +0.028 and a lower quartile of +0.016, so 0.025
+            # asks for roughly the better half and is reachable without
+            # a grotesque winglet. The roll/yaw ceiling sits above the
+            # median on purpose -- it is there to catch the pathological
+            # corner, not to steer the design.
+            # Roll/yaw ceiling tightened from 11 to 8.5: the lever
+            # study showed moving the up-turn to the tips reaches it for
+            # nothing. Now a backstop -- the damping gate below is the
+            # real test, and the ratio's dihedral term is known to run high.
+            min_cn_beta=0.025, max_roll_yaw_ratio=8.5,
+            min_dutch_roll_zeta=0.08, min_spiral_t2_s=20.0,
+            fairness=fz.Limits(max_root_t_over_c=0.24,
+                               max_tip_rise_frac=0.22),
             spar_d_mm=8.0, motor=prop.M2205, battery=prop.PACKS["3S 1300"],
             spars=(sp.SparSpec("LE spar", 8.0, 0.12, 0.30),
                    sp.SparSpec("TE spar", 8.0, 0.54, 0.74)),
@@ -274,13 +335,24 @@ class Mission:
             bays=(Bay("4S 850", 0.30, (65.0, 34.0, 24.0), x_var="batt_x"),
                   Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0))),
             battery_kg=0.105,
-            cruise_band_ms=(20.0, 48.0),
+            # This band is the HANDS-OFF trim window, not the top end:
+            # top speed is the objective and is scored separately with
+            # down-elevon. Policing trim speed at 20-48 m/s let the
+            # aircraft trim at 41 and call it cruise.
+            cruise_band_ms=(15.0, 32.0),
+            min_cl_trim=0.15,
             min_static_margin=0.04, max_static_margin=0.16,
             cl_max_section=1.00, max_mass_kg=0.85,
             max_overhang_deg=56.0,       # printed once, carefully
             max_wing_loading_gdm2=1e9,      # loading is the POINT here
             tip_stall_margin=0.04,
             n_limit_g=6.0, max_trim_alpha_deg=5.0,
+            # A racer buys speed with drag it does not spend elsewhere,
+            # and tolerates livelier handling than a trainer.
+            min_cn_beta=0.020, max_roll_yaw_ratio=12.0,
+            min_dutch_roll_zeta=0.08,
+            fairness=fz.Limits(max_root_t_over_c=0.24,
+                               max_tip_rise_frac=0.20),
             spar_d_mm=8.0, motor=prop.M2205, battery=prop.PACKS["4S 850"],
             spars=(sp.SparSpec("LE spar", 8.0, 0.12, 0.30),
                    sp.SparSpec("TE spar", 8.0, 0.54, 0.74)),
@@ -311,6 +383,15 @@ class Mission:
             cl_max_section=0.90, max_mass_kg=0.22,
             max_wing_loading_gdm2=42.0, tip_stall_margin=0.08,
             n_limit_g=4.0, max_trim_alpha_deg=9.0,
+            # Loosest of the three: micro is already the most constrained
+            # mission in the fleet and is flown close in, where a wander
+            # is corrected before it matters.
+            min_cn_beta=0.018, max_roll_yaw_ratio=12.0,
+            min_dutch_roll_zeta=0.08,
+            # micro gets the most winglet: at 350 mm the fin arm is
+            # short, so side area is the only yaw stiffness on offer
+            fairness=fz.Limits(max_root_t_over_c=0.26,
+                               max_tip_rise_frac=0.28),
             # 2.5 mm carbon ROD, not a tube: micro's tip panel is a few
             # millimetres thick and the 4 mm tube a 900 mm trainer wants
             # is the single gate that rejected an otherwise complete
@@ -349,22 +430,76 @@ PLANFORM_BOUNDS = (
     # violate become geometry exceptions it must be penalised for; this
     # way the constraint cannot be expressed at all.
     Bound("kink_gap", 0.18, 0.62, ""),
-    Bound("kink_chord_frac", 0.34, 0.86, ""),
-    Bound("tip_chord_frac", 0.16, 0.55, ""),
-    Bound("sweep_body", 20.0, 66.0, "deg"),
-    Bound("sweep_mid", 12.0, 50.0, "deg"),
-    Bound("sweep_outer", 4.0, 42.0, "deg"),
-    Bound("dihedral", 0.0, 10.0, "deg"),
-    Bound("twist_body", -2.0, 3.0, "deg"),
-    Bound("twist_kink", -4.0, 2.0, "deg"),
-    Bound("twist_tip", -9.0, 1.0, "deg"),
-    Bound("body_thickness", 1.10, 2.30, "x"),
+    # CHORD AS A RUNNING PRODUCT, not four independent fractions. Each
+    # station's chord is the previous one's times a taper ratio of at
+    # most one, so chord cannot grow outboard anywhere in the unit cube
+    # -- the gen2 generator could draw a 37 mm outer station ahead of a
+    # 47 mm tip, and random draws did. The lower bounds stop any single
+    # segment collapsing the chord in one step, which is what hooked the
+    # trailing edges.
+    Bound("kink_taper", 0.52, 0.97, ""),
+    # Fifth station, still placed by a gap fraction so body < kink <
+    # outer < tip holds identically. Narrower than gen2: a gap of 0.78
+    # left a tip segment 9% of the span long carrying a 60 degree
+    # winglet, which is a stub, not a panel.
+    Bound("outer_gap", 0.25, 0.65, ""),
+    Bound("outer_taper", 0.62, 1.00, ""),
+    Bound("tip_taper", 0.60, 1.00, ""),
+    # SWEEP AS INCREMENTS. Adjacent gen2 segments could disagree by 40
+    # degrees; demon1 went 43 -> 19 -> 29, and steep-flat-steep is a
+    # wave no loft can hide. The body sets the sweep and each segment
+    # outboard may relax it by a bounded amount or add only a little
+    # back, which is the shape of every blended wing body that works.
+    Bound("sweep_body", 20.0, 62.0, "deg"),
+    Bound("sweep_mid_delta", -20.0, 4.0, "deg"),
+    # Outboard of the mid segment sweep may only relax (the tip may add
+    # back less than the 2 degree reversal amplitude). With +4 and +6
+    # allowed, a third of random draws swept up, down and up again, and
+    # the fairness gate rejected them all. Now the sweep distribution
+    # has one hump by construction -- the nose rising to the body or mid
+    # sweep -- and the gate never sees a leading-edge wave to reject.
+    Bound("sweep_outer_delta", -12.0, 0.0, "deg"),
+    Bound("sweep_tip_delta", -8.0, 1.5, "deg"),
+    # DIHEDRAL THAT TURNS UP IN STAGES. Inboard dihedral, a final cant,
+    # and a blend that puts the outer segment's dihedral BETWEEN them,
+    # so the wing always turns up through two steps and never snaps from
+    # 5 to 60 degrees at a single station. That is the difference
+    # between a blended winglet and a bracket bolted on.
+    Bound("dihedral", 0.0, 8.0, "deg"),
+    Bound("winglet_cant", 0.0, 60.0, "deg"),
+    Bound("winglet_blend", 0.35, 0.65, ""),
+    # TWIST AS ONE SMOOTH FUNCTION: root incidence, total washout, and
+    # where along the span it is spent --
+    #     twist(eta) = twist_root - washout * eta ** washout_exp
+    # Monotone by construction. gen2's four independent twists zig-zagged
+    # (+0.4, -4.7, -0.9) and every zig showed up in the span loading.
+    Bound("twist_root", -2.0, 3.0, "deg"),
+    Bound("washout", -1.0, 8.0, "deg"),
+    Bound("washout_exp", 0.6, 3.0, ""),
+    Bound("body_thickness", 1.05, 2.00, "x"),
     Bound("batt_x", 0.06, 0.72, "c_root"),
 )
 
 SECTION_BOUNDS = (
+    # ROOT section camber and reflex. Until now there was one of each for
+    # the whole aircraft, and the pipeline passed the same airfoil object
+    # as both root and tip -- so the blend was a no-op and camber measured
+    # identical to five decimals at every station. A blended wing body
+    # trims itself with reflex, and reflex is cheapest where the chord is
+    # longest and the arm shortest: at the BODY. Lift is wanted where the
+    # arm is longest: OUTBOARD. One knob could not ask for both.
     Bound("reflex_deg", -1.0, 9.0, "deg"),
     Bound("camber_scale", 0.30, 1.70, "x"),
+    Bound("tip_reflex_deg", -3.0, 7.0, "deg"),
+    Bound("tip_camber_scale", 0.10, 1.60, "x"),
+    # How fast the section morphs from root shape to tip shape along the
+    # span: blend(eta) = eta ** blend_exp. Above 1 the body holds its own
+    # shape well outboard and the change happens late, which is what a
+    # blended wing body looks like; below 1 it changes immediately.
+    # Narrowed from 0.5-3.2: at 3.2 half the section change happens in
+    # the last fifth of the span, so the tip panel visibly changes shape
+    # within a few centimetres.
+    Bound("blend_exp", 0.70, 2.20, ""),
     # The SHAPE of the section, not just its camber. t/c trades drag
     # against internal volume and spar depth; the thickness peak trades a
     # gentle stall (forward) against lower drag and a deeper bay aft.
@@ -381,11 +516,20 @@ SECTION_BOUNDS = (
     # meant the optimizer could not buy the one thing it most needed.
     Bound("prop_diam_in", 4.0, 7.0, "in"),
     Bound("prop_pitch_in", 2.5, 6.5, "in"),
+    # Vertical tip fins (aero/fins.py): flat plates printed on the bed and
+    # glued on, because vase mode cannot print a surface normal to the
+    # span. Area is ONE fin as a fraction of wing area; below
+    # FIN_MIN_AREA_FRAC there are no fins at all, so "none" is a real
+    # region of the search rather than a token pair of tabs.
+    Bound("fin_area_frac", 0.0, 0.06, "S"),
+    Bound("fin_aspect", 0.8, 2.0, ""),
+    Bound("fin_below", 0.0, 0.4, ""),
 )
 BATTERY_NAME = "battery"
 
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
+FIN_MIN_AREA_FRAC = 0.005
 
 
 def unit_to_physical(u: np.ndarray) -> dict:
@@ -399,32 +543,106 @@ def physical_to_unit(p: dict) -> np.ndarray:
 
 def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
     """Design vector -> planform. Total function: every u in [0,1]^n
-    produces geometry, valid or not. Validity is judged, not assumed."""
+    produces geometry, valid or not. Validity is judged, not assumed.
+
+    Five stations now, and a real spanwise section family: the root and
+    the tip are DIFFERENT airfoils, lerped in CST coefficient space along
+    the span. That is what `blend` in each Segment selects.
+    """
     p = unit_to_physical(u)
-    sec = scale_thickness_ratio(base, p["t_over_c"])
-    sec = set_thickness_peak(sec, p["x_tmax"])
-    tip = deflect_te(scale_camber(sec, p["camber_scale"]), p["reflex_deg"])
+    # shared shape: t/c and the thickness peak are properties of the
+    # whole aircraft's structure and print, not of one station
+    shell = scale_thickness_ratio(base, p["t_over_c"])
+    shell = set_thickness_peak(shell, p["x_tmax"])
+    root_af = deflect_te(scale_camber(shell, p["camber_scale"]),
+                         p["reflex_deg"])
+    tip_af = deflect_te(scale_camber(shell, p["tip_camber_scale"]),
+                        p["tip_reflex_deg"])
+
     span = p["span_m"] if mission.span_free else mission.span_m
     body_eta = p["body_eta"]
     kink_eta = body_eta + p["kink_gap"] * (1.0 - body_eta)
-    return bwb(
+    outer_eta = kink_eta + p["outer_gap"] * (1.0 - kink_eta)
+
+    # chord: running product, monotone non-increasing by construction
+    body_c = p["body_chord_frac"]
+    kink_c = body_c * p["kink_taper"]
+    outer_c = kink_c * p["outer_taper"]
+    tip_c = outer_c * p["tip_taper"]
+
+    # sweep: body sets it, each segment outboard adjusts by a bounded step
+    sw_body = p["sweep_body"]
+    sw_mid = float(np.clip(sw_body + p["sweep_mid_delta"], 0.0, 66.0))
+    sw_outer = float(np.clip(sw_mid + p["sweep_outer_delta"], 0.0, 66.0))
+    sw_tip = float(np.clip(sw_outer + p["sweep_tip_delta"], 0.0, 66.0))
+
+    # dihedral: the outer segment always sits between inboard and cant
+    d_in = p["dihedral"]
+    d_tip = p["winglet_cant"]
+    d_out = d_in + p["winglet_blend"] * (d_tip - d_in)
+
+    def twist_at(eta: float) -> float:
+        return float(p["twist_root"] - p["washout"] * eta ** p["washout_exp"])
+
+    # Root t/c is capped by the mission's fairness limit; clamping here
+    # makes a potato root unrepresentable instead of merely penalised.
+    bt = p["body_thickness"]
+    t_cap = 0.98 * mission.fairness.max_root_t_over_c
+    if root_af.t_max * bt > t_cap:
+        bt = max(t_cap / max(root_af.t_max, 1e-6), 1.0)
+
+    # And the body may not fall away faster than the fairness limit. The
+    # pod gate rejected up to half of all random draws, most of them on
+    # micro, where a body_eta of 0.10 is 17 mm of span in which to lose a
+    # quarter of the thickness -- the same fraction is 45 mm on trainer.
+    # Estimated on the control stations with a 0.6 margin for the ~1.5x
+    # peak-to-mean of a smooth ramp from zero slope; the gate on the
+    # real loft stays as the backstop.
+    half_mm = 0.5 * span * 1000.0
+    c_root_mm = p["root_chord"] * 1000.0
+    t_sec = root_af.t_max
+    slope_cap = 0.6 * np.tan(np.radians(mission.fairness.max_thickness_slope_deg))
+
+    def body_slope(b: float) -> float:
+        ts = (b, 1.0 + 0.75 * (b - 1.0), 1.0 + 0.30 * (b - 1.0))
+        cs = (1.0, body_c, kink_c)
+        ys = (0.0, body_eta * half_mm, kink_eta * half_mm)
+        h = [0.5 * t_sec * t_ * c_ * c_root_mm for t_, c_ in zip(ts, cs)]
+        return max((h[i] - h[i + 1]) / max(ys[i + 1] - ys[i], 1e-6)
+                    for i in range(2))
+
+    if body_slope(bt) > slope_cap:
+        lo_b, hi_b = 1.0, bt
+        for _ in range(24):
+            mid_b = 0.5 * (lo_b + hi_b)
+            if body_slope(mid_b) > slope_cap:
+                hi_b = mid_b
+            else:
+                lo_b = mid_b
+        bt = lo_b
+    exp = p["blend_exp"]
+
+    def blend_at(eta: float) -> float:
+        return float(np.clip(eta, 0.0, 1.0) ** exp)
+
+    segs = (
+        Segment(body_eta, body_c, sw_body, d_in, twist_at(body_eta),
+                blend_at(body_eta), 1.0 + 0.75 * (bt - 1.0)),
+        Segment(kink_eta, kink_c, sw_mid, d_in, twist_at(kink_eta),
+                blend_at(kink_eta), 1.0 + 0.30 * (bt - 1.0)),
+        Segment(outer_eta, outer_c, sw_outer, d_out, twist_at(outer_eta),
+                blend_at(outer_eta), 1.0),
+        Segment(1.0, tip_c, sw_tip, d_tip, twist_at(1.0), 1.0, 1.0),
+    )
+    return faired(
         half_span_m=0.5 * span,
         root_chord_m=p["root_chord"],
-        body_eta=body_eta,
-        body_chord_frac=p["body_chord_frac"],
-        kink_eta=kink_eta,
-        kink_chord_frac=p["kink_chord_frac"],
-        tip_chord_frac=p["tip_chord_frac"],
-        sweep_body_deg=p["sweep_body"],
-        sweep_mid_deg=p["sweep_mid"],
-        sweep_outer_deg=p["sweep_outer"],
-        dihedral_deg=p["dihedral"],
-        twist_body_deg=p["twist_body"],
-        twist_kink_deg=p["twist_kink"],
-        twist_tip_deg=p["twist_tip"],
-        root_airfoil=tip,
-        tip_airfoil=tip,
-        body_thickness_scale=p["body_thickness"],
+        root_twist_deg=p["twist_root"],
+        root_airfoil=root_af,
+        tip_airfoil=tip_af,
+        segments=segs,
+        root_thickness_scale=bt,
+        max_tip_rise_frac=0.98 * mission.fairness.max_tip_rise_frac,
         name=mission.name,
     )
 
@@ -439,6 +657,42 @@ def build(u: np.ndarray, mission: Mission, base: Airfoil) -> Planform:
 # spend 7384 evaluations perfecting a design the final check rejected.
 LATTICE_NS = 32
 LATTICE_NC = 8
+
+
+# ------------------------------------------------------------- lattice cache
+
+_VLM_CACHE: "OrderedDict[tuple, VLM]" = OrderedDict()
+_VLM_CACHE_SIZE = 2
+
+
+def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
+                ns: int, nc: int) -> VLM:
+    """The lattice for this design, built at most once.
+
+    Scoring the aircraft as built takes a bare-shell pass, a structure
+    sizing and a ribbed pass, and each used to build its own lattice from
+    identical geometry -- the ribs change the mass, never the shape. Timed
+    on the gen5 seed designs, a built-aircraft evaluation cost 2.3-2.8x a
+    bare one, and a large share of that was the same 512-panel influence
+    matrix inverted three times.
+
+    Keyed on everything build() reads -- the design vector, the span, the
+    mission's fairness clamps, the base airfoil -- plus the lattice size,
+    so a hit is the same geometry by construction. Two entries is enough:
+    one evaluation at a time uses one."""
+    key = (np.asarray(u, dtype=float).tobytes(), mission.span_m,
+           mission.span_free, mission.fairness, base.au.tobytes(),
+           base.al.tobytes(), float(base.te_gap), float(base.te_camber),
+           int(ns), int(nc))
+    vlm = _VLM_CACHE.get(key)
+    if vlm is None:
+        vlm = VLM(plan, ns=ns, nc=nc)
+        _VLM_CACHE[key] = vlm
+        while len(_VLM_CACHE) > _VLM_CACHE_SIZE:
+            _VLM_CACHE.popitem(last=False)
+    else:
+        _VLM_CACHE.move_to_end(key)
+    return vlm
 
 
 # ------------------------------------------------------------- evaluation
@@ -458,6 +712,18 @@ class Evaluation:
     trim: perf.TrimState | None = None
     mass: perf.MassBudget | None = None
     panels: list = field(default_factory=list)
+    spar_fits: list = field(default_factory=list)
+    lateral: object | None = None
+    fairness: object | None = None
+    fairness_limits: object | None = None
+    fins: object | None = None
+    dynamics: object | None = None
+    structure: object | None = None
+    print_settings: object | None = None
+    """Where the spanwise tubes ended up. Computed during the gates
+    and carried out so the export can SHOW the placement -- the first
+    version fitted them, gated on them, and then threw the geometry
+    away, so the log could only say a spar existed."""
 
     def line(self) -> str:
         if not self.ok:
@@ -467,7 +733,7 @@ class Evaluation:
                 f"SM {self.static_margin:+.3f}")
 
 
-def evaluate(
+def _evaluate_once(
     u: np.ndarray,
     mission: Mission,
     base: Airfoil,
@@ -504,6 +770,24 @@ def evaluate(
     if not good:
         return Evaluation(False, -1e6, reasons=(why,), plan=plan)
 
+    # --- fair? one continuous shape, before anything expensive ---
+    # Fairness DOMINATES feasibility the way feasibility dominates merit:
+    # every fair design outranks every unfair one, and unfair designs are
+    # ranked among themselves by how far they miss. Without that ordering
+    # the optimizer would happily trade a hooked trailing edge for a
+    # tenth of L/D, because nothing else in the score can see a hook.
+    fair = fz.measure(plan)
+    unfair = fair.violations(mission.fairness)
+    if unfair:
+        pen = sum(40.0 * max(sev, 0.05) for _, sev in unfair)
+        return Evaluation(False, -(5000.0 + pen),
+                          reasons=tuple(r for r, _ in unfair), plan=plan,
+                          fairness=fair, fairness_limits=mission.fairness)
+
+    fins = (fn.tip_fins(plan, p_vec["fin_area_frac"], p_vec["fin_aspect"],
+                        p_vec["fin_below"])
+            if p_vec["fin_area_frac"] >= FIN_MIN_AREA_FRAC else None)
+
     # Spar corridors first: the ribs have to be told where the spars go
     # BEFORE the panels are built, because a chordwise web at a spar's
     # station is a web through the spar.
@@ -531,6 +815,13 @@ def evaluate(
     items = tuple(i.at(root_c) for i in mission.payload)
     items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
                              p_vec["batt_x"] * root_c),)
+    if fins is not None:
+        # at the tips and aft: they move the CG back and add roll inertia,
+        # and both of those are part of what they cost
+        xf, zf = fins.centroid()
+        items += (perf.PointMass("tip fins",
+                                 fins.mass_kg(settings.filament_density_gcc * 1000.0),
+                                 xf, zf),)
     mass = perf.MassBudget(shell_kg=shell_kg,
                            shell_x_m=perf.shell_centroid_x(plan),
                            items=items)
@@ -548,7 +839,7 @@ def evaluate(
             penalty += 20.0 * (need - have) / need
 
     # --- trim fixes CL; CL fixes cruise speed ---
-    vlm = VLM(plan, ns=ns, nc=nc)
+    vlm = _cached_vlm(u, mission, base, plan, ns, nc)
     x_np = perf.neutral_point(vlm, plan)
     sm = (x_np - mass.x_cg_m) / plan.mac_m
     # The bracket is a SOLVER detail, not a design constraint. A slow
@@ -574,6 +865,9 @@ def evaluate(
         cd0 = drag.cd0(plan, v, aero_point=pt)     # measured: per-strip cl
     except TypeError:
         cd0 = drag.cd0(plan, v)                    # tier-0: flat
+    cd0_wing = cd0
+    if fins is not None:
+        cd0 = cd0 + fins.cd0(v, plan.area_m2)
     cd = cd0 + pt.CDi
     ld = pt.CL / cd
 
@@ -603,6 +897,47 @@ def evaluate(
         reasons.append(f"trims at {alpha:.1f} deg, over "
                        f"{mission.max_trim_alpha_deg:.0f} deg")
         penalty += 6.0 * (alpha - mission.max_trim_alpha_deg)
+    lat = lateral.analyse(plan, mass.x_cg_m, float(pt.CL))
+    if fins is not None:
+        # the static gates must see the fins too, or a fin could never
+        # help a design past them
+        _, _, _, z_cg = dyn.inertia(plan, mass, alpha, p_vec["elevon_eta"], fins)
+        d_fin = fins.derivatives(plan.area_m2, plan.span_m, mass.x_cg_m, z_cg, alpha)
+        lat = replace(lat, cn_beta=lat.cn_beta + d_fin[2, 0],
+                      cl_beta=lat.cl_beta + d_fin[1, 0],
+                      cn_beta_fin=lat.cn_beta_fin + d_fin[2, 0])
+    if mission.min_cn_beta > 0.0:
+        if lat.cn_beta < mission.min_cn_beta:
+            reasons.append(f"Cn_beta {lat.cn_beta:+.4f} below "
+                           f"{mission.min_cn_beta:.4f} (wanders in yaw)")
+            penalty += 300.0 * (mission.min_cn_beta - lat.cn_beta)
+        if lat.cl_beta > 0.0:
+            reasons.append(f"Cl_beta {lat.cl_beta:+.4f} positive "
+                           f"(rolls INTO the sideslip)")
+            penalty += 300.0 * lat.cl_beta
+        if lat.roll_yaw_ratio > mission.max_roll_yaw_ratio:
+            reasons.append(f"roll/yaw ratio {lat.roll_yaw_ratio:.1f} over "
+                           f"{mission.max_roll_yaw_ratio:.1f} (dutch roll)")
+            penalty += 4.0 * (lat.roll_yaw_ratio - mission.max_roll_yaw_ratio)
+    # --- does the Dutch roll die out? the real question, not the proxy ---
+    modes = dyn.analyse(vlm, plan, mass, alpha, mass.x_cg_m, v, cd0_wing,
+                        p_vec["elevon_eta"], fins)
+    if mission.min_dutch_roll_zeta is not None:
+        # an overdamped (non-oscillatory) Dutch roll is as good as it gets
+        z_dr = modes.zeta_dr if modes.zeta_dr is not None else 1.0
+        if z_dr < mission.min_dutch_roll_zeta:
+            reasons.append(f"Dutch roll zeta {z_dr:+.3f} below "
+                           f"{mission.min_dutch_roll_zeta:.2f}"
+                           + (" (grows)" if z_dr < 0.0 else ""))
+            penalty += 200.0 * (mission.min_dutch_roll_zeta - z_dr)
+    if mission.min_spiral_t2_s > 0.0 and modes.spiral_t2_s < mission.min_spiral_t2_s:
+        reasons.append(f"spiral doubles in {modes.spiral_t2_s:.1f} s "
+                       f"(need >= {mission.min_spiral_t2_s:.0f})")
+        penalty += 20.0 * (mission.min_spiral_t2_s - modes.spiral_t2_s) / mission.min_spiral_t2_s
+    if pt.CL < mission.min_cl_trim:
+        reasons.append(f"trims hands-off at CL {pt.CL:.3f}, below "
+                       f"{mission.min_cl_trim:.2f}")
+        penalty += 60.0 * (mission.min_cl_trim - pt.CL)
 
     # --- spar gates ---
     for f in spar_fits:
@@ -721,8 +1056,10 @@ def evaluate(
                 try:
                     cd_v = drag.cd_at(cl_v, plan.mac_m * vv / perf.NU_AIR)
                 except AttributeError:
-                    cd_v = cd0
+                    cd_v = cd0_wing
                 cdi_v = cl_v**2 / (np.pi * plan.aspect_ratio * 0.85)
+                if fins is not None:
+                    cd_v = cd_v + fins.cd0(vv, plan.area_m2)
                 return 0.5 * perf.RHO_AIR * vv * vv * plan.area_m2 * (cd_v + cdi_v)
             # bracket from the trim speed: the aircraft demonstrably
             # flies there, so excess thrust is positive by construction
@@ -744,4 +1081,73 @@ def evaluate(
         mass_kg=mass.total_kg, cl_trim=float(pt.CL), static_margin=float(sm),
         reasons=tuple(reasons), plan=plan, trim=trim_state, mass=mass,
         panels=panels if want_panels else [],
+        spar_fits=spar_fits, lateral=lat,
+        fairness=fair, fairness_limits=mission.fairness,
+        fins=fins, dynamics=modes,
     )
+
+
+# ------------------------------------------------------------------ structure
+
+
+def choose_structure(ev: Evaluation, mission: Mission,
+                     settings: vase.PrintSettings,
+                     ns: int = LATTICE_NS, nc: int = LATTICE_NC, vlm=None):
+    """Size the spar and the rib pitch from the trimmed flight condition,
+    and hand back the print settings that follow from them.
+
+    It lives here, and not in run.py, because the search has to score the
+    aircraft it is going to export. It used to run only in `run.py export`,
+    after the search had finished -- so every search in four generations
+    judged a bare vase shell. The buckling-driven ribs it adds are 8 to 22 g,
+    mostly aft of the CG; on the gen4 trainer they pushed trim past 8
+    degrees and cut Dutch-roll damping from +0.083 to +0.058. The search
+    called that design feasible and the built aircraft was not."""
+    pt = (vlm or VLM(ev.plan, ns, nc)).solve(ev.trim.alpha_deg, ev.trim.x_cg_m)
+    st = struct.select(ev.plan, pt, ev.mass_kg,
+                       skin_t_mm=settings.extrusion_width_mm,
+                       n_limit=mission.n_limit_g,
+                       min_od_mm=mission.spar_d_mm)
+    tuned = replace(settings, spar_d_mm=st.spar.od_mm, ribs=True,
+                    rib_pitch_mm=st.rib_pitch_mm)
+    return st, tuned
+
+
+def evaluate(
+    u: np.ndarray,
+    mission: Mission,
+    base: Airfoil,
+    settings: vase.PrintSettings,
+    drag: perf.DragModel | None = None,
+    ns: int = LATTICE_NS,
+    nc: int = LATTICE_NC,
+    want_panels: bool = False,
+    z_step_mm: float | None = None,
+    size_structure: bool = True,
+) -> Evaluation:
+    """One design -> one verdict, for the aircraft as it will be BUILT.
+
+    Two passes whenever the design trims. The first, as a bare shell, finds
+    the trimmed loads the spar and ribs are sized from; the second puts that
+    spar and those ribs into the print settings and judges everything again
+    -- shell mass, CG, trim, damping and every gate -- on the ribbed
+    aircraft. That is exactly what `run.py export` does, so the search and
+    the export now reach the same verdict by construction.
+
+    Designs rejected before trim never pay for the second pass. Pass
+    size_structure=False for a bare-shell verdict on purpose."""
+    first = _evaluate_once(u, mission, base, settings, drag=drag, ns=ns, nc=nc,
+                           want_panels=want_panels and not size_structure,
+                           z_step_mm=z_step_mm)
+    if not size_structure or first.trim is None or first.plan is None:
+        return first
+    st, tuned = choose_structure(first, mission, settings, ns, nc,
+                                 vlm=_cached_vlm(u, mission, base, first.plan, ns, nc))
+    ev = _evaluate_once(u, mission, base, tuned, drag=drag, ns=ns, nc=nc,
+                        want_panels=want_panels, z_step_mm=z_step_mm)
+    ev = replace(ev, structure=st, print_settings=tuned)
+    if not st.ok:
+        why = "; ".join(st.notes) or "spar overstressed or too flexible"
+        ev = replace(ev, ok=False, reasons=ev.reasons + (f"structure: {why}",),
+                     score=min(ev.score, -1000.0) - 25.0)
+    return ev

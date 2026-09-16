@@ -148,7 +148,7 @@ def volume_mm3(verts: np.ndarray, tris: np.ndarray) -> float:
 
 
 def write_stl(path: str | Path, verts: np.ndarray, tris: np.ndarray,
-              header: str = "loft") -> Path:
+              header: str = "washout") -> Path:
     """Binary STL. Normals written explicitly; some slicers trust them."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,7 +176,7 @@ def export(stack: LayerStack, path: str | Path) -> dict:
     rep = manifold_report(tris)
     if not rep["watertight"]:
         raise ValueError(f"mesh is not watertight: {rep}")
-    write_stl(path, verts, tris, header=f"loft {stack.name}")
+    write_stl(path, verts, tris, header=f"washout {stack.name}")
     rep["volume_cm3"] = volume_mm3(verts, tris) / 1000.0
     rep["path"] = str(path)
     return rep

@@ -66,7 +66,7 @@ def run_search(
     maxiter: int = 40,
     popsize: int = 12,
     seed: int = 0,
-    search_z_step_mm: float = 1.0,
+    search_z_step_mm: float | None = None,
     ns: int = LATTICE_NS,
     nc: int = LATTICE_NC,
     workers: int = 1,
@@ -127,7 +127,7 @@ def run_search(
     # same lattice as the search: the final verdict must be the same
     # calculation, only the print sampling gets refined to the real layer
     best = evaluate(best_u, mission, base, settings, ns=ns, nc=nc,
-                    want_panels=True, drag=drag)
+                    want_panels=True, drag=drag, z_step_mm=search_z_step_mm)
     if out_dir:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)

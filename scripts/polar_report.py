@@ -28,11 +28,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from loft.geom import cst                                    # noqa: E402
-from loft.search.design import Mission, build                # noqa: E402
-from loft.aero.vlm import VLM                                # noqa: E402
-from loft.aero import performance as perf                    # noqa: E402
-from loft.geom import planform                               # noqa: E402
+from washout.geom import cst                                    # noqa: E402
+from washout.search.design import Mission, build                # noqa: E402
+from washout.aero.vlm import VLM                                # noqa: E402
+from washout.aero import performance as perf                    # noqa: E402
+from washout.geom import planform                               # noqa: E402
 
 INK, ACCENT, COOL = "#1b1b1b", "#c0392b", "#2c6fbb"
 
@@ -116,7 +116,7 @@ def main() -> int:
     ax[2].set_title("drag polar (labels = alpha)", loc="left", fontsize=10)
     ax[2].grid(alpha=0.25)
 
-    fig.suptitle(f"loft section in windtunnel-sim  --  "
+    fig.suptitle(f"washout section in windtunnel-sim  --  "
                  f"Re {a.re:.0f}, t/c {section.t_max:.3f}, "
                  f"reflex te_camber {section.te_camber:+.4f}",
                  fontsize=11, x=0.01, ha="left")

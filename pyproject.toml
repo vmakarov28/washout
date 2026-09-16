@@ -1,5 +1,5 @@
 [project]
-name = "loft"
+name = "washout"
 version = "0.1.0"
 description = "Automated blended-wing-body design: CFD-informed search to vase-mode printable STL"
 requires-python = ">=3.10"

@@ -89,6 +89,12 @@ class Lattice:
     strip: np.ndarray      # (N,) spanwise strip index
     y_strip: np.ndarray    # (S,) strip centre y
     dy_strip: np.ndarray   # (S,)
+    z_strip: np.ndarray    # (S,) strip centre z at the trailing edge
+    """Where the strip sheds its wake, vertically. The Trefftz plane is a
+    two-dimensional problem in the (y, z) crossflow plane, and dropping z
+    -- which this did -- flattens every dihedral and winglet onto the y
+    axis. A winglet exists precisely to move shed vorticity OUT of that
+    plane, so the planar version scores one at exactly zero benefit."""
     area: float
     mac: float
     span: float
@@ -130,13 +136,14 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
                          st.z_le_m + rot[1] * st.chord_m])
 
     A, B, CP, NRM, DY, XQC, STRIP = [], [], [], [], [], [], []
-    y_strip, dy_strip = [], []
+    y_strip, dy_strip, z_strip = [], [], []
     s_index = 0
     for e0, e1 in zip(etas, etas[1:]):
         em = 0.5 * (e0 + e1)
         width = (e1 - e0) * plan.half_span_m
         y_strip.append(em * plan.half_span_m)
         dy_strip.append(width)
+        z_strip.append(float(camber_point(em, 1.0)[2]))
         for c0, c1 in zip(xc_edges, xc_edges[1:]):
             # bound vortex at the panel's quarter chord, control point at
             # its three-quarter chord -- the classical arrangement that
@@ -161,6 +168,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
     a = np.array(A); b = np.array(B); cp = np.array(CP); nrm = np.array(NRM)
     dy = np.array(DY); xqc = np.array(XQC); strip = np.array(STRIP)
     y_strip = np.array(y_strip); dy_strip = np.array(dy_strip)
+    z_strip = np.array(z_strip)
 
     # mirror to port. The port half is the starboard half with y negated
     # and the bound vortex ends SWAPPED, so circulation keeps running the
@@ -177,6 +185,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
         strip=np.concatenate([strip, strip + ns_strips]),
         y_strip=np.concatenate([y_strip, -y_strip]),
         dy_strip=np.concatenate([dy_strip, dy_strip]),
+        z_strip=np.concatenate([z_strip, z_strip]),
         area=plan.area_m2, mac=plan.mac_m, span=plan.span_m,
     )
 
@@ -236,21 +245,49 @@ class VLM:
         # nose-up positive: lift acting aft of the reference pitches down
         Cm = -2.0 * ((lat.x_qc - x_ref_m) * L).sum() / (lat.area * lat.mac)
 
-        # --- induced drag in the Trefftz plane ---
+        # --- induced drag in the Trefftz plane, in TWO dimensions ---
+        # The wake rolls off into the (y, z) crossflow plane, and the
+        # sheet there is a curve, not a line: dihedral tilts it and a
+        # winglet turns it through most of a right angle. The previous
+        # version used y alone, which projects that curve flat -- so a
+        # winglet shed its vorticity at exactly the same place as no
+        # winglet, and scored exactly the same induced drag. With z
+        # carried through, this reduces EXACTLY to the old expression
+        # when the wing is planar (z = 0 makes the normal +z and the
+        # kernel 1/dy), which is what keeps the elliptic-wing e = 0.99
+        # calibration honest.
         order = np.argsort(lat.y_strip)
         y = lat.y_strip[order]
+        z = lat.z_strip[order]
         g = g_strip[order]
         dyv = lat.dy_strip[order]
-        # trailing sheet strength shed between adjacent strips
+        pts = np.stack([y, z], 1)                       # (S,2) strip centres
+
+        # sheet edges: midpoints, with the two ends stepped out by half a
+        # strip along the local run of the sheet
+        mid = 0.5 * (pts[:-1] + pts[1:])
+        first = pts[0] - 0.5 * (pts[1] - pts[0])
+        last = pts[-1] + 0.5 * (pts[-1] - pts[-2])
+        edge = np.concatenate([first[None, :], mid, last[None, :]], 0)  # (S+1,2)
+
+        seg = edge[1:] - edge[:-1]                      # (S,2) per-strip run
+        ds = np.linalg.norm(seg, axis=1)
+        tang = seg / np.maximum(ds, 1e-12)[:, None]
+        # normal to the sheet, rotated +90 deg: (ty, tz) -> (-tz, ty)
+        nrm2 = np.stack([-tang[:, 1], tang[:, 0]], 1)
+
         g_pad = np.concatenate([[0.0], g, [0.0]])
-        y_edge = np.concatenate([[y[0] - 0.5 * dyv[0]],
-                                 0.5 * (y[:-1] + y[1:]),
-                                 [y[-1] + 0.5 * dyv[-1]]])
-        gam_shed = g_pad[:-1] - g_pad[1:]
-        d = y[:, None] - y_edge[None, :]
-        w = (gam_shed[None, :] / np.where(np.abs(d) > 1e-9, d, np.inf)).sum(1)
-        w /= 2.0 * np.pi
-        CDi = -(g * w * dyv).sum() / lat.area
+        gam_shed = g_pad[:-1] - g_pad[1:]               # (S+1,)
+
+        # 2D point-vortex kernel: v = gam/(2 pi r^2) * (-dz, dy)
+        d = pts[:, None, :] - edge[None, :, :]          # (S, S+1, 2)
+        r2 = (d ** 2).sum(-1)
+        r2 = np.where(r2 > 1e-18, r2, np.inf)
+        k = gam_shed[None, :] / (2.0 * np.pi * r2)
+        v_y = (k * -d[:, :, 1]).sum(1)
+        v_z = (k * d[:, :, 0]).sum(1)
+        w = v_y * nrm2[:, 0] + v_z * nrm2[:, 1]
+        CDi = -(g * w * ds).sum() / lat.area
         ar = lat.span**2 / lat.area
         e = (CL**2 / (np.pi * ar * CDi)) if CDi > 1e-12 else 1.0
 
@@ -290,3 +327,85 @@ class VLM:
             if abs(f2) < tol:
                 break
         return float(a1)
+
+    # ------------------------------------------------------ lateral derivatives
+
+    def _midpoint_influence(self) -> np.ndarray:
+        """(N, N, 3) velocity each horseshoe induces at each bound-vortex
+        midpoint, per unit circulation. Built on first use: trim never
+        needs it, and most designs in a search never get far enough to."""
+        w = getattr(self, "_w_mid", None)
+        if w is None:
+            mid = 0.5 * (self.lat.a + self.lat.b)
+            w = horseshoe(mid, self.lat.a, self.lat.b, np.array([1.0, 0.0, 0.0]))
+            self._w_mid = w
+        return w
+
+    def lateral_derivatives(self, alpha_deg: float, ref_m: np.ndarray,
+                            axes: str = "stability", d_beta_deg: float = 1.0,
+                            d_rate: float = 0.02) -> np.ndarray:
+        """Sideslip and rotary derivatives of the wing, per radian.
+
+            rows  CY, Cl, Cn          cols  beta, p_hat, r_hat
+            p_hat = p b / 2V; conventional signs, so Cl_p < 0 damps roll
+
+        Sideslip and body rates are imposed as ONSET flow on the same
+        lattice -- the influence matrix does not change, so each case is
+        one back-substitution -- and derivatives are central differences.
+        Both halves are panelled, so antisymmetric loading needs nothing
+        new.
+
+        Forces include the INDUCED velocity at each bound vortex, not just
+        the freestream. solve() gets away without it because lift is first
+        order in circulation; side force and yawing moment are not, and a
+        yawing moment is largely an induced-drag difference between the two
+        halves -- exactly the term a freestream-only Kutta-Joukowski sum
+        throws away.
+
+        `axes` is "stability" (x along the relative wind) or "body". The
+        lateral equations in dynamics.py are stability-axis equations and
+        must be fed stability-axis derivatives: the first prototype mixed
+        the two, which at the trainer's 7.8 degree trim leaked roll
+        stiffness into yaw and made every aircraft look violently unstable.
+        The test suite checks the two sets are an exact rotation.
+
+        Geometry is in the lattice frame (x aft, y starboard, z up);
+        moments come back in the conventional x-forward, z-down sense."""
+        lat = self.lat
+        mid = 0.5 * (lat.a + lat.b)
+        dl = lat.b - lat.a
+        w_mid = self._midpoint_influence()
+        s_ref, b = lat.area, lat.span
+        a = np.radians(alpha_deg)
+        ca, sa = np.cos(a), np.sin(a)
+        if axes == "stability":
+            roll_ax, yaw_ax = np.array([-ca, 0.0, -sa]), np.array([sa, 0.0, -ca])
+        elif axes == "body":
+            roll_ax, yaw_ax = np.array([-1.0, 0.0, 0.0]), np.array([0.0, 0.0, -1.0])
+        else:
+            raise ValueError(f"axes must be 'stability' or 'body', got {axes!r}")
+        ref = np.asarray(ref_m, dtype=float)
+
+        def coeffs(beta: float, p_hat: float, r_hat: float) -> np.ndarray:
+            vinf = np.array([ca * np.cos(beta), -np.sin(beta), sa * np.cos(beta)])
+            omega = (2.0 * p_hat / b) * roll_ax + (2.0 * r_hat / b) * yaw_ax
+
+            def onset(pts: np.ndarray) -> np.ndarray:
+                return vinf[None, :] - np.cross(np.broadcast_to(omega, pts.shape),
+                                                pts - ref)
+
+            gamma = self._lu @ (-np.einsum("nk,nk->n", lat.normal, onset(lat.cp)))
+            v_local = onset(mid) + np.einsum("mnk,n->mk", w_mid, gamma)
+            dF = gamma[:, None] * np.cross(v_local, dl)
+            force = dF.sum(axis=0)
+            moment = np.cross(mid - ref, dF).sum(axis=0)
+            return np.array([force[1] / (0.5 * s_ref),
+                             moment @ roll_ax / (0.5 * s_ref * b),
+                             moment @ yaw_ax / (0.5 * s_ref * b)])
+
+        db = np.radians(d_beta_deg)
+        out = np.empty((3, 3))
+        out[:, 0] = (coeffs(db, 0.0, 0.0) - coeffs(-db, 0.0, 0.0)) / (2.0 * db)
+        out[:, 1] = (coeffs(0.0, d_rate, 0.0) - coeffs(0.0, -d_rate, 0.0)) / (2.0 * d_rate)
+        out[:, 2] = (coeffs(0.0, 0.0, d_rate) - coeffs(0.0, 0.0, -d_rate)) / (2.0 * d_rate)
+        return out

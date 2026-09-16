@@ -11,3 +11,9 @@ dev = ["pytest", "matplotlib"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+# Say which package this is, explicitly. `data/` and `results/` are
+# evidence, not importable code, but setuptools' flat-layout autodiscovery
+# sees four top-level directories and refuses to guess between them.
+[tool.setuptools.packages.find]
+include = ["washout*"]

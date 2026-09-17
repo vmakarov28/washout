@@ -233,6 +233,24 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
               f"**{k.rod_mm:.0f} mm** between centres.")
         A("")
 
+    # ------------------------------------------------------- aeroelastic
+    if getattr(ev, "aeroelastic", None) is not None:
+        r = ev.aeroelastic
+        A("## Speed limits")
+        A("")
+        A(f"- **Control reversal: {r.v_rev_ms:.0f} m/s.** Past this the")
+        A(f"  elevons work backwards. It is the lower of the two and the")
+        A(f"  firmer number, because the derivation shows it does not depend")
+        A(f"  on where the elastic axis is.")
+        A(f"- Torsional divergence: {r.v_div_ms:.0f} m/s.")
+        A(f"- This design is scored at **{r.design_v_ms:.0f} m/s**, a margin")
+        A(f"  of {r.margin:.2f}x.")
+        A("")
+        A("Both are computed from a single closed torsion cell, so they are")
+        A("**lower bounds**: the rib truss makes the section multi-cell and")
+        A("stiffer. Classical flutter is not modelled at all.")
+        A("")
+
     # ------------------------------------------------------------- order
     A("## Assembly order")
     A("")
@@ -273,7 +291,9 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("")
     A("Stated so it is not mistaken for a clean bill of health:")
     A("")
-    A("- **Torsional divergence and flutter.** Not modelled at all.")
+    A("- **Classical flutter.** Divergence and control reversal ARE now")
+    A("  computed (see above); flutter proper couples bending and torsion")
+    A("  with the flow, needs the mass distribution, and is not modelled.")
     A("- **The hand launch.** Static thrust/weight is a proxy for it.")
     A("- **Bonding mass and joint strength.** The spar is sized; the bonded")
     A("  joints between panels are not.")

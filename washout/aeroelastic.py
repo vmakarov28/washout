@@ -1,0 +1,323 @@
+"""Does the wing twist itself apart, and do the elevons reverse?
+
+`ROADMAP.md` item 9. Nothing in this program could see either until now:
+`grep -rn "flutter|divergence|torsion|GJ"` returned one docstring about
+the spiral mode. demon1 is scored at **44 m/s** on a single-wall foamed
+PLA shell with one 8 mm tube, and the speed objective pushes directly
+toward the failure that had no gate. That is the shape of an optimizer
+walking off a cliff.
+
+Both speeds come from the same typical-section model, which is the
+standard one and is derived here rather than quoted, because the two
+results differ by a sign and a factor that are easy to get wrong.
+
+## The model
+
+A rigid section on a torsion spring of stiffness K about its elastic
+axis, with the aerodynamic centre a distance `e * c` FORWARD of that
+axis. Twist theta, flap deflection delta, dynamic pressure q:
+
+    moment about the EA   M = q c^2 [ e (a theta + cl_d delta)
+                                      + cm_d delta ]
+    spring                M = K theta
+
+    =>  theta (K - q c^2 e a) = q c^2 (e cl_d + cm_d) delta
+
+**Divergence** is where the bracket vanishes -- the aerodynamic stiffness
+has eaten the structural stiffness and the twist is unbounded with no
+flap input at all:
+
+    q_div = K / (c^2 e a)
+
+**Reversal** is where total lift stops responding to the flap. With
+cl_total = a theta + cl_d delta,
+
+    d cl_total / d delta = a q c^2 (e cl_d + cm_d) / (K - q c^2 e a)
+                           + cl_d
+
+Setting that to zero, the `e cl_d` terms cancel exactly and what is left
+is remarkably simple:
+
+    q_rev = - cl_d K / (c^2 a cm_d)
+
+The cancellation is the interesting part: **reversal does not depend on
+where the elastic axis is**, only on how much nose-down moment the flap
+makes for the lift it buys. Divergence depends on `e` and reversal does
+not, so the two are moved by different things and a design can be fixed
+for one and still fail the other.
+
+For a cantilever of semi-span L with uniform torsional rigidity GJ, the
+first torsional mode gives the equivalent spring
+
+    K = GJ (pi / 2L)^2
+
+which reproduces the classical cantilever divergence result
+q_div = (pi/2L)^2 GJ / (c^2 a e).
+
+## What is honest about this and what is not
+
+GJ is computed, not assumed: Bredt-Batho for the closed cell the skin
+makes, plus the spar tubes, and the open-section formula for what is left
+when a bay is cut in the upper skin. Those are closed-form results for
+thin-walled sections and they are what this model is entitled to.
+
+The elastic axis is an **estimate**, and it is stated as one. The shear
+centre of a closed single-cell thin-walled section is not the enclosed
+area's centroid, though for a smooth convex cell it is close; that
+centroid is what is used, and it sits aft of the quarter chord, which is
+the direction that makes divergence possible. A better number needs a
+shear-flow solve around the cell, which is worth doing before anyone
+trusts the absolute speed rather than the ranking.
+
+GJ is a **lower bound**, and knowing which way an error points is half
+of using it. Bredt-Batho here is applied to ONE closed cell, the one the
+skin makes; the rib truss divides that into several cells and a
+multi-cell section is stiffer, so the real GJ is higher and both speeds
+read low. Against that, the compliance is taken in SERIES along the span
+rather than using the stiff root cell everywhere, which on the trainer is
+38% below the root value and is the honest direction.
+
+The two speeds are not equally trustworthy, and the derivation says
+which is which. Divergence needs `e`, so it inherits the elastic-axis
+estimate. **Reversal does not** -- the `e cl_d` terms cancel -- so it
+rests only on GJ, the span, the chord, the lift slope and the elevon's
+own geometry, all of which are computed. When they disagree, believe
+reversal.
+
+This is a STATIC aeroelastic model. Flutter proper -- the coupling of
+bending and torsion with the flow, which can happen below both of these
+speeds -- needs the mass distribution and a frequency-matched solve, and
+is not here. Divergence and reversal are the two speeds a static model is
+allowed to state, and they are two more than zero.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+RHO_AIR = 1.225
+
+G_SKIN_MPA = 333.0
+"""Shear modulus of the printed skin.
+
+From the shell's own E = 900 MPa (`structure.SkinMaterial`, foamed
+LW-PLA) at nu = 0.35: G = E / 2(1 + nu) = 333 MPa. Derived from the
+modulus already declared rather than a second independent number, so
+the two cannot drift apart."""
+
+G_SPAR_GPA = 5.0
+"""Torsional shear modulus of a pultruded unidirectional carbon tube.
+
+An order below its 130 GPa axial modulus, because torsion loads the
+matrix rather than the fibres, and that is exactly why a spar contributes
+far less to GJ than its bending stiffness suggests."""
+
+
+def _harmonic(v: np.ndarray) -> float:
+    """Series compliance: 1/GJ_eff = mean(1/GJ). Zeros make it zero."""
+    v = np.asarray(v, dtype=float)
+    if np.any(v <= 0.0):
+        return 0.0
+    return float(len(v) / np.sum(1.0 / v))
+
+
+def cell_properties(plan, eta: float, wall_mm: float) -> tuple[float, float, float]:
+    """(enclosed area mm^2, perimeter mm, shear-centre chord fraction).
+
+    The enclosed area's centroid is used as the shear-centre estimate --
+    see the module docstring for why that is an approximation and which
+    way it errs.
+    """
+    st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+    c_mm = st.chord_m * 1000.0
+    loop = st.airfoil.coords(121) * c_mm
+    x, y = loop[:, 0], loop[:, 1]
+    xn, yn = np.roll(x, -1), np.roll(y, -1)
+    cross = x * yn - xn * y
+    a2 = float(cross.sum())
+    area = 0.5 * abs(a2)
+    per = float(np.hypot(xn - x, yn - y).sum())
+    # polygon centroid; guard the degenerate case
+    if abs(a2) < 1e-9:
+        return 0.0, per, 0.4
+    cx = float(((x + xn) * cross).sum() / (3.0 * a2))
+    # the MIDLINE encloses less than the outer contour: one wall in
+    return max(area - 0.5 * per * wall_mm, 0.0), per, cx / max(c_mm, 1e-9)
+
+
+def gj_closed_nmm2(area_mm2: float, per_mm: float, wall_mm: float,
+                   g_mpa: float = G_SKIN_MPA) -> float:
+    """Bredt-Batho: J = 4 A^2 / (perimeter / t) for a single closed cell."""
+    if area_mm2 <= 0.0 or per_mm <= 0.0 or wall_mm <= 0.0:
+        return 0.0
+    j = 4.0 * area_mm2 * area_mm2 / (per_mm / wall_mm)
+    return float(g_mpa * j)
+
+
+def gj_open_nmm2(per_mm: float, wall_mm: float,
+                 g_mpa: float = G_SKIN_MPA) -> float:
+    """An open thin-walled section: J = (1/3) * integral t^3 ds.
+
+    One to two orders of magnitude below the closed value for the same
+    material and wall, which is the whole reason cutting a hatch in the
+    upper skin is a structural decision and not a cosmetic one."""
+    return float(g_mpa * per_mm * wall_mm ** 3 / 3.0)
+
+
+def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA) -> float:
+    """The tubes' own contribution. J = pi (D^4 - d^4) / 32."""
+    total = 0.0
+    for f in spar_fits:
+        od = f.spec.d_mm
+        idm = max(od - 2.0, 0.0)              # 8x6, 6x4: 1 mm wall
+        total += np.pi * (od ** 4 - idm ** 4) / 32.0
+    return float(g_gpa * 1000.0 * total)
+
+
+@dataclass
+class Aeroelastic:
+    gj_nmm2: float
+    gj_open_nmm2: float
+    ea_frac: float
+    e_frac: float
+    k_nmm_per_rad: float
+    v_div_ms: float
+    v_rev_ms: float
+    v_div_open_ms: float
+    design_v_ms: float
+    margin: float
+    ok: bool
+    notes: tuple[str, ...] = ()
+
+    def report(self) -> str:
+        mark = "OK" if self.ok else "FAILS"
+        lines = [
+            f"aeroelastic: {mark}  (static: divergence and reversal only)",
+            f"  torsion box   GJ {self.gj_nmm2/1e6:.2f} N.m^2 closed | "
+            f"{self.gj_open_nmm2/1e6:.3f} open (bay cut in the upper skin)",
+            f"  elastic axis  {self.ea_frac:.3f}c estimated, AC at 0.250c "
+            f"-> e = {self.e_frac:+.3f}c",
+            f"  divergence    {self.v_div_ms:.0f} m/s  |  reversal "
+            f"{self.v_rev_ms:.0f} m/s  |  design {self.design_v_ms:.0f} m/s",
+            f"  margin        {self.margin:.2f}x on the lower of the two",
+        ]
+        if self.v_div_open_ms > 0.0:
+            lines.append(
+                f"  OPEN section   divergence falls to "
+                f"{self.v_div_open_ms:.0f} m/s -- what a hatch would cost")
+        lines += [f"  note          {n}" for n in self.notes]
+        return "\n".join(lines)
+
+
+def analyse(plan, spar_fits, lift_slope_per_rad: float,
+            elevon_chord_frac: float, elevon_eta: float,
+            design_v_ms: float, wall_mm: float,
+            min_margin: float = 1.2) -> Aeroelastic:
+    """Divergence and reversal speeds for this wing at this speed.
+
+    `design_v_ms` is the speed the aircraft is SCORED at -- top speed for
+    a racer, cruise for a trainer -- because that is the speed the
+    optimizer is pushing toward and therefore the one the margin has to
+    be measured against.
+    """
+    from .geom.cst import flap_effectiveness
+
+    # GJ varies along the span -- the section thins outboard and the
+    # chord runs out -- so taking the root cell's value with the full
+    # semi-span would treat the whole wing as if it were as stiff as its
+    # thickest station, which reads both speeds HIGH.
+    #
+    # Torsional compliance adds in series along the span, so the
+    # equivalent uniform stiffness is the HARMONIC mean, not the
+    # arithmetic one. On the trainer that is 38% below the root value,
+    # which is 38% of a speed the optimizer would otherwise be handed.
+    etas = np.linspace(0.02, 0.95, 17)
+    gjs, gjs_open, eas = [], [], []
+    for e_ in etas:
+        area, per, ea_ = cell_properties(plan, float(e_), wall_mm)
+        gjs.append(gj_closed_nmm2(area, per, wall_mm))
+        gjs_open.append(gj_open_nmm2(per, wall_mm))
+        eas.append(ea_)
+    spar_gj = gj_spars_nmm2(spar_fits)
+    gj = _harmonic(np.array(gjs) + spar_gj)
+    gj_open = _harmonic(np.array(gjs_open) + spar_gj)
+    # the elastic axis is weighted by local stiffness: the stiff inboard
+    # cell is what the twist is reacting against
+    w = np.array(gjs) + spar_gj
+    ea = float(np.average(np.array(eas), weights=w))
+
+    half_mm = plan.half_span_m * 1000.0
+    k = gj * (np.pi / (2.0 * half_mm)) ** 2          # N.mm per rad
+    k_open = gj_open * (np.pi / (2.0 * half_mm)) ** 2
+
+    c_mm = plan.mac_m * 1000.0
+    a = float(lift_slope_per_rad)
+    e = ea - 0.25
+
+    notes: list[str] = []
+
+    def q_to_v(q):
+        return float(np.sqrt(2.0 * max(q, 0.0) / RHO_AIR)) if q > 0 else np.inf
+
+    # --- divergence ---
+    if e <= 1e-6:
+        v_div = np.inf
+        notes.append("elastic axis is forward of the AC: divergence is not "
+                     "possible, the wing twists nose-down under lift")
+        v_div_open = np.inf
+    else:
+        # K in N.mm, c in mm -> q in N/mm^2; x1e6 for N/m^2
+        v_div = q_to_v(k / (c_mm * c_mm * e * a) * 1e6)
+        v_div_open = q_to_v(k_open / (c_mm * c_mm * e * a) * 1e6)
+
+    # --- reversal ---
+    # cl_d and cm_d per RADIAN of elevon, for the wing as a whole: the
+    # elevon covers only part of the span, so both are scaled by the area
+    # it actually occupies. The same geometric integral the elevon
+    # authority gate already uses, taken about the AC rather than the CG.
+    tau = flap_effectiveness(elevon_chord_frac)
+    x_ac_m = plan.stations[0].x_le_m + 0.25 * plan.mac_m
+    ele_area = 0.0
+    ele_arm = 0.0
+    edges = np.linspace(float(elevon_eta), 1.0, 9)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        st = plan.at(0.5 * (lo + hi))
+        dA = st.chord_m * elevon_chord_frac * (hi - lo) * plan.half_span_m
+        x_e = st.x_le_m + (1.0 - 0.5 * elevon_chord_frac) * st.chord_m
+        ele_area += dA
+        ele_arm += dA * (x_e - x_ac_m)
+    frac = 2.0 * ele_area / max(plan.area_m2, 1e-9)
+    cl_d = frac * a * tau
+    arm = ele_arm / max(ele_area, 1e-9)
+    cm_d = -frac * a * tau * (arm / plan.mac_m)       # nose-down: negative
+
+    if cm_d >= -1e-9 or cl_d <= 0.0:
+        v_rev = np.inf
+        notes.append("elevon makes no nose-down moment: reversal is not "
+                     "possible in this model")
+    else:
+        v_rev = q_to_v(-cl_d * k / (c_mm * c_mm * a * cm_d) * 1e6)
+
+    worst = min(v_div, v_rev)
+    margin = float(worst / max(design_v_ms, 1e-6)) if np.isfinite(worst) else 99.0
+    ok = margin >= min_margin
+    if not ok:
+        notes.append(f"the lower of the two is only {margin:.2f}x the speed "
+                     f"this design is scored at")
+    notes.append("STATIC only: classical flutter needs the mass "
+                 "distribution and is not modelled")
+    notes.append("single closed cell: the rib truss makes it MULTI-cell and "
+                 "stiffer, so GJ is a lower bound and both speeds read low")
+    notes.append("reversal does not depend on the elastic axis (the e*cl_d "
+                 "terms cancel), so it is the firmer of the two numbers")
+
+    return Aeroelastic(
+        gj_nmm2=gj, gj_open_nmm2=gj_open, ea_frac=ea, e_frac=e,
+        k_nmm_per_rad=k,
+        v_div_ms=float(v_div if np.isfinite(v_div) else 9999.0),
+        v_rev_ms=float(v_rev if np.isfinite(v_rev) else 9999.0),
+        v_div_open_ms=float(v_div_open if np.isfinite(v_div_open) else 0.0),
+        design_v_ms=float(design_v_ms), margin=margin, ok=bool(ok),
+        notes=tuple(notes))

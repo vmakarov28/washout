@@ -211,7 +211,50 @@ than an inconvenience (see constraints).
 
 # C. Physics the score still cannot see
 
-## 9. Torsional divergence, control reversal, flutter - P1 for demon1
+## 9. Torsional divergence, control reversal, flutter - **DONE for the two static modes**
+
+`aeroelastic.py`. The answer, and it is not the one the heading expected:
+
+**Reversal binds, not divergence, by about a factor of three** on all
+three aircraft. A flying wing's elevons are most of its trailing edge, so
+the surface that controls it is the surface that twists it. Divergence is
+the failure everyone names; reversal is the one that happens first.
+
+**demon1 is scored above its own reversal speed.** Its elevons reverse at
+43 m/s and the score is computed at 47. The optimizer was maximising a
+speed at which the controls work backwards, because nothing could see it.
+It now fails the gate at 0.91x against a 1.5x requirement.
+
+| | divergence | reversal | scored at | margin | open-section divergence |
+|---|---|---|---|---|---|
+| trainer | 99 m/s | **29 m/s** | 12 m/s | 2.43x | 57 m/s |
+| demon1 | 122 m/s | **43 m/s** | 47 m/s | **0.91x** | 72 m/s |
+| micro | 265 m/s | **90 m/s** | 11 m/s | 7.87x | 148 m/s |
+
+Both speeds come from the typical-section model, derived in the module
+rather than quoted, because two things about it are easy to get wrong.
+GJ is Bredt-Batho on the cell the skin makes plus the tubes' own
+contribution, taken in **series compliance** along the span rather than
+at the stiff root cell -- which is 38% lower on the trainer and is the
+honest direction. And the derivation shows that **reversal does not
+depend on the elastic axis**: the `e*cl_d` terms cancel, so it rests only
+on computed quantities while divergence inherits the shear-centre
+estimate. When they disagree, believe reversal.
+
+Known errors, both directions stated, because a number whose error
+direction is unknown is not usable: the single closed cell ignores the
+extra cells the rib truss makes, so GJ is a **lower bound** and both
+speeds read low; the elastic axis is the enclosed area's centroid, an
+estimate. Classical flutter -- bending and torsion coupling with the
+flow, which can happen below both of these -- needs the mass
+distribution and is still not modelled.
+
+The open-section column is what `ROADMAP-BUILD.md` Phase 3 has been
+waiting for: cutting a bay in the upper skin takes demon1's divergence
+from 122 to 72 m/s. **The hatch and the flutter gate are the same
+question**, now with numbers on both sides of it.
+
+## 9b. What is left of item 9 - P2
 
 Not modelled anywhere: `grep -rn "flutter|divergence|torsion|GJ"` returns
 only the spiral-mode docstring. demon1 is scored at **44.3 m/s** on a

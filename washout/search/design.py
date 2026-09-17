@@ -40,6 +40,7 @@ from ..aero import fins as fn
 from .. import propulsion as prop
 from .. import spars as sp
 from .. import linkage as lkg
+from .. import aeroelastic as ael
 from .. import structure as struct
 from collections import OrderedDict
 from ..aero.vlm import VLM
@@ -353,6 +354,17 @@ class Mission:
     not checked. MIL-F-8785C puts Level 1 at 0.08. Negative is a wobble
     that grows. This is the gate the roll/yaw ratio was standing in for:
     the gen3 trainer passed the ratio at 10.8 with a DIVERGENT Dutch roll."""
+    min_aeroelastic_margin: float = 0.0
+    """Factor the divergence and reversal speeds must clear the design
+    speed by. 0 means not checked, which is what every design before this
+    one got -- and demon1, scored at 44 m/s on a single-wall foamed shell,
+    is exactly the aircraft that needed it.
+
+    The margin is deliberately modest because the model is a LOWER bound:
+    Bredt-Batho on one closed cell ignores the extra cells the rib truss
+    makes, so the real GJ is higher. A large factor on a conservative
+    model is two safety margins stacked, which rejects designs for
+    arithmetic rather than for physics."""
     min_spiral_t2_s: float = 0.0
     """Fastest acceptable spiral divergence, as time to double; 0 is off.
     Yaw stiffness -- fins especially -- pushes the spiral mode toward
@@ -456,6 +468,7 @@ class Mission:
             # nothing. Now a backstop -- the damping gate below is the
             # real test, and the ratio's dihedral term is known to run high.
             min_cn_beta=0.025, max_roll_yaw_ratio=8.5,
+            min_aeroelastic_margin=1.5,
             min_dutch_roll_zeta=0.08, min_spiral_t2_s=20.0,
             fairness=fz.Limits(max_root_t_over_c=0.24,
                                max_tip_rise_frac=0.22),
@@ -512,6 +525,7 @@ class Mission:
             # A racer buys speed with drag it does not spend elsewhere,
             # and tolerates livelier handling than a trainer.
             min_cn_beta=0.020, max_roll_yaw_ratio=12.0,
+            min_aeroelastic_margin=1.3,
             min_dutch_roll_zeta=0.08,
             fairness=fz.Limits(max_root_t_over_c=0.24,
                                max_tip_rise_frac=0.20),
@@ -559,6 +573,7 @@ class Mission:
             # mission in the fleet and is flown close in, where a wander
             # is corrected before it matters.
             min_cn_beta=0.018, max_roll_yaw_ratio=12.0,
+            min_aeroelastic_margin=1.5,
             min_dutch_roll_zeta=0.08,
             # micro gets the most winglet: at 350 mm the fin arm is
             # short, so side area is the only yaw stiffness on offer
@@ -909,6 +924,7 @@ class Evaluation:
     dynamics: object | None = None
     structure: object | None = None
     linkage: object | None = None
+    aeroelastic: object | None = None
     print_settings: object | None = None
     max_elevon_deflect_deg: float = 12.0
     """The mission's deflection limit, carried out so the exporter sizes
@@ -1415,6 +1431,35 @@ def _evaluate_once(
         merit = -(plan.span_m * 100.0 + mass.total_kg * 10.0)
     else:
         merit = ld
+
+    # --- does the wing twist itself apart, or reverse its own elevons? ---
+    #
+    # Placed HERE, after the merit, because the speed that matters is the
+    # speed the design is SCORED at: top speed for a racer, cruise for a
+    # trainer. The objective is what pushes the aircraft toward the
+    # failure, so it is what the margin has to be measured against.
+    #
+    # The lift slope comes from the lattice rather than from 2*pi/AR
+    # algebra: it is already built and factorised, so a second right-hand
+    # side is nearly free.
+    aero_e = None
+    if mission.min_aeroelastic_margin > 0.0:
+        pt2 = vlm.solve(alpha + 2.0, mass.x_cg_m)
+        cl_a = (pt2.CL - pt.CL) / np.radians(2.0)
+        v_design = v_top if mission.objective == "speed" else v
+        aero_e = ael.analyse(
+            plan, spar_fits, cl_a, p_vec["elevon_chord"], p_vec["elevon_eta"],
+            v_design, settings.extrusion_width_mm,
+            min_margin=mission.min_aeroelastic_margin)
+        if not aero_e.ok:
+            worst = min(aero_e.v_div_ms, aero_e.v_rev_ms)
+            which = ("reversal" if aero_e.v_rev_ms <= aero_e.v_div_ms
+                     else "divergence")
+            reasons.append(
+                f"{which} at {worst:.0f} m/s, only {aero_e.margin:.2f}x the "
+                f"{v_design:.0f} m/s this design is scored at")
+            penalty += 30.0 * (mission.min_aeroelastic_margin - aero_e.margin)
+
     score = merit if not reasons else -(1000.0 + penalty)
     return Evaluation(
         ok=not reasons, score=float(score), ld=float(ld), v_cruise=v,
@@ -1426,6 +1471,7 @@ def _evaluate_once(
         fins=fins, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
+        aeroelastic=aero_e,
         sm_band=(mission.min_static_margin, mission.max_static_margin),
         cruise_band=tuple(mission.cruise_band_ms),
         max_loading_gdm2=mission.max_wing_loading_gdm2,

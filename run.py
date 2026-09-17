@@ -109,6 +109,8 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
     if getattr(ev, "lateral", None) is not None:
         lines += [ev.lateral.report(), ""]
+    if getattr(ev, "aeroelastic", None) is not None:
+        lines += [ev.aeroelastic.report(), ""]
     if getattr(ev, "linkage", None) is not None:
         from washout import linkage as _lkg
         lines += [_lkg.report(ev.linkage, ev.max_elevon_deflect_deg), ""]

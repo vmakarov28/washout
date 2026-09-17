@@ -79,6 +79,52 @@ STOCK_TUBES = (
 )
 
 
+def tube_for_od(od_mm: float, tubes=STOCK_TUBES) -> SparTube:
+    """The stock tube of this outside diameter, or the next size up.
+
+    Rounded UP, never to the nearest: the bore gate and the rib corridors
+    are both cut for one specific diameter, so a tube half a millimetre
+    smaller rattles in its own channel and one half a millimetre larger
+    will not go in at all."""
+    for t in tubes:
+        if t.od_mm >= od_mm - 1e-9:
+            return t
+    return tubes[-1]
+
+
+def spar_masses(fits, od_mm: float, tubes=STOCK_TUBES) -> tuple:
+    """Price the spars that were actually FITTED.
+
+    -> ((name, mass_kg, x_frac), ...), one entry per corridor.
+
+    This closes the oldest divergence in the program. `Mission._common`
+    charged a flat "spar + joiners" item -- 30 g on the trainer -- while
+    `select` below sized a real 8x6 tube at 28.2 g and `spars.fit_all`
+    fitted TWO 8 mm corridors, an LE spar reaching the tip and a TE spar
+    reaching eta 0.76. Nothing connected the three, so the second tube was
+    never weighed at all and the first was weighed by guess.
+
+    Length is twice each spar's own measured reach, because one tube runs
+    tip to tip through the centre body rather than two meeting at the
+    centreline. Chordwise position is the station the fit SOLVED for, not
+    a nominal 0.30c -- a spanwise tube's mass sits at its own x, and on a
+    swept wing the LE and TE corridors are 80 mm apart.
+
+    Every corridor is priced at the same `od_mm`, which is the bending
+    member's diameter. The aft tube is a torsion member and almost
+    certainly does not need it; sizing it against its own load case is
+    ROADMAP.md item 2, and this is the function it changes.
+
+    Bonding mass is NOT included, and is a known optimistic omission:
+    adhesive follows from bonded area, which becomes a real quantity when
+    the joints get their shear gate (ROADMAP-BUILD.md C1/C2). A declared
+    guess here is exactly the thing this function exists to delete.
+    """
+    tube = tube_for_od(od_mm, tubes)
+    return tuple((f.spec.name, tube.mass_g(2.0 * float(f.reach_mm)) * 1e-3,
+                  float(f.x_frac)) for f in fits)
+
+
 @dataclass(frozen=True)
 class SkinMaterial:
     """The printed shell. LW-PLA foams on extrusion, so its modulus is a

@@ -40,3 +40,18 @@ jobs:
           DESIGN: results/fleet/gen5_trainer_v3_v101/design.json
           POLAR: data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000
         run: python run.py export --mission trainer_v3 --design "$DESIGN" --polar "$POLAR" --out "$RUNNER_TEMP/export"
+
+      # `check` exits non-zero when a tracked design misses a gate, and the
+      # trainer currently does -- it is 27.5 g/dm2 against a 26 limit now
+      # that its own two spars are weighed. So this step asserts the
+      # KNOWN state rather than success: it fails if the trainer starts
+      # passing (someone fixed it: update this) or if demon1 starts
+      # failing (someone broke it).
+      - name: the tracked fleet is in its known state
+        run: |
+          python run.py check --mission demon1
+          if python run.py check --mission trainer_v3 > /dev/null 2>&1; then
+            echo "trainer now PASSES -- ROADMAP item 1 is resolved, update this step"
+            exit 1
+          fi
+          echo "trainer still misses its wing-loading gate, as expected"

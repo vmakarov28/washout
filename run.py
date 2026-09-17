@@ -3,7 +3,7 @@
 
     python run.py search  [--iters 60] [--span 1.0] [--out out/run1]
     python run.py export  --design out/run1/design.json
-    python run.py seed                       # evaluate the seed only
+    python run.py check                      # re-score this mission's tracked design
 
 Everything downstream of `search` is deterministic: the design vector in
 design.json plus the print settings reproduce the exact STLs, so a run is
@@ -37,8 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from washout import spars as sp
 from washout.geom import cst
 from washout.printing import stl, vase
-from washout.search.design import (BOUNDS, Mission, choose_structure,  # noqa: F401
-                                evaluate, physical_to_unit, unit_to_physical)
+from washout.search.design import (BOUNDS, MISSIONS, Mission,  # noqa: F401
+                                choose_structure, evaluate, unit_to_physical)
 from washout.search.optimize import SEEDS, run_search
 
 ROOT = Path(__file__).resolve().parent
@@ -157,13 +157,22 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
           f"along the print Z axis.")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as a value rather than a side effect of main().
+
+    Separated so it can be TESTED. argparse used to carry its own
+    hardcoded list of missions, the list had drifted from the factories in
+    design.py, and `--mission fpv_1m` was duly offered by --help and by
+    tab completion while raising AttributeError on every command. A
+    source-text assertion cannot catch that -- the fix has to be checked
+    against the parser argparse actually builds."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["search", "export", "seed"])
-    ap.add_argument("--mission",
-                    choices=["trainer_v3", "demon1", "micro", "fpv_1m"],
-                    default="trainer_v3")
+    ap.add_argument("command", choices=["search", "export", "check"])
+    # Choices come from design.py, never from a second list here: the
+    # hardcoded one had drifted and offered `fpv_1m`, which has no factory
+    # and crashed every command that named it.
+    ap.add_argument("--mission", choices=MISSIONS, default="trainer_v3")
     ap.add_argument("--polar", type=str, default=None,
                     help="measured LBM polar CSV; switches the search from "
                          "the flat tier-0 drag model to strip theory on real "
@@ -195,7 +204,11 @@ def main() -> int:
     ap.add_argument("--seed-design", type=Path, default=None, dest="seed_design",
                     help="design.json from an earlier run to put in the starting "
                          "population, so the search cannot finish behind it")
-    a = ap.parse_args()
+    return ap
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
 
     base = cst.load_selig(a.airfoil)
     mission = getattr(Mission, a.mission)()
@@ -230,16 +243,35 @@ def main() -> int:
         print("drag: measured, Re "
               + ", ".join(f"{r:.0f}" for r, _ in specs))
 
-    if a.command == "seed":
-        seed_phys = SEEDS.get(a.mission)
-        if not seed_phys:
-            print("no seed recorded for this mission")
+    if a.command == "check":
+        # Re-score the design this repository says is the answer for this
+        # mission, and say whether it still passes.
+        #
+        # This used to be `seed`, and it could not work: SEEDS is {} by
+        # deliberate design ("an empty dict means start from scratch, which
+        # is one less thing to keep true"), so every mission printed "no
+        # seed recorded" and exited 1 -- while the README advertised it as
+        # the first command to run. Pointed at results/fleet instead it
+        # answers a question worth asking: does the tracked winner still
+        # hold under today's gates? It did not, the first time it was run:
+        # the trainer went to 355 g and outside its wing-loading gate as
+        # soon as its own spars were weighed.
+        index = json.loads((ROOT / "results" / "fleet" / "index.json")
+                           .read_text(encoding="utf-8"))
+        folder = index.get(a.mission)
+        if not folder:
+            print(f"no tracked design for {a.mission}; "
+                  f"have {sorted(k for k in index if not k.startswith('_'))}")
             return 1
-        ev = evaluate(physical_to_unit(seed_phys), mission, base, settings,
-                      want_panels=True, drag=drag)
+        path = ROOT / "results" / "fleet" / folder / "design.json"
+        print(f"checking {path.relative_to(ROOT)}\n")
+        u = np.array(json.loads(path.read_text(encoding="utf-8"))["u"])
+        ev = evaluate(u, mission, base, settings, want_panels=True, drag=drag)
         print(report(ev, settings))
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons))
+            return 1
+        print("all gates pass")
         return 0
 
     if a.command == "export":

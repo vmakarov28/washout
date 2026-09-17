@@ -254,14 +254,21 @@ class Mission:
     # fixed tax, and on the micro that tax IS the design problem.
 
     @staticmethod
-    def _common(servo_g: float = 0.018, esc_g: float = 0.020,
-                spar_g: float = 0.030) -> tuple:
+    def _common(servo_g: float = 0.018, esc_g: float = 0.020) -> tuple:
+        """The declared payload. Everything here is a mass someone weighed.
+
+        The spar is NOT here any more. It used to be a flat "spar +
+        joiners" item -- 30 g trainer, 38 g demon1, 14 g micro -- and it
+        was the last invented number in the mass budget: `structure.select`
+        sized a real tube, `spars.fit_all` fitted two corridors, and
+        neither reached the budget. It is now computed from the tubes
+        actually fitted, at the stations they were fitted to, by
+        `structure.spar_masses`."""
         return (
             Item("2205 2300kv + prop", 0.036, 0.97),   # pusher, at the TE
             Item("AR630 rx", 0.008, 0.34),
             Item("esc + wiring", esc_g, 0.50),
             Item("servos x2", servo_g, 0.72),
-            Item("spar + joiners", spar_g, 0.30),
         )
 
     @staticmethod
@@ -326,7 +333,7 @@ class Mission:
         of dives, and the spar is sized for it."""
         return Mission(
             name="demon1", span_m=0.80, objective="speed",
-            payload=Mission._common(esc_g=0.026, spar_g=0.038),
+            payload=Mission._common(esc_g=0.026),
             # A 4S 1300 is a big pack for an 800 mm racer: 76 mm long
             # needs a 463 mm root chord to sit at 0.10c without hanging
             # off the nose, and the bound is 460. It missed by 3 mm and
@@ -374,7 +381,7 @@ class Mission:
         flies slowly enough to land, and finding it is the mission."""
         return Mission(
             name="micro", span_m=0.55, span_free=True, objective="small",
-            payload=Mission._common(servo_g=0.010, esc_g=0.012, spar_g=0.014),
+            payload=Mission._common(servo_g=0.010, esc_g=0.012),
             bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
                   Bay("AR630", 0.44, (30.0, 20.0, 12.0))),
             battery_kg=0.028,
@@ -407,6 +414,23 @@ class Mission:
     @staticmethod
     def beginner_trainer() -> "Mission":
         return Mission.trainer_v3()
+
+
+MISSIONS = ("trainer_v3", "demon1", "micro")
+"""Every mission the CLI may be asked for, declared beside the factories.
+
+run.py's argparse used to carry its own hardcoded list, and the list had
+drifted: `--mission fpv_1m` was offered by `--help` and by tab completion
+and crashed with `AttributeError: type object 'Mission' has no attribute
+'fpv_1m'` on EVERY command, because no such factory exists. It failed
+after the whole command line had been typed and, on a search, after the
+print settings had been built.
+
+A CLI that can name a mission the program cannot build is the same class
+of mistake as a design vector that can express an invalid planform: the
+fix is to make it unrepresentable rather than to correct the one instance.
+`beginner_trainer` is deliberately absent -- it is an alias for
+trainer_v3, not a fourth aircraft."""
 
 # --------------------------------------------------------- the design vector
 
@@ -743,10 +767,16 @@ def _evaluate_once(
     nc: int = LATTICE_NC,
     want_panels: bool = False,
     z_step_mm: float | None = None,
+    spar_od_mm: float | None = None,
 ) -> Evaluation:
     """One design -> one verdict. Cheap checks first, on purpose: the
     geometry test costs microseconds and rejects most of a random
-    population before any lattice is ever built."""
+    population before any lattice is ever built.
+
+    `spar_od_mm` is the diameter the fitted tubes are weighed at. None
+    means the mission's declared hardware diameter, which is what the bore
+    gate and the rib corridors were cut for; the second pass of
+    `evaluate()` passes the diameter the load case actually demanded."""
     drag = drag or perf.DragModel()
     reasons: list[str] = []
     penalty = 0.0
@@ -815,6 +845,11 @@ def _evaluate_once(
     items = tuple(i.at(root_c) for i in mission.payload)
     items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
                              p_vec["batt_x"] * root_c),)
+    # The tubes that were actually fitted, at the stations the fit solved
+    # for. Not a flat allowance: see structure.spar_masses.
+    for s_name, s_kg, s_x in struct.spar_masses(
+            spar_fits, spar_od_mm if spar_od_mm is not None else mission.spar_d_mm):
+        items += (perf.PointMass(f"spar {s_name}", s_kg, s_x * root_c),)
     if fins is not None:
         # at the tips and aft: they move the CG back and add roll inertia,
         # and both of those are part of what they cost
@@ -1144,7 +1179,8 @@ def evaluate(
     st, tuned = choose_structure(first, mission, settings, ns, nc,
                                  vlm=_cached_vlm(u, mission, base, first.plan, ns, nc))
     ev = _evaluate_once(u, mission, base, tuned, drag=drag, ns=ns, nc=nc,
-                        want_panels=want_panels, z_step_mm=z_step_mm)
+                        want_panels=want_panels, z_step_mm=z_step_mm,
+                        spar_od_mm=st.spar.od_mm)
     ev = replace(ev, structure=st, print_settings=tuned)
     if not st.ok:
         why = "; ".join(st.notes) or "spar overstressed or too flexible"

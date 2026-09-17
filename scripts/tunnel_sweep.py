@@ -102,6 +102,39 @@ obstacle:
 """
 
 
+def write_polar(path: Path, rows: list, alphas: list) -> Path:
+    """Write the sweep, or refuse and say why. NEVER writes a short file.
+
+    The Re 150 000 sweep failed at every single alpha -- the WSL VM was in
+    a broken state, `getpwnam(master) failed` on every launch -- and this
+    function's predecessor wrote a header-only polar.csv and printed
+    `polar -> out/tunnel_re150/polar.csv`, which reads exactly like
+    success. That empty file sat on disk beside two real ones for a week.
+
+    `parse_forces` is deliberately strict because a silent zero would look
+    like a miraculously low-drag aerofoil and win the optimisation. The
+    writer has to hold the same line, and for a sharper reason: a PARTIAL
+    polar is worse than none, because `MeasuredDrag.cd_at_cl` clamps at
+    its endpoints rather than extrapolating. A sweep that lost its
+    high-alpha rows would quietly charge a separating wing the drag of the
+    bucket.
+    """
+    missing = sorted(set(alphas) - {float(r["alpha"]) for r in rows})
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} of {len(alphas)} alphas produced no "
+            f"measurement: " + ", ".join(f"{a:+g}" for a in missing)
+            + f" -- refusing to write {path}. Fix the tunnel and rerun."
+        )
+    rows = sorted(rows, key=lambda r: r["alpha"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["alpha", "cl", "cd", "ld"])
+        w.writeheader()
+        w.writerows(rows)
+    return path
+
+
 def parse_forces(stdout: str) -> tuple[float, float]:
     for line in stdout.splitlines():
         if "Cl =" in line and "Cd =" in line:
@@ -195,12 +228,7 @@ def main() -> int:
                 print(f"  alpha {al:+5.1f}  Cl {cl:+.4f}  Cd {cd:.5f}  "
                       f"L/D {cl / cd if cd else 0:+6.2f}", flush=True)
 
-        rows.sort(key=lambda r: r["alpha"])
-        with (a.out / "polar.csv").open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["alpha", "cl", "cd", "ld"])
-            w.writeheader()
-            w.writerows(rows)
-        print(f"\npolar -> {a.out / 'polar.csv'}")
+        print(f"\npolar -> {write_polar(a.out / 'polar.csv', rows, alphas)}")
 
     for al in [float(x) for x in a.video_alphas.split(",") if x.strip()]:
         name = f"{a.tag}_vid_a{al:g}".replace("-", "m").replace(".", "p")

@@ -136,3 +136,77 @@ def test_the_lattice_cache_does_not_change_the_verdict():
     evaluate(u, m, base, settings)
     again = evaluate(other, m, base, settings)
     assert again.score == pytest.approx(fresh.score, rel=1e-12)
+
+
+# --------------------------------------------------- the spar has a mass
+
+def test_the_budget_charges_the_tubes_that_were_fitted():
+    """A flat spar allowance is not a spar.
+
+    `Mission._common` charged 30 g for "spar + joiners" on the trainer
+    while `structure.select` sized a real 8x6 tube and `spars.fit_all`
+    fitted TWO 8 mm corridors -- an LE spar reaching the tip and a TE spar
+    reaching eta 0.76. The second tube was never weighed at all. The
+    budgeted spar mass must now equal the tubes actually fitted, each
+    priced over twice its own measured reach, because one tube runs tip to
+    tip through the centre body."""
+    from washout import spars as sp
+    from washout import structure as struct
+
+    m = Mission.trainer_v3()
+    u, _, base, settings = _trimmed(m)
+    ev = evaluate(u, m, base, settings)
+    assert ev.structure is not None, "the design must reach structure sizing"
+
+    budgeted = sum(i.mass_kg for i in ev.mass.items if i.name.startswith("spar "))
+    tube = struct.tube_for_od(ev.structure.spar.od_mm)
+    expected = sum(tube.mass_g(2.0 * f.reach_mm) * 1e-3 for f in ev.spar_fits)
+
+    assert len(ev.spar_fits) == len(m.spars) == 2, "trainer declares two corridors"
+    assert budgeted == pytest.approx(expected, rel=1e-12)
+    assert not any(i.name == "spar + joiners" for i in ev.mass.items), (
+        "the flat allowance must be gone, not merely supplemented")
+
+
+def test_each_spar_is_weighed_at_the_station_it_was_fitted_to():
+    """A spanwise tube's mass sits at its own chord station.
+
+    The flat item sat at 0.30c whatever the fit solved for. On the trainer
+    the LE and TE corridors come out 0.21c and 0.54c -- 80 mm apart on a
+    244 mm root chord -- and that is a real CG difference, not a rounding
+    one."""
+    m = Mission.trainer_v3()
+    u, _, base, settings = _trimmed(m)
+    ev = evaluate(u, m, base, settings)
+    root_c = ev.plan.stations[0].chord_m
+
+    by_name = {i.name: i for i in ev.mass.items}
+    for f in ev.spar_fits:
+        item = by_name[f"spar {f.spec.name}"]
+        assert item.x_m == pytest.approx(f.x_frac * root_c, rel=1e-12)
+
+
+def test_the_gen5_trainer_does_not_survive_its_own_spar():
+    """The headline design fails a gate once its tubes are weighed.
+
+    gen5's trainer was logged at 331 g and 25.7 g/dm2, inside its
+    26 g/dm2 wing-loading gate. Weighing the two 8 mm tubes it actually
+    carries puts it at ~355 g and ~27.5 g/dm2, outside it. This test
+    exists so that the mass can never quietly drift back down: the number
+    it pins is the one a builder would put on a scale."""
+    root = Path(__file__).resolve().parent.parent
+    d = json.loads((root / "results" / "fleet" / "gen5_trainer_v3_v101"
+                    / "design.json").read_text())
+    base = cst.load_selig(ASSETS / "mh45.dat")
+    m = Mission.trainer_v3()
+    settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                                  bed_z_mm=250.0)
+    ev = evaluate(np.array(d["u"]), m, base, settings)
+
+    assert ev.mass_kg * 1000 == pytest.approx(355.0, abs=4.0), (
+        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~355")
+    loading = ev.mass_kg * 1000.0 / (ev.plan.area_m2 * 100.0)
+    assert loading > m.max_wing_loading_gdm2, (
+        f"wing loading {loading:.1f} should now miss "
+        f"{m.max_wing_loading_gdm2:.0f} g/dm2")
+    assert not ev.ok and any("wing loading" in r for r in ev.reasons)

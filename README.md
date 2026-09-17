@@ -43,12 +43,14 @@ own cavity *is* the channel; a carbon tube slides in after the print.
 ## Run it
 
 ```bash
+python run.py check  --mission trainer_v3          # re-score the tracked design
 python run.py search --mission trainer_v3 --iters 90 --out out/run1
 python run.py export --mission trainer_v3 --design out/run1/design.json --out out/run1
 python -m pytest -q                                 # the validation gates
 ```
 
-Missions are `trainer_v3`, `demon1`, `micro` and `fpv_1m`. To rebuild a
+Missions are `trainer_v3`, `demon1` and `micro`, declared once in
+`design.MISSIONS`. To rebuild a
 design already in the repo, and to see the whole pipeline run end to end:
 
 ```bash
@@ -228,10 +230,12 @@ for a rectangular one, and reproduces published NACA 4412 Cm.
 - The **hand launch** is not modelled. `min_thrust_weight` is a proxy for
   it, and for a trainer the launch is the flight phase most likely to end
   the aeroplane.
-- The **spar mass in the budget is a flat guess**, not the tube that was
-  sized and fitted. Weighing the real tubes puts the gen5 trainer near
-  355 g rather than 331, which moves it outside its own wing-loading
-  gate. See `docs/ROADMAP.md`, item 1 — it is the first thing to fix.
+- **Bonding mass is not modelled.** The spars themselves are now weighed
+  as fitted, but adhesive and tube joiners are not: that mass follows
+  from bonded area, which becomes a real quantity only when the joints
+  get their shear gate (`docs/ROADMAP-BUILD.md`, C1/C2). It is a known
+  optimistic omission of a few grams, left as a debt rather than filled
+  with a guess.
 - The measured polars are of **two different sections** (28% apart in
   t/c), so the Reynolds trend between them is partly a thickness
   difference, and the search can reshape a section without the drag model

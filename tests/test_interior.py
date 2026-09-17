@@ -238,7 +238,7 @@ def test_a_bay_holds_its_contents_at_one_station():
     objects in one box, and the CG was computed from the wrong two."""
     u, mission, base, plan = _fleet("trainer_v3")
     p = unit_to_physical(u)
-    _, seats = seat_bays(plan, mission, p, WALL)
+    _, seats, _ = seat_bays(plan, mission, p, WALL)
     bay = next(b for b in mission.bays if b.holds)
     root_c = plan.stations[0].chord_m
 
@@ -259,7 +259,7 @@ def test_the_solver_seats_the_electronics_clear_of_the_pack():
     The second bay's seat therefore has to be solved, not declared."""
     u, mission, base, plan = _fleet("trainer_v3")
     p = unit_to_physical(u)
-    vols, seats = seat_bays(plan, mission, p, WALL)
+    vols, seats, _ = seat_bays(plan, mission, p, WALL)
     assert it.clashes(vols, plan, WALL) == [], (
         "the solver must find seats that do not overlap")
     pack, elec = mission.bays[0], mission.bays[1]
@@ -275,7 +275,7 @@ def test_the_solved_seat_is_the_seat_the_mass_uses():
     if it is also the station the mass is placed at."""
     u, mission, base, plan = _fleet("trainer_v3")
     p = unit_to_physical(u)
-    vols, seats = seat_bays(plan, mission, p, WALL)
+    vols, seats, _ = seat_bays(plan, mission, p, WALL)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0)
     ev = evaluate(u, mission, base, settings)
     root_c = plan.stations[0].chord_m

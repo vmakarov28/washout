@@ -652,10 +652,37 @@ the gates, not before.
    deflecting down by δ takes its x to *d*(tanβ cosδ − sinδ), which stays
    clear exactly while **β ≥ δ**. The trainer's inboard elevon nose would
    otherwise swing 2.24 mm into the wing at 12°.
-5. Companion horn plus its socket. **(B4)**
-6. Servo bay placed by a solver, inside the evaluation loop so its mass
-   moves the CG. **(B3)**
-7. The linkage throw gate. **(B5)**
+5. Companion horn plus its socket. **(B4)** — the only Phase 2 item left.
+   The gate it needs exists (the linkage solve knows the horn's arm); what
+   is missing is the socket cut into the elevon's loop, which is the same
+   detour machinery as Phase 3.
+6. ~~Servo bay placed by a solver, inside the evaluation loop so its mass
+   moves the CG.~~ **(B3)** `Bay` has a spanwise seat now — a payload box
+   belongs in the body, a servo belongs beside the surface it drives — and
+   both axes are solved against everything already placed. The 18 g of
+   servos moved from a hardcoded 0.72c to a solved 0.545c on the trainer,
+   which moved the CG and the trim with it. Inside the loop, because
+   `choose_structure` taught that lesson at a cost of four generations.
+7. ~~The linkage throw gate.~~ **(B5)** `linkage.py` solves the actual
+   four-bar: two circles and a rigid rod, the pushrod's length fixed by
+   the neutral position. Not the ratio `r_servo / r_horn`, which is the
+   small-angle limit of a parallel linkage and is wrong in the two ways
+   that matter — it is linear, so it cannot show a mechanism running out
+   of travel, and it is symmetric, so it cannot show the differential a
+   real one has.
+
+   The horn's arm is **derived**, not declared: a horn screws to the
+   elevon's lower surface while the hinge is on the upper one, so the arm
+   is the section's own thickness plus the protrusion, and the section
+   thins outboard. The trainer's inboard horn arm is 23 mm and its tip
+   horn arm is 14 mm — the mechanism's leverage changes along the span
+   whether or not anyone models it.
+
+   *Result:* all three fleet linkages pass with margin — about ±21° down
+   and ±23° up against a ±12° requirement, with a real 2.4° differential.
+   That is not a null result. It is a previously unverified assumption
+   underneath demon1's entire headline number, now verified, with a
+   number.
 
 *Three bugs came out of connecting the scored elevon to the printed one,
 and two were older than the elevon work:*
@@ -712,11 +739,33 @@ the flutter work in `ROADMAP.md`.
     distribution. **(C1, C2)**
 12. Motor mount, prop clearance, cooling. **(D1, D2, D3)**
 
-## Phase 5 — the handoff
+## Phase 5 — the handoff — **`BUILD.md` done**
 
-13. Generated `BUILD.md`, `BOM.md`, `MANIFEST.json`. **(§4)**
-14. Slicer profiles as files. **(§4)**
-15. CG mark, part labels, bed placement. **(F1, F2, F3)**
+13. ~~Generated `BUILD.md`.~~ **(§4)** `build_sheet.py`. Every export
+    writes one, and everything in it is computed from the design that was
+    scored: the CG station with the **window it has to stay inside**
+    (the static-margin band is exactly a band on x_cg, since
+    SM = (x_np − x_cg)/mac), how far the pack may drift before it leaves
+    that window, the spar cut list tip-to-tip, the elevon throws in
+    **millimetres at the trailing edge** because that is how a
+    transmitter is actually set up, which panel is the fuselage, the
+    assembly order and what it is too late to change, which gates are
+    tight, and — when the design misses its mission — that it does.
+
+    Writing it turned up the contradiction it exists to prevent. The
+    export's prose said **"1 bottom layer"** while `spars.report` said the
+    root face needs **zero**, and one bottom layer seals it: the spar
+    corridor becomes a closed pocket and the electronics are unreachable.
+    Two places disagreeing about the single most load-bearing setting in
+    the project, one of them wrong, since the first commit. There is one
+    source now and it is generated.
+
+    Still to do: `BOM.md` and `MANIFEST.json`.
+14. Slicer profiles as machine-readable files (the settings are in
+    `BUILD.md` as a table; an Orca/Bambu process `.json` is the next
+    step). **(§4)**
+15. CG mark scribed on the part, part labels, bed placement. **(F1, F2,
+    F3)** — the CG *number* is emitted; the *groove* is not cut yet.
 
 *Acceptance:* someone who has never seen this repository prints the
 folder and flies the result.

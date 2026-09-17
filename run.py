@@ -34,6 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from washout import build_sheet
 from washout import spars as sp
 from washout.geom import cst
 from washout.printing import elevons, stl, vase
@@ -108,6 +109,9 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
     if getattr(ev, "lateral", None) is not None:
         lines += [ev.lateral.report(), ""]
+    if getattr(ev, "linkage", None) is not None:
+        from washout import linkage as _lkg
+        lines += [_lkg.report(ev.linkage, ev.max_elevon_deflect_deg), ""]
     if ev.print_settings is not None and elevons.has_elevon(ev.print_settings):
         lines += [elevons.hinge_report(ev.plan, ev.print_settings,
                                        ev.max_elevon_deflect_deg), ""]
@@ -159,11 +163,18 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         print(f"  {ev.plan.name + '_tip_fin':<14} flat plate {w_mm:.0f}x{h_mm:.0f} mm, "
               f"{fins.thickness_m*1000:.1f} mm -- print TWO in normal (not vase) "
               f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
-    print(f"\n  slice with SPIRAL VASE / spiralize outer contour ON, 0 top "
-          f"layers,\n  1 bottom layer, {settings.extrusion_width_mm} mm "
-          f"extrusion width, {settings.layer_h_mm} mm layers.")
-    print(f"  spar: {settings.spar_d_mm} mm tube slides into the cavity "
-          f"along the print Z axis.")
+    sheet = build_sheet.write(ev, panels, settings, out / "BUILD.md")
+    print(f"\n  build sheet: {sheet}")
+    # The slicer settings are in BUILD.md and nowhere else now. The
+    # prose here said "1 bottom layer" while spars.report said the root
+    # face needs ZERO -- and one bottom layer seals it, which makes the
+    # spar corridor a closed pocket and the electronics unreachable. Two
+    # places disagreeing about the single most load-bearing setting in
+    # the project, one of them wrong, for fifteen commits.
+    print(f"  spar: {settings.spar_d_mm} mm tube, seated against the skin "
+          f"BUILD.md names.")
+    print("  every other print setting is in BUILD.md: read it before "
+          "slicing.")
 
 
 def build_parser() -> argparse.ArgumentParser:

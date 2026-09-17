@@ -39,6 +39,7 @@ from ..aero import dynamics as dyn
 from ..aero import fins as fn
 from .. import propulsion as prop
 from .. import spars as sp
+from .. import linkage as lkg
 from .. import structure as struct
 from collections import OrderedDict
 from ..aero.vlm import VLM
@@ -97,6 +98,17 @@ class Bay:
     somewhere that exists -- so their seat is SOLVED, the same way the
     spar's chordwise station is solved, against whatever is already in the
     wing."""
+    eta_frac: float | None = None
+    eta_lo: float = 0.0
+    eta_hi: float = 0.0
+    """Where along the span the bay sits, and the band a solver may use.
+
+    None means the centreline, which is where payload in a blended body
+    belongs. A SERVO does not belong there: it has to sit next to the
+    surface it drives, so its station is out in the wing and is solved in
+    `[eta_lo, eta_hi]` along with its chordwise seat. A zero-width band
+    means "not spanwise-solved", which keeps every existing bay exactly
+    where it was."""
     holds: tuple[str, ...] = ()
     """Payload item names that physically live inside this bay.
 
@@ -147,9 +159,11 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
     return bool(worst >= height), float(worst), float(height)
 
 
-def seat_bays(plan, mission, p_vec, wall_mm: float,
-              n_x: int = 33) -> tuple[list, dict]:
-    """Where every bay actually goes. -> ([Volume, ...], {name: x_frac})
+def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
+              n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
+    """Where every bay actually goes.
+
+    -> ([Volume, ...], {name: x_frac}, {name: eta_frac})
 
     Two passes, in the physical order of who gets to choose:
 
@@ -178,38 +192,53 @@ def seat_bays(plan, mission, p_vec, wall_mm: float,
     """
     placed: list = []
     seats: dict = {}
+    eta_seats: dict = {}
 
-    def volume(bay, x):
-        return it.bay_volume(bay.name, x, bay.box_mm, plan, offset_mm=wall_mm)
+    def volume(bay, x, eta=None):
+        return it.bay_volume(bay.name, x, bay.box_mm, plan,
+                             offset_mm=wall_mm,
+                             eta_frac=bay.eta_frac if eta is None else eta)
 
     for bay in mission.bays:
         if bay.x_var is None:
             continue
         x = float(p_vec[bay.x_var])
         seats[bay.name] = x
+        eta_seats[bay.name] = bay.eta_frac
         placed.append(volume(bay, x))
 
     for bay in mission.bays:
         if bay.x_var is not None:
             continue
+        etas = (np.linspace(bay.eta_lo, bay.eta_hi, n_eta)
+                if bay.eta_hi > bay.eta_lo else (bay.eta_frac,))
         best = None
-        for x in np.linspace(bay.x_lo, bay.x_hi, n_x):
-            vol = volume(bay, float(x))
-            ok, spare = vol.fits(plan, wall_mm)
-            clash = sum(it.overlap_mm(vol, other, plan, wall_mm)
-                        for other in placed)
-            # Total millimetres of interference, then nearest the seat
-            # the mission declared. SUMMED, not ranked: a clash and a
-            # depth shortfall are both "millimetres of something that
-            # does not fit", and ranking clash above depth made the
-            # solver accept a 6 mm depth miss to dodge a 0.1 mm graze.
-            key = (clash + max(-spare, 0.0), abs(float(x) - bay.x_frac))
-            if best is None or key < best[0]:
-                best = (key, float(x), vol)
+        for e in etas:
+            for x in np.linspace(bay.x_lo, bay.x_hi, n_x):
+                vol = volume(bay, float(x), e)
+                ok, spare = vol.fits(plan, wall_mm)
+                clash = sum(it.overlap_mm(vol, other, plan, wall_mm)
+                            for other in placed)
+                # A seat that crosses a print joint is a part in two
+                # separate shells, so it is counted as interference here
+                # rather than only reported later: the solver has a whole
+                # band to choose from and should not need telling twice.
+                first, last = it.straddles(vol, joint_etas)
+                split = 0.0 if last <= first else 20.0
+                # Total millimetres of interference, then nearest the seat
+                # the mission declared. SUMMED, not ranked: a clash and a
+                # depth shortfall are both "millimetres of something that
+                # does not fit", and ranking clash above depth made the
+                # solver accept a 6 mm depth miss to dodge a 0.1 mm graze.
+                key = (clash + max(-spare, 0.0) + split,
+                       abs(float(x) - bay.x_frac))
+                if best is None or key < best[0]:
+                    best = (key, float(x), vol, e)
         seats[bay.name] = best[1]
+        eta_seats[bay.name] = best[3]
         placed.append(best[2])
 
-    return placed, seats
+    return placed, seats, eta_seats
 
 
 @dataclass(frozen=True)
@@ -274,6 +303,18 @@ class Mission:
     min_thrust_weight: float = 0.0
     min_elevon_power: float = 0.004
     max_elevon_power: float = 0.030
+    servo_arm_mm: float = 11.0
+    horn_below_mm: float = 8.0
+    servo_travel_deg: float = 60.0
+    """The mechanism, as declared hardware.
+
+    A 9 g servo's outermost arm hole is about 11 mm from the shaft, a
+    moulded control horn stands 8 mm off the surface, and a standard servo
+    gives about 60 degrees each way before the arm binds. The horn's ARM
+    is not declared -- it is the section's thickness at the hinge plus the
+    protrusion, because the horn screws to the lower surface while the
+    hinge is on the upper one, so the leverage changes along the span
+    whether or not anyone models it."""
     max_elevon_deflect_deg: float = 12.0
     """How far the pilot can pull the elevons before the flow gives up.
     Beyond about 15 degrees a plain hinged surface separates and the
@@ -360,6 +401,9 @@ class Mission:
             Item("2205 2300kv + prop", 0.036, 0.97),   # pusher, at the TE
             Item("AR630 rx", 0.008, 0.34),
             Item("esc + wiring", esc_g, 0.50),
+            # 0.72c is a nominal only: this item now lives in the
+            # "servos" bay and takes the station the bay is SOLVED to,
+            # because a servo has to sit beside the surface it drives.
             Item("servos x2", servo_g, 0.72),
         )
 
@@ -383,7 +427,18 @@ class Mission:
             bays=(Bay("3S 1300", 0.28, (72.0, 35.0, 24.0), x_var="batt_x"),
                   Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0),
                       x_lo=0.12, x_hi=0.86,
-                      holds=("AR630 rx", "esc + wiring"))),
+                      holds=("AR630 rx", "esc + wiring")),
+                  # A 9 g servo (the 18 g declared for two), LYING FLAT:
+                  # 22.5 x 11.8 x 22.7 mm standing up will not go into an
+                  # outer panel 17 mm deep, so the long axis runs chordwise
+                  # and the 12 mm dimension is the one through the section.
+                  # Seated out in the wing near the surface it drives, and
+                  # both sides' mass is carried at the same x because the
+                  # aircraft is symmetric and only x enters the CG.
+                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                      x_lo=0.20, x_hi=0.68,
+                      eta_lo=0.30, eta_hi=0.80,
+                      holds=("servos x2",))),
             battery_kg=0.110,
             cruise_band_ms=(7.0, 11.0),
             min_static_margin=0.15, max_static_margin=0.32,
@@ -436,7 +491,11 @@ class Mission:
             bays=(Bay("4S 850", 0.30, (65.0, 34.0, 24.0), x_var="batt_x"),
                   Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0),
                       x_lo=0.14, x_hi=0.86,
-                      holds=("AR630 rx", "esc + wiring"))),
+                      holds=("AR630 rx", "esc + wiring")),
+                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                      x_lo=0.20, x_hi=0.70,
+                      eta_lo=0.25, eta_hi=0.75,
+                      holds=("servos x2",))),
             battery_kg=0.105,
             # This band is the HANDS-OFF trim window, not the top end:
             # top speed is the objective and is scored separately with
@@ -481,7 +540,15 @@ class Mission:
             bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
                   Bay("AR630", 0.44, (30.0, 20.0, 12.0),
                       x_lo=0.14, x_hi=0.88,
-                      holds=("AR630 rx", "esc + wiring"))),
+                      holds=("AR630 rx", "esc + wiring")),
+                  # 5 g sub-micro, flat: 20 x 8.6 x 20 mm becomes
+                  # 20 chordwise x 20 spanwise x 9 through the section.
+                  Bay("servos", 0.55, (20.0, 20.0, 9.0),
+                      x_lo=0.20, x_hi=0.70,
+                      eta_lo=0.30, eta_hi=0.80,
+                      holds=("servos x2",))),
+            # sub-micro hardware to match the sub-micro servos
+            servo_arm_mm=7.0, horn_below_mm=5.0,
             battery_kg=0.028,
             cruise_band_ms=(8.0, 17.0),
             min_static_margin=0.10, max_static_margin=0.26,
@@ -841,10 +908,21 @@ class Evaluation:
     fins: object | None = None
     dynamics: object | None = None
     structure: object | None = None
+    linkage: object | None = None
     print_settings: object | None = None
     max_elevon_deflect_deg: float = 12.0
     """The mission's deflection limit, carried out so the exporter sizes
     the hinge bevel from the same number the score used."""
+    sm_band: tuple = (0.0, 1.0)
+    cruise_band: tuple = (0.0, 0.0)
+    max_loading_gdm2: float = 1e9
+    """The mission's own limits, carried out with the verdict.
+
+    The build sheet turns them into things a builder can act on -- a
+    static-margin band becomes a CG window in millimetres, a cruise band
+    becomes a margin to report -- and it should not have to be handed the
+    Mission to do it. An Evaluation that cannot say what it was judged
+    against is an Evaluation you have to keep a second object beside."""
     """Where the spanwise tubes ended up. Computed during the gates
     and carried out so the export can SHOW the placement -- the first
     version fitted them, gated on them, and then threw the geometry
@@ -940,7 +1018,8 @@ def _evaluate_once(
     # given, and the spar then takes the best remaining seat. Fitting the
     # tube first and checking the pack afterwards is what put a tube
     # through every pack in the fleet.
-    bay_vols, bay_seats = seat_bays(plan, mission, p_vec, wall)
+    bay_vols, bay_seats, bay_etas = seat_bays(
+        plan, mission, p_vec, wall, joint_etas)
 
     spar_fits = []
     if mission.spars:
@@ -1223,6 +1302,37 @@ def _evaluate_once(
                        f"{mission.max_elevon_power:.4f} (twitchy)")
         penalty += 20.0 * (abs(dcm_ddeg) - mission.max_elevon_power)
 
+    # --- and can the MECHANISM deliver it? ---
+    #
+    # dcm_ddeg above says how much moment a degree of elevon buys, and the
+    # speed objective below spends `max_elevon_deflect_deg` of it. Nothing
+    # until now asked whether the servo, its arm, the pushrod and the horn
+    # can reach that angle: demon1's headline speed was computed from a
+    # deflection the aircraft had never been shown able to make.
+    #
+    # Solved as a four-bar rather than by the ratio r_servo / r_horn,
+    # which is the small-angle limit of a parallel linkage and is wrong in
+    # the two ways that matter -- it is linear, so it cannot show a
+    # mechanism running out of travel, and it is symmetric, so it cannot
+    # show the differential a real linkage has.
+    link = None
+    if elv.has_elevon(settings) and "servos" in bay_seats:
+        link = lkg.for_station(
+            plan, bay_etas.get("servos") or 0.5 * (e_start + 1.0),
+            elv.hinge_x(settings), bay_seats["servos"],
+            mission.servo_arm_mm, mission.horn_below_mm,
+            mission.servo_travel_deg, wall)
+        thr_down, thr_up, locked = lkg.sweep(link)
+        want = mission.max_elevon_deflect_deg
+        got = min(thr_down, -thr_up)
+        if locked:
+            reasons.append("linkage locks inside the servo's travel")
+            penalty += 30.0
+        if got < want:
+            reasons.append(f"linkage reaches {thr_down:+.1f}/{thr_up:+.1f} deg, "
+                           f"the score spends +/-{want:.0f}")
+            penalty += 8.0 * (want - got)
+
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:
         reasons.append(f"wing loading {loading:.1f} > "
@@ -1315,6 +1425,10 @@ def _evaluate_once(
         fairness=fair, fairness_limits=mission.fairness,
         fins=fins, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
+        linkage=link,
+        sm_band=(mission.min_static_margin, mission.max_static_margin),
+        cruise_band=tuple(mission.cruise_band_ms),
+        max_loading_gdm2=mission.max_wing_loading_gdm2,
         # The settings this verdict was actually reached with, including
         # the elevon station and the spar corridors set above. They used
         # to be a local variable, so `evaluate` handed `choose_structure`

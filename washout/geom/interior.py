@@ -214,21 +214,37 @@ def straddles(vol: Volume, panel_etas) -> tuple[int, int]:
 
 def bay_volume(name: str, x_frac: float, box_mm, plan,
                half_span_mm: float | None = None,
-               anchor: str = LOWER, offset_mm: float = 0.0) -> Volume:
+               anchor: str = LOWER, offset_mm: float = 0.0,
+               eta_frac: float | None = None) -> Volume:
     """A payload box, as the interior region it actually occupies.
 
     `box_mm` is (length, width, height) as `search.design.Bay` declares
     it: length is chordwise, width is SPANWISE, height is through the
-    section. The box is centred on the centreline, so it reaches
-    eta = width / (2 * half_span) on each side and we model the right
-    half -- the aircraft is symmetric and so is the clash.
+    section.
+
+    `eta_frac` is where the box is CENTRED along the span. None means the
+    centreline, which is where payload in a blended body sits: the box
+    then reaches eta = width / (2 * half_span) and we model the right half,
+    because the aircraft is symmetric and so is the clash. A servo is not
+    centreline payload -- it has to sit next to the surface it drives --
+    so it is centred out at its own station and occupies eta_frac +/- half
+    its width.
+
+    Chordwise extent is expressed against the ROOT chord because that is
+    the datum every other chord fraction in the program uses; the box does
+    not get shorter because the local chord did.
     """
     length, width, height = box_mm
     root_c_mm = plan.stations[0].chord_m * 1000.0
     half_mm = half_span_mm or plan.half_span_m * 1000.0
     dx = 0.5 * length / max(root_c_mm, 1e-9)
+    de = 0.5 * width / max(half_mm, 1e-9)
+    if eta_frac is None:
+        e0, e1 = 0.0, min(de, 1.0)
+    else:
+        e0, e1 = max(float(eta_frac) - de, 0.0), min(float(eta_frac) + de, 1.0)
     return Volume(name=name, x0=x_frac - dx, x1=x_frac + dx,
-                  eta0=0.0, eta1=min(0.5 * width / max(half_mm, 1e-9), 1.0),
+                  eta0=e0, eta1=e1,
                   height_mm=height, anchor=anchor, offset_mm=offset_mm)
 
 

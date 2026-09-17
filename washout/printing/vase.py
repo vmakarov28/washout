@@ -716,7 +716,8 @@ def arc_length_mm(plan: Planform, eta0: float = 0.0, eta1: float = 1.0,
 
 
 def panel_etas(plan: Planform, settings: PrintSettings,
-               z_margin_mm: float = 8.0) -> list[tuple[float, float]]:
+               z_margin_mm: float = 8.0,
+               min_panel_mm: float = 5.0) -> list[tuple[float, float]]:
     """Split the half-span into panels that each fit the Z envelope.
 
     Breaks land on the planform's own stations first -- a kink is where
@@ -735,10 +736,25 @@ def panel_etas(plan: Planform, settings: PrintSettings,
     # orientation, which spiralize cannot build. Breaking the print at
     # `elevon_eta` makes every panel wholly plain or wholly truncated and
     # turns that roof into a print joint.
-    breaks = sorted({0.0, 1.0} | set(plan.controls)
-                    | ({float(settings.elevon_eta)}
-                       if 0.0 < settings.elevon_eta < 1.0
-                       and settings.elevon_chord > 1e-6 else set()))
+    breaks = sorted({0.0, 1.0} | set(plan.controls))
+    if 0.0 < settings.elevon_eta < 1.0 and settings.elevon_chord > 1e-6:
+        # Merge, do not just add. Micro's hinge station is eta 0.438 and a
+        # planform control station sits at 0.436 -- 0.2 mm of arc length
+        # apart -- so adding it produced a panel 0.2 mm tall weighing
+        # 0.0 g, which is a part in the parts list and a joint in the
+        # assembly that cannot exist. The HINGE station wins any tie: it
+        # is where the trailing edge has to stop, while a control station
+        # is only where the loft's curvature is described.
+        e = float(settings.elevon_eta)
+        breaks = [b for b in breaks
+                  if b in (0.0, 1.0)
+                  or arc_length_mm(plan, min(b, e), max(b, e)) > min_panel_mm]
+        breaks = sorted(set(breaks) | {e})
+    return _split_to_envelope(plan, breaks, limit)
+
+
+def _split_to_envelope(plan: Planform, breaks, limit: float) -> list:
+    """Divide any over-tall span between breaks into equal pieces."""
     out: list[tuple[float, float]] = []
     for a, b in zip(breaks, breaks[1:]):
         length = arc_length_mm(plan, a, b)

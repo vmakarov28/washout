@@ -239,3 +239,27 @@ def test_the_rib_walk_uses_the_loops_own_trailing_edge():
     d = np.linalg.norm(np.diff(ribbed, axis=0), axis=1)
     assert d.max() > 0.0
     assert (d < 1e-9).sum() == 0, f"{(d < 1e-9).sum()} coincident vertices"
+
+
+def test_the_hinge_station_does_not_create_a_sliver_panel():
+    """Micro's hinge station is eta 0.438 and a planform control station
+    sits at 0.436 -- 0.2 mm of arc length apart.
+
+    Adding the hinge station to the break set produced a panel 0.2 mm
+    tall weighing 0.0 g: a part in the parts list and a joint in the
+    assembly that cannot exist. The two stations have to MERGE, and the
+    hinge wins, because it is where the trailing edge has to stop while a
+    control station only describes the loft's curvature."""
+    for name in MISSIONS:
+        u, mission, base, plan = _fleet(name)
+        p = unit_to_physical(u)
+        s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0,
+                               elevon_chord=p["elevon_chord"],
+                               elevon_eta=p["elevon_eta"])
+        for a, b in vase.panel_etas(plan, s):
+            length = vase.arc_length_mm(plan, a, b)
+            assert length >= 5.0, (
+                f"{name}: panel {a:.4f}-{b:.4f} is {length:.2f} mm tall")
+        # the hinge station must survive the merge exactly
+        starts = [a for a, _ in vase.panel_etas(plan, s)]
+        assert any(abs(a - p["elevon_eta"]) < 1e-9 for a in starts), name

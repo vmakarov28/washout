@@ -640,15 +640,59 @@ from weighing the spars (`ROADMAP.md` item 1) and the rest from the
 occupancy gates. A re-search is what closes it, and it has to come after
 the gates, not before.
 
-## Phase 2 — the control surfaces
+## Phase 2 — the control surfaces — **B1, B2 done**
 
-4. Elevon as its own vase part; hinge pocket and chamfer. **(B1, B2)**
+4. ~~Elevon as its own vase part; hinge bevel.~~ **(B1, B2)**
+   `printing/elevons.py`. The export now writes `<name>_elevon0..n.stl`
+   beside the wing panels, all watertight, all gates passing.
+   `panel_etas` breaks at `elevon_eta` so every panel is wholly plain or
+   wholly truncated and the transition is a print joint rather than a
+   roof. Bevel angle is **derived**: a nose-face point a depth *d* below
+   the hinge axis on a face bevelled β sits at (*d* tanβ, −*d*), and
+   deflecting down by δ takes its x to *d*(tanβ cosδ − sinδ), which stays
+   clear exactly while **β ≥ δ**. The trainer's inboard elevon nose would
+   otherwise swing 2.24 mm into the wing at 12°.
 5. Companion horn plus its socket. **(B4)**
 6. Servo bay placed by a solver, inside the evaluation loop so its mass
    moves the CG. **(B3)**
 7. The linkage throw gate. **(B5)**
 
-*Acceptance:* the exported set includes elevons and horns, and the
+*Three bugs came out of connecting the scored elevon to the printed one,
+and two were older than the elevon work:*
+
+- **`print_settings` was not the settings the verdict was reached with.**
+  They were a local variable, so `evaluate` handed `choose_structure` the
+  *caller's* settings and the exporter got those back — with the elevon
+  chord at zero and the spar corridors **empty**. The search kept the rib
+  truss clear of the tubes and cut the trailing edge off; the export did
+  neither. Half mine, half pre-existing.
+- **The rib corridors were three times too narrow outboard.** The
+  half-width was computed as a fraction of the *root* chord and applied as
+  a fraction of the *local* chord. A centre legitimately is a chord
+  fraction — that is how the spar is fitted — but a half-width is a
+  physical millimetre and does not shrink with the chord. Measured on the
+  gen5 trainer, the largest circle that fitted at the LE corridor was
+  **7.65 mm at the root and 2.73 mm at the tip, for an 8 mm spar**. Every
+  ribbed panel this project has exported has ribs through its spars.
+- **The bore gate paired the wrong points on every ribbed panel.** It took
+  `n = (N+1)//2` as the upper/lower split, which is right for a plain
+  section and wrong by `n_ribs` once `insert_ribs` has reparametrised the
+  upper surface. `wall_separation_mm` has the same assumption and `check`
+  knows it — it switches to the general clearance test when ribs are
+  present. This gate had no such guard. It is now an **inscribed circle**,
+  which is the question actually being asked: a spar is a round tube
+  entering along print Z, so what decides whether it goes in is the
+  largest circle the contour holds. On a plain section the inscribed
+  circle and the vertical extent agree to 2%, which is the check that the
+  measurement is right; on a ribbed one they differ by the ribs, which is
+  the point.
+
+*And one new gate that only became askable:* a spar may not sit aft of the
+hinge line. Before the hinge line reached the geometry there was no line
+for it to be aft of, and a tube inside a control surface has nothing to
+run through.
+
+*Acceptance for the rest:* the exported set includes horns, and the
 linkage gate proves the deflection the speed objective has been assuming
 all along.
 

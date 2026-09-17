@@ -40,7 +40,10 @@ def test_evaluate_scores_the_ribbed_aircraft_by_default():
     m = Mission.micro()
     u, bare, base, settings = _trimmed(m)
     built = evaluate(u, m, base, settings)
-    assert bare.structure is None and bare.print_settings is None
+    # print_settings is now always populated -- it means "the settings this
+    # verdict was reached with", which the exporter needs. What tells a
+    # bare pass from a built one is the structure and the ribs.
+    assert bare.structure is None and not bare.print_settings.ribs
     assert built.structure is not None and built.print_settings is not None
     assert built.print_settings.ribs
     assert built.print_settings.spar_d_mm >= m.spar_d_mm

@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from washout import spars as sp
 from washout.geom import cst
-from washout.printing import stl, vase
+from washout.printing import elevons, stl, vase
 from washout.search.design import (BOUNDS, MISSIONS, Mission,  # noqa: F401
                                 choose_structure, evaluate, unit_to_physical)
 from washout.search.optimize import SEEDS, run_search
@@ -108,6 +108,9 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
     if getattr(ev, "lateral", None) is not None:
         lines += [ev.lateral.report(), ""]
+    if ev.print_settings is not None and elevons.has_elevon(ev.print_settings):
+        lines += [elevons.hinge_report(ev.plan, ev.print_settings,
+                                       ev.max_elevon_deflect_deg), ""]
     if getattr(ev, "spar_fits", None):
         lines += [sp.report(ev.spar_fits, ev.plan), ""]
     return "\n".join(lines)
@@ -125,6 +128,12 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         # is drawn BEFORE the STLs, and must never cost the parts.
         print(f"\nfigure skipped ({type(e).__name__}: {e})")
     panels = vase.build_panels(ev.plan, settings)
+    # The control surfaces, as their own parts. The hinge line runs
+    # spanwise and print Z is the span, so an elevon prints root-down in
+    # exactly the same orientation as the wing panel it came off.
+    panels = panels + elevons.build_elevons(
+        ev.plan, settings, vase.panel_etas(ev.plan, settings),
+        ev.max_elevon_deflect_deg + settings.hinge_margin_deg)
     total_g = total_min = 0.0
     print(f"\nprintable parts (one half wing; mirror for the other side):")
     for pan in panels:

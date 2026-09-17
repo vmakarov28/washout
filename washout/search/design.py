@@ -32,6 +32,7 @@ from ..geom.planform import Planform, Segment, bwb, faired, lofted
 from ..geom import fairness as fz
 from ..geom import interior as it
 from ..printing import vase
+from ..printing import elevons as elv
 from ..aero import performance as perf
 from ..aero import lateral
 from ..aero import dynamics as dyn
@@ -841,6 +842,9 @@ class Evaluation:
     dynamics: object | None = None
     structure: object | None = None
     print_settings: object | None = None
+    max_elevon_deflect_deg: float = 12.0
+    """The mission's deflection limit, carried out so the exporter sizes
+    the hinge bevel from the same number the score used."""
     """Where the spanwise tubes ended up. Computed during the gates
     and carried out so the export can SHOW the placement -- the first
     version fitted them, gated on them, and then threw the geometry
@@ -918,6 +922,15 @@ def _evaluate_once(
     # Spar corridors first: the ribs have to be told where the spars go
     # BEFORE the panels are built, because a chordwise web at a spar's
     # station is a web through the spar.
+    # The control surface the score is computed from has to reach the
+    # geometry that gets printed. `elevon_chord` and `elevon_eta` are
+    # design variables; until now they existed only in the scoring and the
+    # exported shell had its trailing edge attached, so the aircraft that
+    # flew was not the aircraft that was scored -- the oldest failure mode
+    # in the project, one more time.
+    settings = replace(settings,
+                       elevon_chord=float(p_vec["elevon_chord"]),
+                       elevon_eta=float(p_vec["elevon_eta"]))
     joint_etas = vase.panel_etas(plan, settings)
     wall = settings.extrusion_width_mm
 
@@ -933,18 +946,24 @@ def _evaluate_once(
     if mission.spars:
         spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
                                reserved=tuple(bay_vols))
-        avoid = tuple((f.x_frac,
-                       0.6 * f.spec.d_mm
-                       / (plan.stations[0].chord_m * 1000.0))
-                      for f in spar_fits)
-        settings = replace(settings, spar_avoid=avoid)
+        avoid = sp.exclusion_bands(spar_fits, wall)
+        settings = replace(
+            settings, spar_avoid=avoid,
+            spar_corridors=tuple((f.x_frac, f.reach_eta) for f in spar_fits))
 
     # --- printable? the shell mass comes out of this, so it runs early ---
     panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
-    checks = [vase.check(p) for p in panels]
-    shell_kg = sum(p.mass_g() for p in panels) * 2.0 / 1000.0
+    elevon_parts = elv.build_elevons(
+        plan, settings, joint_etas,
+        mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
+        z_step_mm=z_step_mm)
+    checks = [vase.check(p) for p in panels + elevon_parts]
+    # The elevons are shell too. Splitting the trailing edge off into its
+    # own part does not make it weightless, and it adds two walls at the
+    # cut -- so the total goes UP slightly, which is the honest direction.
+    shell_kg = sum(p.mass_g() for p in panels + elevon_parts) * 2.0 / 1000.0
     print_fail = [f"{p.name}: {','.join(c.failures())}"
-                  for p, c in zip(panels, checks) if not c.ok]
+                  for p, c in zip(panels + elevon_parts, checks) if not c.ok]
     if mission.require_printable and print_fail:
         reasons.extend(print_fail)
 
@@ -1135,6 +1154,22 @@ def _evaluate_once(
         penalty += 60.0 * (mission.min_cl_trim - pt.CL)
 
     # --- spar gates ---
+    #
+    # A spar aft of the hinge line is a spar inside the control surface:
+    # the elevon is a separate printed part now, so a tube there has
+    # nothing to run through and the surface cannot move. Newly askable --
+    # before the hinge line reached the geometry there was no line to be
+    # aft of.
+    x_hinge = elv.hinge_x(settings) if elv.has_elevon(settings) else 1.0
+    root_c_mm = plan.stations[0].chord_m * 1000.0
+    for f in spar_fits:
+        aft = f.x_frac + 0.5 * f.spec.d_mm / max(root_c_mm, 1e-9)
+        if f.reach_eta > settings.elevon_eta and aft > x_hinge:
+            over = (aft - x_hinge) * root_c_mm
+            reasons.append(f"{f.spec.name} at {f.x_frac:.2f}c is {over:.1f} mm "
+                           f"aft of the hinge line ({x_hinge:.2f}c)")
+            penalty += 10.0 * over
+
     for f in spar_fits:
         if f.joints_blocked:
             reasons.append(f"{f.spec.name}: joints too shallow at "
@@ -1211,7 +1246,7 @@ def _evaluate_once(
 
     # Printability failures are graded the same way, by the worst gate's
     # overshoot, so "3 mm too wide for the bed" beats "80 mm too wide".
-    for p_stack, chk in zip(panels, checks):
+    for p_stack, chk in zip(panels + elevon_parts, checks):
         for g in chk.gates:
             if not g.passed and g.limit > 0:
                 penalty += 8.0 * abs(g.value - g.limit) / g.limit
@@ -1279,6 +1314,16 @@ def _evaluate_once(
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
         fins=fins, dynamics=modes,
+        max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
+        # The settings this verdict was actually reached with, including
+        # the elevon station and the spar corridors set above. They used
+        # to be a local variable, so `evaluate` handed `choose_structure`
+        # the CALLER's settings and the exporter got those back -- with
+        # spar_avoid empty and the elevon chord at zero. The search kept
+        # the rib truss clear of the spar corridors and cut the trailing
+        # edge off; the export did neither, and printed ribs straight
+        # through both tubes and a wing with its elevons still attached.
+        print_settings=settings,
     )
 
 
@@ -1336,12 +1381,17 @@ def evaluate(
                            z_step_mm=z_step_mm)
     if not size_structure or first.trim is None or first.plan is None:
         return first
-    st, tuned = choose_structure(first, mission, settings, ns, nc,
+    st, tuned = choose_structure(first, mission, first.print_settings or settings,
+                                 ns, nc,
                                  vlm=_cached_vlm(u, mission, base, first.plan, ns, nc))
     ev = _evaluate_once(u, mission, base, tuned, drag=drag, ns=ns, nc=nc,
                         want_panels=want_panels, z_step_mm=z_step_mm,
                         spar_od_mm=st.spar.od_mm)
-    ev = replace(ev, structure=st, print_settings=tuned)
+    # `ev.print_settings` is the second pass's OWN settings, not `tuned`:
+    # the pass adds the elevon station and re-solves the spar corridors
+    # for the sized tube, and those are the settings the export has to
+    # use. Overwriting them with `tuned` is what silently dropped both.
+    ev = replace(ev, structure=st)
     if not st.ok:
         why = "; ".join(st.notes) or "spar overstressed or too flexible"
         ev = replace(ev, ok=False, reasons=ev.reasons + (f"structure: {why}",),

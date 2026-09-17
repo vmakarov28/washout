@@ -69,10 +69,33 @@ class RibSpec:
     which is the largest diagonal the truss can have and still print."""
     x_first: float = 0.20
     x_last: float = 0.72
+    x_clip: tuple = (0.08, 0.88)
+    """Hard limits on where a swept rib may end up, in the LOOP's own
+    chord units. It was a literal (0.08, 0.88) inside `insert_ribs`, which
+    is correct for a full section and wrong for a panel truncated at the
+    hinge line: the loop then spans [0, x_hinge], and a rib clipped to
+    0.88 lands past the cut face, where `np.interp` clamps it onto the
+    closing segment and the clearance gate fails. `build_stack` narrows it
+    for a truncated panel."""
     enabled: bool = True
     avoid: tuple = ()
-    """Chordwise bands the ribs must not enter, as (centre, half_width)
-    in chord fractions -- the spar corridors.
+    """Chordwise bands the ribs must not enter, as
+    (centre_chord_fraction, half_width_MM) -- the spar corridors.
+
+    The two components are deliberately different kinds, and conflating
+    them was a real bug. A spar's CENTRE is a chord fraction: that is how
+    `spars.place` fits it, and the tube follows the same fraction out the
+    span. Its half-width is a PHYSICAL millimetre -- the tube's radius
+    plus a bead plus the fit clearance -- and it does not shrink just
+    because the chord does.
+
+    Both used to be root-chord fractions, applied as local-chord
+    fractions. At the root they agree; outboard the local chord is a
+    third of the root's, so the corridor came out three times too narrow
+    and the truss ran straight through the tube. Measured on the gen5
+    trainer, the largest circle that fitted at the LE corridor was
+    7.65 mm at the root and 2.73 mm at the tip, for an 8 mm spar. Every
+    ribbed panel this project has exported has ribs through its spars.
 
     Ribs are chordwise webs running skin to skin, and they sweep with Z.
     A spanwise tube at a fixed chord fraction is therefore GUARANTEED to
@@ -113,9 +136,9 @@ class RibSpec:
         tri = 4.0 * np.abs(phase - 0.5) - 1.0          # -1 .. +1
         sign = np.where(np.arange(self.n_ribs) % 2 == 0, 1.0, -1.0)
         x = base + sign * tri * amp_mm / max(chord_mm, 1e-6)
-        return self._push_clear(x)
+        return self._push_clear(x, chord_mm)
 
-    def _push_clear(self, x: np.ndarray) -> np.ndarray:
+    def _push_clear(self, x: np.ndarray, chord_mm: float) -> np.ndarray:
         """Shove any rib that has wandered into a spar corridor out to the
         nearer edge of it. Nudged rather than dropped, because the layer's
         vertex count must stay constant -- the STL skinner joins layer k
@@ -124,7 +147,8 @@ class RibSpec:
         if not self.avoid:
             return x
         x = np.asarray(x, dtype=float).copy()
-        for c, half in self.avoid:
+        for c, half_mm in self.avoid:
+            half = half_mm / max(chord_mm, 1e-6)      # mm -> local chord
             lo, hi = c - half, c + half
             inside = (x > lo) & (x < hi)
             if inside.any():
@@ -179,7 +203,16 @@ def insert_ribs(
 
     slit = slit_mm / chord_mm
     gap = gap_mm / chord_mm
-    xr = np.sort(np.clip(spec.stations(z_mm, chord_mm), 0.08, 0.88))[::-1]
+    # The loop's OWN trailing edge, not an assumed 1.0. A panel truncated
+    # at the hinge line ends at x_hinge, and walking the segments from 1.0
+    # made np.interp clamp every point of the first segment onto the cut
+    # face -- a flat pile of vertices on top of each other, which the
+    # clearance gate reads as a wall touching itself and the bore gate
+    # reads as a section a third of its real depth.
+    x_te = float(max(up_x.max(), lower[:, 0].max()))
+    xr = np.sort(np.clip(spec.stations(z_mm, chord_mm),
+                         spec.x_clip[0],
+                         min(spec.x_clip[1], x_te - 1.5 * slit)))[::-1]
 
     def y_up(x):
         return np.interp(x, up_x, up_y)
@@ -188,7 +221,7 @@ def insert_ribs(
         return np.interp(x, lower[:, 0], lower[:, 1])
 
     # segment boundaries, walking TE -> LE (x descending)
-    edges = [1.0]
+    edges = [x_te]
     for x in xr:
         edges += [x + 0.5 * slit, x - 0.5 * slit]
     edges += [0.0]

@@ -69,6 +69,47 @@ class PrintSettings:
     spar_avoid: tuple = ()
     """(centre, half_width) chord-fraction bands the ribs must keep out
     of -- the spar corridors, from washout.spars."""
+    spar_corridors: tuple = ()
+    """(x_frac, reach_eta) for every fitted spar, for the BORE gate.
+
+    Separate from `spar_avoid`, which the ribs consume, because the two
+    need different things: the truss must keep clear of a corridor
+    wherever the tube goes, while the bore gate must only ask whether the
+    tube fits in the panels it actually ENTERS.
+
+    Without the reach, the gate failed the outer panels of every design
+    -- correctly observing that the trainer's TE spar does not fit at
+    0.54c beyond eta 0.76, which `spars.fit_all` already knows and
+    reports as its reach. The spar is allowed to stop short: insisting one
+    reach the tip would force the whole wing thick to satisfy its
+    thinnest tenth. `min_spar_reach_frac` is the gate for that, and it is
+    a mission constraint, not a print one."""
+    elevon_chord: float = 0.0
+    elevon_eta: float = 1.0
+    """The control surface, as the EXPORTER sees it. Zero chord means the
+    trailing edge stays attached and someone cuts it with a knife, which
+    is what every generation before this one shipped.
+
+    These duplicate two design variables on purpose. `elevon_chord` and
+    `elevon_eta` are searched -- they set the control authority the score
+    is computed from -- and they have to reach the geometry that gets
+    printed, or the aircraft that flies is not the aircraft that was
+    scored. `search.design` copies them across; nothing here invents
+    them."""
+    hinge_gap_mm: float = 0.8
+    """Gap between the wing's cut face and the elevon's nose. One bead is
+    not enough: the nose has to rotate."""
+    min_first_layer_mm2: float = 300.0
+    elevon_first_layer_mm2: float = 40.0
+    """Bed-adhesion floors, per part class. Both are DECLARED process
+    limits in the same category as `max_overhang_deg = 50` and
+    `min_te_mm = 1.0`: chosen conservatively, not derived, and neither has
+    been validated against a failed print. The elevon floor assumes a
+    brim. See docs/ROADMAP-BUILD.md -- it is listed as a debt rather than
+    dressed up as physics."""
+    hinge_margin_deg: float = 4.0
+    """Chamfer angle beyond the mission's own deflection limit, so the
+    surface reaches its full travel before the geometry stops it."""
     """Rib slit and floor gap, as a multiple of extrusion width.
 
     One bead exactly is the physical requirement -- the beads must touch
@@ -97,6 +138,34 @@ class LayerStack:
     name: str = "panel"
     z_step_mm: float | None = None   # sampling pitch; None = the real layer
     has_ribs: bool = False
+    n_upper: int | None = None
+    """How many of the loop's points are the upper surface.
+
+    None means the wing convention: 2n-1 points with ONE shared vertex at
+    the leading edge, where the two surfaces genuinely meet, and a blunt
+    trailing edge carrying `min_te_mm`.
+
+    An elevon does not obey it. Its nose is a CUT, so the surfaces do not
+    meet there and a shared vertex would be a feather edge thinner than
+    the nozzle. It has 2n points and two blunt faces, and the pairing runs
+    (i, 2n-1-i) instead. Making the split explicit is what lets one
+    thickness gate serve both instead of silently misaligning by one."""
+    spar_x_local: tuple = ()
+    """Chord fractions of THIS LOOP at which the bore is measured.
+
+    The gate used to measure at `settings.spar_x_frac`, a default of 0.30,
+    while `spars.place` solved the real stations -- 0.17c and 0.54c on
+    demon1. Two places disagreeing about where the spar is, which is the
+    same shape of mistake as the bay and its contents. `build_stack` fills
+    this from the solved corridors, converting into the loop's own chord
+    when the panel is truncated at the hinge line."""
+    role: str = "wing"
+    """"wing" or "elevon". Not decoration: two of the printability gates
+    are wing-panel rules and are meaningless on a control surface. An
+    elevon has no spar, so asking whether an 8 mm tube fits its 6 mm
+    section rejects a part that was never meant to hold one; and the
+    300 mm2 bed-adhesion floor is sized for a 111 mm tall centre body,
+    not for a 25 mm wide trailing-edge wedge."""
 
     @property
     def layers_per_sample(self) -> float:
@@ -139,14 +208,26 @@ class LayerStack:
         return best
 
     def wall_separation_mm(self) -> np.ndarray:
-        """Skin-to-skin distance at every paired chord station, (L, n-1).
+        """Skin-to-skin distance at every paired chord station.
 
         Paired points are the pre-rotation upper/lower pair at the same
         x/c, and twist is a RIGID rotation, so their distance is the true
-        section thickness however the layer is turned. The leading-edge
-        point is dropped: the two surfaces share it, so its 'thickness'
-        is trivially zero and would sink every design."""
-        n = (self.contours.shape[1] + 1) // 2
+        section thickness however the layer is turned.
+
+        Two conventions, one gate. On the wing's 2n-1 loop the two
+        surfaces SHARE the leading-edge vertex, so its 'thickness' is
+        trivially zero and is dropped -- keeping it would sink every
+        design. On an elevon's 2n loop nothing is shared: the nose is a
+        cut face and its thickness is a real number that must be
+        measured, because a bevel that closed it to a point is exactly
+        the bug this pairing caught."""
+        N = self.contours.shape[1]
+        if self.n_upper is not None:
+            n = int(self.n_upper)
+            up = self.contours[:, :n]                     # TE -> nose
+            lo = self.contours[:, n:][:, ::-1]            # TE -> nose
+            return np.linalg.norm(up - lo, axis=2)
+        n = (N + 1) // 2
         up = self.contours[:, :n][:, ::-1]      # LE -> TE
         lo = self.contours[:, n - 1:]           # LE -> TE
         return np.linalg.norm(up - lo, axis=2)[:, 1:]
@@ -228,6 +309,13 @@ def build_stack(
     dz = tip.z_le_m - root.z_le_m
     panel_len_mm = float(np.hypot(dy, dz)) * 1000.0
 
+    # Wholly outboard of the hinge station -> this panel is the wing
+    # FORWARD of the elevon and its trailing edge is a cut face. Wholly,
+    # not partly: a panel that changed shape half way up would need a
+    # surface normal to the span, which is a roof.
+    truncated = (settings.elevon_chord > 1e-6
+                 and eta0 >= settings.elevon_eta - 1e-9)
+
     step = z_step_mm or settings.layer_h_mm
     n_layers = max(int(round(panel_len_mm / step)), 2)
     z = np.arange(n_layers) * step
@@ -239,6 +327,17 @@ def build_stack(
                        max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs,
                        avoid=tuple(settings.spar_avoid))
+    if truncated:
+        # The loop now spans [0, x_hinge], so the truss has to fit the box
+        # that exists. Scaled rather than clipped: the ribs keep the same
+        # fractions OF THE REMAINING CHORD, which keeps the truss evenly
+        # spread instead of bunching it behind the spar corridors.
+        xh = 1.0 - settings.elevon_chord
+        rib_spec = replace(rib_spec,
+                           x_first=rib_spec.x_first * xh,
+                           x_last=rib_spec.x_last * xh,
+                           x_clip=(rib_spec.x_clip[0] * xh,
+                                   rib_spec.x_clip[1] * xh))
     if settings.ribs:
         # What the bare panel already spends of the overhang budget,
         # computed rather than measured. A contour point at chord
@@ -273,6 +372,9 @@ def build_stack(
         chord_mm = st.chord_m * 1000.0
         loop = st.airfoil.coords(settings.contour_points)
         loop = thicken_for_nozzle(loop, chord_mm, settings)
+        if truncated:
+            from .elevons import hinge_x, truncate_loop
+            loop = truncate_loop(loop, hinge_x(settings))
         if settings.ribs:
             clr = settings.extrusion_width_mm * settings.rib_clearance_factor
             loop = insert_ribs(loop, chord_mm, float(z[k]), rib_spec, clr, clr)
@@ -286,11 +388,19 @@ def build_stack(
             [st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
 
     # centre the whole part on the bed
+    # The solved corridors, in this loop's own chord. A truncated panel's
+    # loop spans [0, x_hinge] of the original chord, so a spar at 0.54c
+    # sits at 0.54/x_hinge of what remains.
+    xh = (1.0 - settings.elevon_chord) if truncated else 1.0
+    local = tuple(float(np.clip(c / max(xh, 1e-6), 0.0, 1.0))
+                  for c, reach in settings.spar_corridors
+                  if reach >= eta0 + 1e-9)
+
     flat = contours.reshape(-1, 2)
     contours -= 0.5 * (flat.min(0) + flat.max(0))
     return LayerStack(z_mm=z, eta=eta, contours=contours,
                       settings=settings, name=name, z_step_mm=step,
-                      has_ribs=settings.ribs)
+                      has_ribs=settings.ribs, spar_x_local=local)
 
 
 # ------------------------------------------------------------------- gates
@@ -418,6 +528,99 @@ def ramp_span_mm(stack: LayerStack, depth_mm: float,
     return float(depth_mm / rate) if rate > 0.0 else float("inf")
 
 
+def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17) -> float:
+    """Diameter of the largest circle that fits at chord station x.
+
+    This is the question the bore gate is actually asking. A spar is a
+    round tube entering along the print Z axis, so its cross-section in
+    the bed plane is a circle, and what decides whether it goes in is the
+    largest circle the contour will hold -- not the section's thickness,
+    and not the contour's vertical extent.
+
+    The two approximations that came before both disagree with it and with
+    each other. `spars.depth_at` takes the aerofoil's thickness at x,
+    which is measured normal-ish to the chord and ignores twist;
+    `_vertical_extent` measures the rotated contour's height on a vertical
+    line, which near the leading edge cuts across a steeply sloping
+    surface. On the trainer's tip panel they differ by about half a
+    millimetre -- enough to decide an 8 mm gate either way, which is
+    exactly the kind of 0.5 mm two places can quietly disagree by.
+
+    Centres are scanned along the vertical line at x and the clearance at
+    each is its distance to the nearest contour segment; twice the best
+    clearance is the usable diameter. Scanned rather than solved because
+    the section is not convex -- a reflexed aerofoil with a rib detour has
+    more than one local optimum, and a root-finder would return whichever
+    it started next to.
+    """
+    p = np.asarray(contour, dtype=float)
+    a = p
+    ab = np.roll(p, -1, axis=0) - a
+    denom = np.einsum("ij,ij->i", ab, ab)
+    denom[denom < 1e-12] = 1e-12
+
+    ys = _crossings(p, x)
+    if ys.size < 2:
+        return 0.0
+    y0, y1 = ys.min(), ys.max()
+    cy = np.linspace(y0, y1, n)[1:-1]
+    if cy.size == 0:
+        return 0.0
+    c = np.stack([np.full(cy.shape, x), cy], 1)            # (m, 2)
+
+    ap = c[:, None, :] - a[None, :, :]                      # (m, N, 2)
+    tt = np.clip(np.einsum("mnk,nk->mn", ap, ab) / denom[None, :], 0.0, 1.0)
+    closest = a[None, :, :] + tt[:, :, None] * ab[None, :, :]
+    d = np.linalg.norm(c[:, None, :] - closest, axis=2).min(1)   # (m,)
+    return float(2.0 * d.max())
+
+
+def _crossings(contour: np.ndarray, x: float) -> np.ndarray:
+    """y of every point where the closed contour meets the line at x."""
+    x0, y0 = contour[:, 0], contour[:, 1]
+    x1, y1 = np.roll(x0, -1), np.roll(y0, -1)
+    hit = (((x0 - x) * (x1 - x)) <= 0.0) & (np.abs(x1 - x0) > 1e-12)
+    if not hit.any():
+        return np.zeros(0)
+    tt = (x - x0[hit]) / (x1[hit] - x0[hit])
+    return y0[hit] + tt * (y1[hit] - y0[hit])
+
+
+def _vertical_extent(contour: np.ndarray, x: float) -> float:
+    """Skin-to-skin height of a closed contour on the vertical line at x.
+
+    A RAY CAST, not an index lookup, and that matters. The old version
+    took `n = (N + 1) // 2` as the upper/lower split and paired index i
+    against its mirror -- which is exactly right for a plain section and
+    wrong by `n_ribs` points once `insert_ribs` has reparametrised the
+    upper surface into `n + 2 * n_ribs` points. So the bore gate has been
+    pairing an upper station against the wrong lower station on every
+    ribbed panel ever exported. It passed anyway, because the
+    misalignment usually still lands in thick material; truncating the
+    panel at the hinge line moved it somewhere it did not.
+
+    `wall_separation_mm` has the same assumption and `check` knows it --
+    it switches to the general `min_clearance_mm` when ribs are present.
+    This gate had no such guard.
+
+    The OUTERMOST pair of crossings is taken, so rib detours inside the
+    section are ignored: a rib in the corridor is the corridor's problem
+    and `min_clearance_mm` already reports it.
+    """
+    y0 = contour[:, 1]
+    x0 = contour[:, 0]
+    x1 = np.roll(x0, -1)
+    y1 = np.roll(y0, -1)
+    # segments straddling the line, either direction
+    hit = ((x0 - x) * (x1 - x)) <= 0.0
+    hit &= np.abs(x1 - x0) > 1e-12
+    if not hit.any():
+        return 0.0
+    tt = (x - x0[hit]) / (x1[hit] - x0[hit])
+    ys = y0[hit] + tt * (y1[hit] - y0[hit])
+    return float(ys.max() - ys.min())
+
+
 def spar_fit(stack: LayerStack) -> tuple[float, float]:
     """Largest spar tube the cavity accepts, and the Z of the pinch point.
 
@@ -426,16 +629,18 @@ def spar_fit(stack: LayerStack) -> tuple[float, float]:
     minus the fit clearance.
     """
     s = stack.settings
+    fracs = stack.spar_x_local or (s.spar_x_frac,)
     best, pinch_z = np.inf, 0.0
-    n = (stack.contours.shape[1] + 1) // 2
     for k, layer in enumerate(stack.contours):
-        upper, lower = layer[:n][::-1], layer[n - 1:]
-        chord = layer[:, 0].max() - layer[:, 0].min()
-        x_target = layer[:, 0].min() + s.spar_x_frac * chord
-        i = int(np.argmin(np.abs(upper[:, 0] - x_target)))
-        gap = (upper[i, 1] - lower[i, 1]) - 2 * s.extrusion_width_mm - s.spar_clearance_mm
-        if gap < best:
-            best, pinch_z = float(gap), float(stack.z_mm[k])
+        lo_x, hi_x = layer[:, 0].min(), layer[:, 0].max()
+        chord = hi_x - lo_x
+        for f in fracs:
+            # the inscribed circle already stops one bead inside the
+            # contour's centreline, so only the fit clearance is deducted
+            gap = (_inscribed_gap(layer, lo_x + float(f) * chord)
+                   - s.extrusion_width_mm - s.spar_clearance_mm)
+            if gap < best:
+                best, pinch_z = float(gap), float(stack.z_mm[k])
     return best, pinch_z
 
 
@@ -477,16 +682,20 @@ def check(stack: LayerStack) -> Printability:
     gates.append(Gate("min wall separation", t_min >= s.min_wall_mm, t_min,
                       s.min_wall_mm, "mm", detail))
 
-    spar, spar_z = spar_fit(stack)
-    gates.append(Gate("spar bore", spar >= s.spar_d_mm, spar, s.spar_d_mm, "mm",
-                      f"pinch at z={spar_z:.0f} mm"))
+    if stack.role == "wing":
+        spar, spar_z = spar_fit(stack)
+        gates.append(Gate("spar bore", spar >= s.spar_d_mm, spar, s.spar_d_mm,
+                          "mm", f"pinch at z={spar_z:.0f} mm"))
 
     area0 = 0.5 * abs(np.dot(stack.contours[0][:, 0],
                              np.roll(stack.contours[0][:, 1], -1))
                       - np.dot(stack.contours[0][:, 1],
                                np.roll(stack.contours[0][:, 0], -1)))
-    gates.append(Gate("first-layer area", area0 >= 300.0, area0, 300.0, "mm2",
-                      "bed adhesion"))
+    floor = (s.elevon_first_layer_mm2 if stack.role == "elevon"
+             else s.min_first_layer_mm2)
+    gates.append(Gate("first-layer area", area0 >= floor, area0, floor, "mm2",
+                      "bed adhesion" + (" (brim)" if stack.role == "elevon"
+                                        else "")))
     return Printability(gates)
 
 
@@ -519,7 +728,17 @@ def panel_etas(plan: Planform, settings: PrintSettings,
     # CONTROL stations, not every station: the faired loft emits ~35
     # dense stations to carry its curves, and splitting the print at
     # each of them would turn three panels into thirty.
-    breaks = sorted({0.0, 1.0} | set(plan.controls))
+    #
+    # And the ELEVON station, whenever there is one. The elevon begins at
+    # a spanwise station, so the wing's trailing edge has to disappear
+    # there -- and a surface normal to the span is a roof in this print
+    # orientation, which spiralize cannot build. Breaking the print at
+    # `elevon_eta` makes every panel wholly plain or wholly truncated and
+    # turns that roof into a print joint.
+    breaks = sorted({0.0, 1.0} | set(plan.controls)
+                    | ({float(settings.elevon_eta)}
+                       if 0.0 < settings.elevon_eta < 1.0
+                       and settings.elevon_chord > 1e-6 else set()))
     out: list[tuple[float, float]] = []
     for a, b in zip(breaks, breaks[1:]):
         length = arc_length_mm(plan, a, b)

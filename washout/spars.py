@@ -210,20 +210,24 @@ def fit_all(plan, specs, wall_mm: float, panel_etas=(),
     return fits
 
 
-def exclusion_bands(fits, spec_pad: float = 0.5) -> tuple[tuple[float, float], ...]:
-    """Chordwise bands the ribs must not enter.
+def exclusion_bands(fits, wall_mm: float = 0.45) -> tuple:
+    """Chordwise bands the ribs must not enter, as (x_frac, half_width_mm).
 
     Ribs are chordwise webs running skin to skin, and they sweep with Z,
     so a spanwise tube at a fixed chord fraction WILL meet one unless the
-    rib pattern is told to avoid it. Half-width is the tube radius plus a
-    pad, expressed in chord fractions at the root -- the root is where the
-    chord is longest, so the band is widest in absolute terms exactly
-    where the spar is largest."""
-    out = []
-    for f in fits:
-        half = spec_pad * f.spec.d_mm / 1000.0     # metres, scaled below
-        out.append((f.x_frac, half))
-    return tuple(out)
+    rib pattern is told to avoid it.
+
+    The half-width is MILLIMETRES and that is the whole point. It is the
+    tube's radius, plus half a bead because the rib's extrusion is
+    centred on the contour, plus the fit clearance -- all physical
+    lengths that do not shrink as the chord does. Expressed as a
+    root-chord fraction and applied as a local-chord fraction, as it was,
+    the corridor came out three times too narrow at the tip and the truss
+    ran through the spar.
+    """
+    return tuple((f.x_frac,
+                  0.5 * f.spec.d_mm + 0.5 * wall_mm + f.spec.clearance_mm)
+                 for f in fits)
 
 
 def report(fits, plan, min_tip_penetration_mm: float = 35.0) -> str:

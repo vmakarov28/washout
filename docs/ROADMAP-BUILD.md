@@ -760,7 +760,14 @@ the flutter work in `ROADMAP.md`.
     the project, one of them wrong, since the first commit. There is one
     source now and it is generated.
 
-    Still to do: `BOM.md` and `MANIFEST.json`.
+    `BOM.md` and `MANIFEST.json` are written too. The BOM lists every
+    bought part with the size the design was **solved around** -- the spar
+    cut lengths, the horn's hole position, the pushrod between centres,
+    the hinge tape -- and notes that substituting a different size
+    invalidates the gate that cleared it. `MANIFEST.json` is the
+    machine-readable half: part, profile, role, bed rotation, footprint
+    and first-layer area, so a slicer script can read what was previously
+    only printed to a terminal.
 14. Slicer profiles as machine-readable files (the settings are in
     `BUILD.md` as a table; an Orca/Bambu process `.json` is the next
     step). **(§4)**

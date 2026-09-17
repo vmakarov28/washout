@@ -364,13 +364,14 @@ end-to-end export on every push.
 
 Still worth doing:
 
-## 17. A determinism test - P2
+## 17. A determinism test - **DONE**
 
 The README's central claim is that `design.json` plus the print settings
-reproduce the exact STLs. Nothing tests it. Export the tracked trainer
-twice and assert the bytes match; export it again from a re-parsed
-`design.json` and assert the same. It is cheap, and it guards the
-property everything in `results/` depends on.
+reproduce the exact STLs, and nothing tested it -- while `results/`
+deliberately keeps no STLs *because* they are supposed to be a pure
+function of the vector. Two tests in `tests/test_linkage.py`: the same
+design built twice must give byte-identical contours, and a design that
+has been through a JSON round trip must give identical geometry.
 
 ## 18. Fold `out/` into generations - P4
 

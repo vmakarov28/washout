@@ -240,3 +240,84 @@ def test_the_build_sheet_lists_every_part_and_the_cut_list():
     for f in ev.spar_fits:
         assert f.spec.name in text
         assert f"{2*f.reach_mm:.0f} mm" in text, "tip to tip, not one side"
+
+
+# ------------------------------------------- the output contract, and determinism
+
+def test_the_export_is_deterministic():
+    """The README's central claim: `design.json` plus the print settings
+    reproduce the exact STLs. Nothing tested it, and everything in
+    `results/` depends on it -- the STLs are not kept there precisely
+    because they are supposed to be a pure function of the vector.
+
+    ROADMAP item 17."""
+    from washout.printing import elevons as elv
+    from washout.printing import stl
+
+    ev, mission = _built("trainer_v3")
+    ps = ev.print_settings
+
+    def build_bytes():
+        parts = vase.build_panels(ev.plan, ps) + elv.build_elevons(
+            ev.plan, ps, vase.panel_etas(ev.plan, ps),
+            ev.max_elevon_deflect_deg + ps.hinge_margin_deg)
+        return {p.name: (p.contours.tobytes(), p.z_mm.tobytes())
+                for p in parts}
+
+    a, b = build_bytes(), build_bytes()
+    assert a.keys() == b.keys()
+    for k in a:
+        assert a[k] == b[k], f"{k} is not reproducible from the same design"
+
+
+def test_a_re_parsed_design_gives_the_same_geometry(tmp_path):
+    """And it has to survive the round trip through JSON, because that is
+    how a design actually reaches the exporter."""
+    index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
+    raw = (RESULTS / index["trainer_v3"] / "design.json").read_text(encoding="utf-8")
+    u1 = np.array(json.loads(raw)["u"])
+    round_trip = tmp_path / "d.json"
+    round_trip.write_text(json.dumps({"u": list(map(float, u1))}),
+                          encoding="utf-8")
+    u2 = np.array(json.loads(round_trip.read_text(encoding="utf-8"))["u"])
+    base = cst.load_selig(ASSETS / "mh45.dat")
+    m = Mission.trainer_v3()
+    p1, p2 = build(u1, m, base), build(u2, m, base)
+    assert p1.mac_m == pytest.approx(p2.mac_m, rel=0, abs=0)
+    assert p1.area_m2 == pytest.approx(p2.area_m2, rel=0, abs=0)
+
+
+def test_the_manifest_covers_every_part_with_a_profile():
+    """Machine-readable, so a slicer script can read it instead of a
+    human reading a paragraph. The bed rotation was already solved and
+    only ever printed to a terminal."""
+    ev, mission = _built("trainer_v3")
+    from washout.printing import elevons as elv
+    ps = ev.print_settings
+    parts = vase.build_panels(ev.plan, ps) + elv.build_elevons(
+        ev.plan, ps, vase.panel_etas(ev.plan, ps),
+        ev.max_elevon_deflect_deg + ps.hinge_margin_deg)
+    man = build_sheet.manifest(ev, parts, ps)
+    files = {e["file"] for e in man["half_wing_parts"]}
+    for p in parts:
+        assert f"{p.name}.stl" in files
+    assert man["mirror"] is True, "the STLs are one half wing"
+    assert man["profiles"]["vase"]["bottom_layers"] == 0
+    assert man["profiles"]["vase"]["spiralize"] is True
+    for e in man["half_wing_parts"]:
+        assert e["profile"] in man["profiles"] or e["profile"] == "solid"
+
+
+def test_the_bom_does_not_double_count_the_pairs():
+    """The mass budget's items are per-AIRCRAFT totals, so a quantity of
+    2 beside an 18 g mass means eighteen grams of servo in the aeroplane,
+    not thirty-six."""
+    ev, mission = _built("trainer_v3")
+    parts = vase.build_panels(ev.plan, ev.print_settings)
+    text = build_sheet.bom(ev, parts)
+    assert "mass (all of them)" in text
+    assert "| servos x2 |" not in text, "the count belongs in the qty column"
+    for f in ev.spar_fits:
+        assert f"{2*f.reach_mm:.0f} mm" in text
+    total = sum(i.mass_kg for i in ev.mass.items)
+    assert total == pytest.approx(ev.mass.total_kg - ev.mass.shell_kg)

@@ -303,7 +303,103 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     return "\n".join(L) + "\n"
 
 
+def bom(ev, parts) -> str:
+    """Every bought part, with a size and a count.
+
+    Built from the masses the mission DECLARED and the geometry that was
+    solved, so it cannot list a spar the design does not have or a servo
+    count that disagrees with the linkage. Quantities are for the whole
+    aircraft, not the half wing the STLs describe, because nobody buys
+    half a servo."""
+    L = [f"# {ev.plan.name}: bill of materials", "",
+         "Quantities are for the **whole aircraft**. Sizes are what the",
+         "design was solved around: substituting a different one invalidates",
+         "the gate that cleared it.", "",
+         "| qty | item | size | mass (all of them) | note |",
+         "|---|---|---|---|---|"]
+    tube = ev.structure.spar.name if ev.structure is not None else "?"
+    for f in ev.spar_fits:
+        m = next((i.mass_kg for i in ev.mass.items
+                  if i.name == f"spar {f.spec.name}"), 0.0)
+        L.append(f"| 1 | carbon tube — {f.spec.name} | {tube}, "
+                 f"**{2*f.reach_mm:.0f} mm** | {m*1000:.0f} g | "
+                 f"seats on the {f.anchor} skin at {f.x_frac:.2f}c |")
+    known = {f"spar {f.spec.name}" for f in ev.spar_fits}
+    for i in ev.mass.items:
+        if i.name in known:
+            continue
+        # The mass budget's items are already per-AIRCRAFT totals, so the
+        # mass column is not multiplied by the quantity -- "2 servos, 18 g"
+        # means eighteen grams of servo in the aeroplane, not thirty-six.
+        # The name carries the count for the pairs, so it is stripped out
+        # of the name and put in the column where it belongs.
+        qty = 2 if ("x2" in i.name or i.name == "tip fins") else 1
+        name = i.name.replace(" x2", "").rstrip("s") if qty == 2 else i.name
+        L.append(f"| {qty} | {name} | — | {i.mass_kg*1000:.0f} g | "
+                 f"at {i.x_m*1000:.0f} mm aft of the root LE |")
+    if ev.linkage is not None:
+        k = ev.linkage
+        L.append(f"| 2 | control horn | hole {k.horn_arm_mm:.0f} mm below the "
+                 f"hinge axis | — | bonded to the elevon's lower surface |")
+        L.append(f"| 2 | pushrod | {k.rod_mm:.0f} mm between centres | — | "
+                 f"1 mm wire with a clevis, or a Z-bend |")
+    if ev.print_settings is not None and elv.has_elevon(ev.print_settings):
+        ps = ev.print_settings
+        span_mm = (1.0 - ps.elevon_eta) * ev.plan.half_span_m * 1000.0
+        L.append(f"| — | hinge tape | 2 x {span_mm:.0f} mm | — | "
+                 f"upper surface, {ps.hinge_gap_mm:.1f} mm gap |")
+    L += ["", f"Filament: about **{ev.mass.shell_kg*1000:.0f} g** of shell at "
+          f"the declared {ev.print_settings.filament_density_gcc:.2f} g/cc, "
+          f"plus adhesive.", ""]
+    return "\n".join(L) + "\n"
+
+
+def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
+    """Machine-readable: part -> profile, orientation, first-layer area.
+
+    The bed rotation is already solved by `best_bed_rotation` and was
+    only ever printed to a terminal. A slicer script can read this."""
+    import numpy as _np
+
+    out = {"design": ev.plan.name, "mass_g": round(ev.mass.total_kg * 1000, 1),
+           "half_wing_parts": [], "mirror": True,
+           "profiles": {
+               "vase": {"spiralize": True, "top_layers": 0,
+                        "bottom_layers": 0,
+                        "extrusion_width_mm": settings.extrusion_width_mm,
+                        "layer_height_mm": settings.layer_h_mm,
+                        "nozzle_mm": settings.nozzle_mm},
+               "solid": {"spiralize": False, "top_layers": 4,
+                         "bottom_layers": 4,
+                         "extrusion_width_mm": settings.extrusion_width_mm,
+                         "layer_height_mm": settings.layer_h_mm,
+                         "nozzle_mm": settings.nozzle_mm}}}
+    for p in parts:
+        deg, bx, by = p.best_bed_rotation()
+        c0 = p.contours[0]
+        area = 0.5 * abs(_np.dot(c0[:, 0], _np.roll(c0[:, 1], -1))
+                         - _np.dot(c0[:, 1], _np.roll(c0[:, 0], -1)))
+        out["half_wing_parts"].append({
+            "file": f"{p.name}.stl", "profile": "vase", "role": p.role,
+            "height_mm": round(p.height_mm, 1),
+            "mass_g": round(p.mass_g(), 2),
+            "bed_rotation_deg": round(deg, 1),
+            "footprint_mm": [round(bx, 1), round(by, 1)],
+            "first_layer_mm2": round(float(area), 1),
+            "eta": [round(float(p.eta[0]), 4), round(float(p.eta[-1]), 4)]})
+    if getattr(ev, "fins", None) is not None:
+        out["half_wing_parts"].append(
+            {"file": f"{ev.plan.name}_tip_fin.stl", "profile": "solid",
+             "role": "fin", "quantity_per_aircraft": 2})
+    return out
+
+
 def write(ev, parts, settings: vase.PrintSettings, path) -> Path:
+    import json as _json
+
     path = Path(path)
     path.write_text(render(ev, parts, settings), encoding="utf-8")
+    (path.parent / "BOM.md").write_text(bom(ev, parts), encoding="utf-8")
+    (path.parent / "MANIFEST.json").write_text(
+        _json.dumps(manifest(ev, parts, settings), indent=2), encoding="utf-8")
     return path

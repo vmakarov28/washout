@@ -38,7 +38,32 @@ and the buckling-driven ribs inside the search loop, and its ribbed parts
 were produced by a later hand export. The 8 g is the ribs, arriving after
 the verdict. It now passes the damping gate it was recorded as missing.
 
-## The mass in that table is wrong, and the pipeline knows it
+## All three are now infeasible, and that is the point
+
+The table above is the state as **searched**. Since then two pieces of
+the roadmap have landed and both took feasibility away:
+
+`ROADMAP.md` item 1 — the spars are weighed as fitted rather than charged
+a flat allowance. `ROADMAP-BUILD.md` Phase 1 — the inside of the wing has
+a coordinate system, the spar has a vertical seat, and bays, tubes and
+print joints are reserved against each other.
+
+Re-scoring today with `python run.py check --mission <name>`:
+
+| | now misses |
+|---|---|
+| trainer | cruise 11.5 m/s (band 7–11); wing loading 27.5 (limit 26) |
+| demon1 | electronics bay 11.9 mm deep for 16; pack ∩ TE spar 2.9 mm; pack ∩ electronics 1.7 mm |
+| micro | neither bay closes in p0; SM +0.051; trims 11.2°; ζ −0.048 **divergent** |
+
+None of that is a regression. Every one of those gates is measuring
+something that was always true and was never checked — an 8 mm tube ran
+through the battery of all three aircraft, and the trainer was carrying
+24 g of spar it was never charged for. The designs did not get worse; the
+program got honest. A re-search is what closes it, and it has to come
+after the gates rather than before.
+
+## How the mass went wrong in the first place
 
 `Mission._common(spar_g=...)` charges the trainer a **flat 30 g** for
 "spar + joiners". In the same report, `structure.select` sizes a real

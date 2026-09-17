@@ -30,6 +30,7 @@ from ..geom.cst import (Airfoil, deflect_te, flap_effectiveness,
                         set_thickness_peak)
 from ..geom.planform import Planform, Segment, bwb, faired, lofted
 from ..geom import fairness as fz
+from ..geom import interior as it
 from ..printing import vase
 from ..aero import performance as perf
 from ..aero import lateral
@@ -83,6 +84,31 @@ class Bay:
     look elsewhere let a search pass a design whose pack sat 19 mm aft of
     the root leading edge, in 5 mm of depth, hanging 19 mm off the nose,
     while the checker cheerfully measured a different station 61 mm back."""
+    x_lo: float = 0.10
+    x_hi: float = 0.90
+    """The chordwise band a SOLVER may seat this bay in, used only when
+    `x_var` is None.
+
+    Two classes of bay, and the difference is physical. The battery is the
+    strongest single lever on trim, so the OPTIMIZER owns its seat and
+    pays for it in static margin. The receiver and ESC do not move trim
+    enough to be worth a design dimension -- they just have to go
+    somewhere that exists -- so their seat is SOLVED, the same way the
+    spar's chordwise station is solved, against whatever is already in the
+    wing."""
+    holds: tuple[str, ...] = ()
+    """Payload item names that physically live inside this bay.
+
+    Without this the bay and its contents were declared in different
+    places and nothing noticed: the trainer's "AR630 + esc" bay sat at
+    0.42c while the masses it contains, `AR630 rx` and `esc + wiring`,
+    sat at 0.34c and 0.50c. Three stations for two objects in one box.
+    That is the same mistake `x_var` was added to fix for the battery,
+    still live for everything else, and it matters because the CG that
+    trims the aircraft is computed from where the masses are said to be.
+
+    Items named here take their x from the bay's final seat, solved or
+    declared, so there is exactly one answer to 'where is the ESC'."""
 
 
 def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
@@ -118,6 +144,71 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
         t = float(st.airfoil.thickness(xs).min()) * c_mm - 2.0 * wall_mm
         worst = min(worst, t)
     return bool(worst >= height), float(worst), float(height)
+
+
+def seat_bays(plan, mission, p_vec, wall_mm: float,
+              n_x: int = 33) -> tuple[list, dict]:
+    """Where every bay actually goes. -> ([Volume, ...], {name: x_frac})
+
+    Two passes, in the physical order of who gets to choose:
+
+    1. Bays the OPTIMIZER owns (`x_var`) take their declared seat. The
+       battery is here because the CG is the strongest lever on trim and
+       the search has to pay for where it puts the pack.
+    2. Bays a SOLVER owns are then seated in their own band, at the
+       station that fits the depth and clears everything already placed,
+       breaking ties toward the nominal seat so the declared intent still
+       means something.
+
+    Solving rather than sweeping-to-check is the important distinction.
+    `bay_fits`'s docstring warns against a sweeping CHECK, and rightly:
+    answering "does some seat exist" while the mass is modelled somewhere
+    else passed a design whose pack hung off the nose. Here the solved
+    seat IS the seat -- it drives the bay volume, the clash gates and the
+    x of every item the bay `holds` -- so there is one station per object,
+    which is what that warning asks for.
+
+    A bay with no clear seat anywhere in its band is returned at the best
+    station found, with the miss left for the gates to price. Returning
+    nothing, or silently moving it outside its band, would hide a real
+    conflict: on the trainer, the pack and the electronics were declared
+    in the same 16 mm of space and no value of `batt_x` in its whole
+    range could separate them.
+    """
+    placed: list = []
+    seats: dict = {}
+
+    def volume(bay, x):
+        return it.bay_volume(bay.name, x, bay.box_mm, plan, offset_mm=wall_mm)
+
+    for bay in mission.bays:
+        if bay.x_var is None:
+            continue
+        x = float(p_vec[bay.x_var])
+        seats[bay.name] = x
+        placed.append(volume(bay, x))
+
+    for bay in mission.bays:
+        if bay.x_var is not None:
+            continue
+        best = None
+        for x in np.linspace(bay.x_lo, bay.x_hi, n_x):
+            vol = volume(bay, float(x))
+            ok, spare = vol.fits(plan, wall_mm)
+            clash = sum(it.overlap_mm(vol, other, plan, wall_mm)
+                        for other in placed)
+            # Total millimetres of interference, then nearest the seat
+            # the mission declared. SUMMED, not ranked: a clash and a
+            # depth shortfall are both "millimetres of something that
+            # does not fit", and ranking clash above depth made the
+            # solver accept a 6 mm depth miss to dodge a 0.1 mm graze.
+            key = (clash + max(-spare, 0.0), abs(float(x) - bay.x_frac))
+            if best is None or key < best[0]:
+                best = (key, float(x), vol)
+        seats[bay.name] = best[1]
+        placed.append(best[2])
+
+    return placed, seats
 
 
 @dataclass(frozen=True)
@@ -289,7 +380,9 @@ class Mission:
             name="trainer_v3", span_m=0.90, objective="ld",
             payload=Mission._common(),
             bays=(Bay("3S 1300", 0.28, (72.0, 35.0, 24.0), x_var="batt_x"),
-                  Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0))),
+                  Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0),
+                      x_lo=0.12, x_hi=0.86,
+                      holds=("AR630 rx", "esc + wiring"))),
             battery_kg=0.110,
             cruise_band_ms=(7.0, 11.0),
             min_static_margin=0.15, max_static_margin=0.32,
@@ -340,7 +433,9 @@ class Mission:
             # that one gate sank the whole search. A 4S 850 is the pack
             # this aircraft would actually fly.
             bays=(Bay("4S 850", 0.30, (65.0, 34.0, 24.0), x_var="batt_x"),
-                  Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0))),
+                  Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0),
+                      x_lo=0.14, x_hi=0.86,
+                      holds=("AR630 rx", "esc + wiring"))),
             battery_kg=0.105,
             # This band is the HANDS-OFF trim window, not the top end:
             # top speed is the objective and is scored separately with
@@ -383,7 +478,9 @@ class Mission:
             name="micro", span_m=0.55, span_free=True, objective="small",
             payload=Mission._common(servo_g=0.010, esc_g=0.012),
             bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
-                  Bay("AR630", 0.44, (30.0, 20.0, 12.0))),
+                  Bay("AR630", 0.44, (30.0, 20.0, 12.0),
+                      x_lo=0.14, x_hi=0.88,
+                      holds=("AR630 rx", "esc + wiring"))),
             battery_kg=0.028,
             cruise_band_ms=(8.0, 17.0),
             min_static_margin=0.10, max_static_margin=0.26,
@@ -822,10 +919,20 @@ def _evaluate_once(
     # BEFORE the panels are built, because a chordwise web at a spar's
     # station is a web through the spar.
     joint_etas = vase.panel_etas(plan, settings)
+    wall = settings.extrusion_width_mm
+
+    # The payload's reserved volumes, built BEFORE the spars are fitted so
+    # the fit can see them. The order matters and it is the physical order:
+    # the electronics decide where they can go from the section they are
+    # given, and the spar then takes the best remaining seat. Fitting the
+    # tube first and checking the pack afterwards is what put a tube
+    # through every pack in the fleet.
+    bay_vols, bay_seats = seat_bays(plan, mission, p_vec, wall)
+
     spar_fits = []
     if mission.spars:
-        spar_fits = sp.fit_all(plan, mission.spars,
-                               settings.extrusion_width_mm, joint_etas)
+        spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
+                               reserved=tuple(bay_vols))
         avoid = tuple((f.x_frac,
                        0.6 * f.spec.d_mm
                        / (plan.stations[0].chord_m * 1000.0))
@@ -842,7 +949,15 @@ def _evaluate_once(
         reasons.extend(print_fail)
 
     root_c = plan.stations[0].chord_m
-    items = tuple(i.at(root_c) for i in mission.payload)
+    # An item inside a bay sits where the bay sits. The trainer's
+    # "AR630 + esc" bay was declared at 0.42c while the two masses it
+    # contains were declared at 0.34c and 0.50c -- three stations for two
+    # objects in one box, and the CG was computed from the wrong two.
+    in_bay = {n: bay.name for bay in mission.bays for n in bay.holds}
+    items = tuple(
+        replace(i, x_frac=bay_seats[in_bay[i.name]]).at(root_c)
+        if i.name in in_bay else i.at(root_c)
+        for i in mission.payload)
     items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
                              p_vec["batt_x"] * root_c),)
     # The tubes that were actually fitted, at the stations the fit solved
@@ -864,14 +979,59 @@ def _evaluate_once(
         reasons.append(f"mass {mass.total_kg*1000:.0f} g over "
                        f"{mission.max_mass_kg*1000:.0f} g")
 
+    # --- does the payload fit, and is anything else already there? ---
+    #
+    # Three gates, and the last two did not exist before. bay_fits asked
+    # only "is the section deep enough here", which is necessary and
+    # nowhere near sufficient: it passed every aircraft in the fleet while
+    # an 8 mm carbon tube ran through the battery of all three.
     for bay in mission.bays:
-        seat = p_vec[bay.x_var] if bay.x_var else None
-        ok_bay, have, need = bay_fits(plan, bay, settings.extrusion_width_mm, seat)
+        vol = next(v for v in bay_vols if v.name == bay.name)
+        seat = bay_seats[bay.name]
+        ok_bay, spare = vol.fits(plan, wall)
         if not ok_bay:
-            where = f" at {seat:.2f}c" if seat is not None else ""
-            reasons.append(f"{bay.name} bay{where} {have:.1f} mm deep, "
+            where = f" at {seat:.2f}c"
+            need = bay.box_mm[2]
+            reasons.append(f"{bay.name} bay{where} {need + spare:.1f} mm deep, "
                            f"needs {need:.0f}")
-            penalty += 20.0 * (need - have) / need
+            penalty += 20.0 * (-spare) / max(need, 1e-6)
+
+        # straddling a print joint: the part would be in two shells
+        first, last = it.straddles(vol, joint_etas)
+        if last > first >= 0:
+            reasons.append(f"{bay.name} spans print joints p{first}-p{last} "
+                           f"(reaches eta {vol.eta1:.3f})")
+            penalty += 25.0
+
+        # Can the bay's outboard end actually be CLOSED? A wall normal to
+        # the span is a roof in this print orientation, so the bay has to
+        # fade out, and the fade is an overhang. One ramp, not two: the
+        # root face is open anyway -- the spar has to get in and the two
+        # halves join there -- so a bay starting at the centreline pays
+        # for a single closure at its outboard end.
+        if 0 <= first < len(panels):
+            pan = panels[first]
+            need = vase.ramp_span_mm(pan, bay.box_mm[2], vol.x0, vol.x1)
+            # What is LEFT of the panel outboard of the bay, as arc length
+            # along the span -- the same quantity print height is measured
+            # in, because dihedral makes a panel taller than its projected
+            # span and the ramp is built in printed layers.
+            have = vase.arc_length_mm(plan, min(vol.eta1, joint_etas[first][1]),
+                                      joint_etas[first][1])
+            if need > have:
+                reasons.append(
+                    f"{bay.name} cannot be closed: needs {need:.0f} mm of "
+                    f"span to ramp {bay.box_mm[2]:.0f} mm deep, has "
+                    f"{have:.0f} mm left in p{first}")
+                penalty += 15.0 * min((need - have) / max(need, 1e-6), 1.0)
+
+    for a_name, b_name, mm in it.clashes(
+            bay_vols + [it.spar_volume(f, wall, plan) for f in spar_fits],
+            plan, wall):
+        reasons.append(f"{a_name} and {b_name} share {mm:.1f} mm of space")
+        # per millimetre of interpenetration: a 1 mm graze must rank above
+        # a 12 mm tube through the pack, or the optimizer sees a cliff
+        penalty += 8.0 * mm
 
     # --- trim fixes CL; CL fixes cruise speed ---
     vlm = _cached_vlm(u, mission, base, plan, ns, nc)

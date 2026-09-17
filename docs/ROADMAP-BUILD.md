@@ -99,8 +99,10 @@ out of the print constraint, and no gate sees it today.
 
 These figures are *indicative*: they take the worst point in the band
 over the whole panel, not the point where a given feature actually sits.
-The first deliverable in Phase 1 is to compute this per feature, at its
-own station, as a gate.
+`vase.ramp_budget` now computes it over a given chord band from the built
+contours, and `search.design` gates each bay on whether it can be closed
+within the span left outboard of it. Micro fails it, as predicted here:
+33 mm of span needed to ramp its 17 mm pack, 10 mm available.
 
 ## Two corollaries worth stating plainly
 
@@ -120,10 +122,14 @@ laid out anyway.
 
 ---
 
-# 1. Where the fleet actually stands
+# 1. What the fleet looked like before Phase 1
 
-Measured on the three tracked designs, today. These are not
-hypotheticals; they are what the current exporter would hand you.
+> **Phase 1 has landed.** Everything in this section was measured on the
+> three tracked designs and every finding is now a gate and a test in
+> `tests/test_interior.py`. It is kept as written because the findings are
+> the reason the gates exist, and because a gate whose motivating case has
+> been deleted is a gate someone will "simplify" away. For the state of
+> the fleet *after* Phase 1, see the Phase 1 entry in §5.
 
 ## Every aircraft has a spar running through its battery
 
@@ -145,9 +151,9 @@ tube needs about 8.8 mm. They can stack — with **under 2 mm to spare**,
 and only if the tube lies hard against one skin and the pack against the
 other. Which raises the real problem:
 
-## The spar has no vertical coordinate
+## The spar had no vertical coordinate — *fixed in Phase 1*
 
-`spars.place` chooses a chordwise station `x_frac` and nothing else.
+`spars.place` chose a chordwise station `x_frac` and nothing else.
 `depth_at` returns the section thickness there. The tube is "somewhere
 in the cavity". There is no Z, no seat, no retention, and therefore no
 way to ask the stacking question above, or to place a floor above the
@@ -579,24 +585,60 @@ root face does not open is a part with an 8 mm tube that cannot go in.
 Each phase ends with something testable. No phase depends on a later
 one.
 
-## Phase 1 — make the inside of the wing knowable *(unblocks everything)*
+## Phase 1 — make the inside of the wing knowable — **DONE**
 
-1. `SparFit.z_frac`: give the spar a vertical seat, solved. **(A1)**
-2. A single `Volume` type and one occupancy check, so spars, bays, ribs
-   and conduits are reserved against each other instead of each being
-   checked alone. **(A1, A2)**
-3. The three collision gates: spar∩bay, bay straddle, per-station ramp
-   budget. **(§0, A2)**
+1. ~~`SparFit.z_frac`: give the spar a vertical seat, solved.~~ **(A1)**
+   `SparFit.anchor` is `lower` / `upper` / `mid`, solved on clearance
+   against what is already in the wing. Reach stays the primary criterion;
+   the seat and the chordwise tie-break are decided by what it clears.
+2. ~~A single `Volume` type and one occupancy check.~~ **(A1, A2)**
+   `geom/interior.py`. A point inside the shell is (eta, x, z) with z in
+   millimetres above the **lower inner skin**, so two objects at the same
+   station are measured from the same datum. Volumes are *anchored* to a
+   skin rather than carrying an absolute z, because the section thins
+   outboard and a part 6 mm above the lower skin at the root is through
+   the upper skin at eta 0.8.
+3. ~~The three collision gates.~~ **(§0, A2)**
+   `spar∩bay` and `bay∩bay` by interpenetration in mm (graded, so a 1 mm
+   graze ranks above a 12 mm tube through the pack), `straddles` for print
+   joints, and `vase.ramp_budget` for whether a bay can be closed at all.
 
-*Acceptance:* the three tracked designs each report their real
-collisions — the trainer's TE spar through its pack, demon1's LE spar
-through its pack, micro's spar through both and its bay across the p0
-joint — and a re-search returns designs that have none. Every finding in
-§1 becomes a test with its physical reason in the docstring.
+*What it found, beyond the three known collisions:*
 
-**Expect the fleet to get worse before it gets better.** Deconflicting
-the spar and the pack will cost chord, depth or span. That is the
-constraint arriving, not a regression.
+- **The spar clashes are now solved, not merely reported.** Offered a
+  corridor through the pack, the trainer's TE spar takes the upper skin
+  while the pack sits on the lower one — the "under 2 mm to spare"
+  stacking in §1, chosen deliberately instead of by accident.
+- **The two payload bays were declared in the same space**, on all three
+  aircraft, and *no value of `batt_x` in its entire range could separate
+  them*: where the pack fits in depth it overlaps the electronics, and
+  where it clears them chordwise the section is too shallow.
+- **A bay and its contents were declared at different stations.** The
+  trainer's "AR630 + esc" bay sat at 0.42c while the two masses it holds
+  sat at 0.34c and 0.50c — three stations for two objects in one box, and
+  the CG was computed from the wrong two. `Bay.holds` now names its
+  contents and they take the bay's seat.
+- So a bay without an `x_var` gets its seat **solved**, in a declared
+  band, against everything already placed — the same treatment the spar's
+  chordwise station already had. The battery keeps its design variable:
+  the CG is the strongest lever on trim and the optimizer has to pay for
+  where it puts the pack.
+- **Micro's centre body cannot close either bay.** 33 mm of span to ramp
+  a 17 mm pack, 10 mm available. Predicted by the §0 table, now a gate.
+
+*State of the fleet after Phase 1:* all three tracked designs are
+infeasible.
+
+| | misses |
+|---|---|
+| trainer | cruise 11.5 m/s (band 7–11), wing loading 27.5 (limit 26) |
+| demon1 | electronics bay 11.9 mm deep for 16; pack ∩ TE spar 2.9 mm; pack ∩ electronics 1.7 mm |
+| micro | neither bay can be closed in p0; SM +0.051; trims 11.2°; ζ −0.048 **divergent** |
+
+**This is the constraint arriving, not a regression.** Two of those came
+from weighing the spars (`ROADMAP.md` item 1) and the rest from the
+occupancy gates. A re-search is what closes it, and it has to come after
+the gates, not before.
 
 ## Phase 2 — the control surfaces
 

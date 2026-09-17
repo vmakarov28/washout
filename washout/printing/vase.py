@@ -352,6 +352,72 @@ def overhang_deg(stack: LayerStack, stride: int = 4) -> tuple[float, float]:
     return worst, worst_z
 
 
+def ramp_budget(stack: LayerStack, x0: float, x1: float,
+                stride: int = 4) -> float:
+    """How fast an internal feature may deepen, in mm of depth per mm of Z.
+
+    A bay floor, a servo pocket or a hatch rebate cannot appear abruptly:
+    a wall normal to the span is a ROOF in this print orientation, and
+    spiralize has no top layers and cannot bridge. Features therefore fade
+    in and out, and the fade rate is an overhang like any other.
+
+    The available rate is bounded in QUADRATURE, not by subtraction, and
+    the distinction decides whether a battery bay is possible at all.
+    `overhang_deg` measures, for each point of layer k+1, the distance to
+    the nearest point anywhere on layer k. A feature ramping in the
+    THICKNESS direction adds its own dy to whatever dx that point already
+    carries from the wing's taper, sweep and twist, so
+
+        hypot(dx, dy) / dz <= tan(theta_max)
+        =>  dy/dz <= sqrt(tan(theta_max)^2 - (dx/dz)^2)
+
+    Subtracting linearly -- which is how the rib truss budget in
+    `build_stack` is written, correctly, because a rib's motion is
+    CHORDWISE and adds to the wing's own chordwise motion -- gives the
+    trainer's centre body 0.36 mm/mm, so a 20 mm feature would need 56 mm
+    of span and would not fit the 111 mm panel. In quadrature the same
+    panel has 0.796 mm/mm and needs 25 mm, which it has.
+
+    Measured on the built contours over the chord band [x0, x1] of the
+    upper surface, where a floor detour lives -- not from the analytic
+    bound, because that bound tracks the leading and trailing edges only
+    and runs 1.21x to 1.82x low.
+
+    Returns 0.0 if the wing alone has already spent the whole budget
+    somewhere in the band, which means no feature can ramp there at all.
+    """
+    s = stack.settings
+    lim = np.tan(np.radians(s.max_overhang_deg))
+    c = stack.contours
+    n = (c.shape[1] + 1) // 2
+    worst = lim
+    for k in range(0, len(c) - stride, stride):
+        a, b = c[k], c[k + stride]
+        rise = float(stack.z_mm[k + stride] - stack.z_mm[k])
+        if rise <= 0.0:
+            continue
+        d = np.linalg.norm(b[:, None, :] - a[None, :, :], axis=2)
+        dv = b - a[d.argmin(1)]
+        up = b[:n]
+        lo_x, hi_x = up[:, 0].min(), up[:, 0].max()
+        frac = (up[:, 0] - lo_x) / max(hi_x - lo_x, 1e-9)
+        sel = (frac >= min(x0, x1)) & (frac <= max(x0, x1))
+        if not sel.any():
+            continue
+        dx = np.abs(dv[:n][sel, 0]) / rise
+        avail = np.sqrt(np.maximum(lim * lim - dx * dx, 0.0))
+        worst = min(worst, float(avail.min()))
+    return float(max(worst, 0.0))
+
+
+def ramp_span_mm(stack: LayerStack, depth_mm: float,
+                 x0: float, x1: float) -> float:
+    """Span needed to fade a feature `depth_mm` deep in or out. inf if it
+    cannot be done in this panel at all."""
+    rate = ramp_budget(stack, x0, x1)
+    return float(depth_mm / rate) if rate > 0.0 else float("inf")
+
+
 def spar_fit(stack: LayerStack) -> tuple[float, float]:
     """Largest spar tube the cavity accepts, and the Z of the pinch point.
 

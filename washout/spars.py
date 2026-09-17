@@ -63,19 +63,41 @@ class SparFit:
     depth_at_root_mm: float
     joints_cleared: tuple[float, ...]
     joints_blocked: tuple[float, ...]
+    anchor: str = "mid"
+    """Which inner skin the tube rests against: "lower", "upper" or "mid".
+
+    The spar had NO vertical coordinate at all until this field. `place`
+    solved a chordwise station, `depth_at` reported the thickness there,
+    and the tube was "somewhere in the cavity" -- so the question "is the
+    spar inside the battery" could not be asked, and the answer on every
+    aircraft in the fleet turned out to be yes.
+
+    It is chosen on CLEARANCE grounds, not structural ones, and that is
+    deliberate rather than a shortcut: `structure.select` computes bending
+    from the tube's own second moment with no offset-from-neutral-axis
+    term, so the vertical seat does not enter the strength calculation at
+    all. Choosing it to keep the payload's volume free is therefore honest;
+    claiming it was chosen for stiffness would not be."""
+    clash_mm: float = 0.0
+    """Worst interpenetration with a reserved volume at the chosen seat,
+    0.0 if clear. Carried out rather than raised, so the search can
+    penalise it by HOW FAR it misses."""
 
     @property
     def ok(self) -> bool:
-        return not self.joints_blocked
+        return not self.joints_blocked and self.clash_mm <= 0.0
 
     def line(self, half_span_mm: float) -> str:
         mark = "OK " if self.ok else "BLOCKED"
         return (f"  [{mark}] {self.spec.name}: {self.spec.d_mm:.0f} mm at "
-                f"{self.x_frac:.2f}c | reaches eta {self.reach_eta:.2f} "
+                f"{self.x_frac:.2f}c {self.anchor} | reaches eta "
+                f"{self.reach_eta:.2f} "
                 f"({self.reach_mm:.0f} mm of {half_span_mm:.0f}) | "
                 f"root depth {self.depth_at_root_mm:.1f} mm"
-                + ("" if self.ok else
-                   f" | joints too shallow: "
+                + (f" | CLASHES {self.clash_mm:.1f} mm"
+                   if self.clash_mm > 0.0 else "")
+                + ("" if not self.joints_blocked else
+                   " | joints too shallow: "
                    + ", ".join(f"{e:.2f}" for e in self.joints_blocked)))
 
 
@@ -104,17 +126,55 @@ def reach_of(plan, x_frac: float, spec: SparSpec, wall_mm: float,
 
 
 def place(plan, spec: SparSpec, wall_mm: float, joints=(),
-          n_x: int = 25) -> SparFit:
-    """Choose the chordwise station that reaches furthest outboard.
+          n_x: int = 25, reserved=()) -> SparFit:
+    """Choose the chordwise station and the vertical seat.
 
-    Ties are broken toward the middle of the allowed band, which keeps
-    the tube away from the leading-edge curvature and the trailing-edge
-    thickening -- both places where a printed bore is least round."""
+    REACH stays the primary criterion -- it is what decides whether the
+    outer joint is carried -- and among the stations that reach equally
+    far, the tie now breaks on CLEARANCE from `reserved`: the payload
+    volumes the mission has already declared. Failing that it breaks
+    toward the middle of the allowed band, which keeps the tube away from
+    the leading-edge curvature and the trailing-edge thickening, both
+    places where a printed bore is least round.
+
+    The seat is solved the same way: "lower", "upper" and "mid" are tried
+    and the one with the most clearance wins. A tube seated hard against
+    one skin leaves a single contiguous cavity for the payload instead of
+    two useless slots, which is the whole reason to seat it at all.
+
+    A clash that survives is REPORTED, not fixed by moving the tube
+    outside its declared band. If the only station that reaches far enough
+    is inside the battery, that is a real conflict the optimizer has to be
+    charged for -- papering over it is how the fleet ended up with a tube
+    through every pack.
+    """
+    from .geom import interior as it
+
     xs = np.linspace(spec.x_lo, spec.x_hi, n_x)
     reaches = np.array([reach_of(plan, float(x), spec, wall_mm) for x in xs])
     best = reaches.max()
     cand = xs[reaches >= best - 1e-9]
-    x_best = float(cand[int(np.argmin(np.abs(cand - 0.5 * (spec.x_lo + spec.x_hi))))])
+    half_mm = plan.half_span_m * 1000.0
+    reserved = tuple(reserved)
+    mid_band = 0.5 * (spec.x_lo + spec.x_hi)
+
+    def trial(x: float, anchor: str) -> SparFit:
+        return SparFit(spec, float(x), float(best), float(best) * half_mm,
+                       depth_at(plan, 0.0, float(x), wall_mm), (), (),
+                       anchor=anchor)
+
+    scored = []
+    for x in cand:
+        for anchor in (it.LOWER, it.UPPER, it.MID):
+            vol = it.spar_volume(trial(x, anchor), wall_mm, plan)
+            clash = max((it.overlap_mm(vol, r, plan, wall_mm)
+                         for r in reserved), default=0.0)
+            # clearest first, then nearest the middle of the band, then a
+            # seated tube ahead of a floating one
+            scored.append((clash, abs(float(x) - mid_band),
+                           1 if anchor == it.MID else 0, float(x), anchor))
+    scored.sort()
+    clash, _, _, x_best, anchor = scored[0]
 
     need = spec.needed_mm(wall_mm)
     cleared, blocked = [], []
@@ -122,18 +182,32 @@ def place(plan, spec: SparSpec, wall_mm: float, joints=(),
         (cleared if depth_at(plan, e, x_best, wall_mm) >= need
          else blocked).append(float(e))
 
-    half_mm = plan.half_span_m * 1000.0
     return SparFit(spec, x_best, float(best), float(best) * half_mm,
                    depth_at(plan, 0.0, x_best, wall_mm),
-                   tuple(cleared), tuple(blocked))
+                   tuple(cleared), tuple(blocked), anchor=anchor,
+                   clash_mm=float(clash))
 
 
-def fit_all(plan, specs, wall_mm: float, panel_etas=()) -> list[SparFit]:
+def fit_all(plan, specs, wall_mm: float, panel_etas=(),
+            reserved=()) -> list[SparFit]:
     """Fit every spar. `panel_etas` are the joint stations the spar must
     cross -- the interior ones only, since the outermost end is the tip
-    and nothing joins there."""
+    and nothing joins there.
+
+    `reserved` is what is already inside the wing. Spars are fitted in
+    declaration order and each is reserved against the ones before it, so
+    two 8 mm tubes cannot both claim the same corner: the LE spar takes
+    its seat, and the TE spar sees it."""
+    from .geom import interior as it
+
     joints = tuple(e for _, e in panel_etas[:-1]) if panel_etas else ()
-    return [place(plan, s, wall_mm, joints) for s in specs]
+    taken = list(reserved)
+    fits = []
+    for s in specs:
+        f = place(plan, s, wall_mm, joints, reserved=tuple(taken))
+        fits.append(f)
+        taken.append(it.spar_volume(f, wall_mm, plan))
+    return fits
 
 
 def exclusion_bands(fits, spec_pad: float = 0.5) -> tuple[tuple[float, float], ...]:

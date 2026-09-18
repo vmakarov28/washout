@@ -13,6 +13,7 @@ by different routes.
 """
 
 import json
+from functools import lru_cache
 from dataclasses import replace
 from pathlib import Path
 
@@ -30,6 +31,8 @@ RESULTS = Path(__file__).resolve().parent.parent / "results" / "fleet"
 WALL = 0.45
 
 
+
+@lru_cache(maxsize=None)
 def _plan(name):
     index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
     d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
@@ -39,6 +42,13 @@ def _plan(name):
     return u, mission, base, build(u, mission, base)
 
 
+
+# `evaluate` is deterministic -- `test_the_export_is_deterministic` pins
+# that -- and these tests only read the result, so one evaluation per
+# mission serves the whole module. Without it the suite spends most of its
+# time re-deriving the same three aircraft: 24 calls across the files,
+# each a full two-pass evaluation that now builds cut panels.
+@lru_cache(maxsize=None)
 def _built(name):
     u, mission, base, plan = _plan(name)
     s = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,

@@ -14,6 +14,7 @@ and it is symmetric, so it cannot show the differential a real one has.
 """
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,13 @@ def _fleet(name):
     return u, mission, base, build(u, mission, base)
 
 
+
+# `evaluate` is deterministic -- `test_the_export_is_deterministic` pins
+# that -- and these tests only read the result, so one evaluation per
+# mission serves the whole module. Without it the suite spends most of its
+# time re-deriving the same three aircraft: 24 calls across the files,
+# each a full two-pass evaluation that now builds cut panels.
+@lru_cache(maxsize=None)
 def _built(name):
     u, mission, base, plan = _fleet(name)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,

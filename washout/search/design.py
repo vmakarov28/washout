@@ -43,6 +43,7 @@ from .. import spars as sp
 from .. import linkage as lkg
 from .. import aeroelastic as ael
 from .. import structure as struct
+from .. import joints as jnt
 from collections import OrderedDict
 from ..aero.vlm import VLM
 
@@ -1029,6 +1030,11 @@ class Evaluation:
     structure: object | None = None
     linkage: object | None = None
     aeroelastic: object | None = None
+    joints: tuple = ()
+    """Every bonded joint the print has, with the shear and torque it
+    carries. Panels used to butt together on the spar and nothing else:
+    the tube was sized for bending and the glue carried whatever was
+    left, unexamined."""
     print_settings: object | None = None
     max_elevon_deflect_deg: float = 12.0
     """The mission's deflection limit, carried out so the exporter sizes
@@ -1638,6 +1644,26 @@ def _evaluate_once(
                            f"(need {mission.min_spar_reach_frac:.2f})")
             penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
 
+    # --- and do the BONDED joints carry what the spar does not? ---
+    #
+    # Panels butt together on the spar and are glued face to face. The
+    # tube is sized for bending; the ring of single wall at each joint
+    # carries the shear outboard of it and the torque of that lift about
+    # the spar line, and until now nothing asked whether it could. The
+    # allowable is declared, deliberately far below any figure for the
+    # adhesive itself, because the foam is the weak side.
+    fleet_joints = ()
+    if spar_fits and len(joint_etas) > 1:
+        x_axis = float(np.mean([f.x_frac for f in spar_fits]))
+        loads_j = struct.span_loads(plan, pt, mass.total_kg, mission.n_limit_g)
+        fleet_joints, j_gates = jnt.gates(plan, loads_j, joint_etas,
+                                          x_axis, wall)
+        for g in j_gates:
+            if not g.passed:
+                reasons.append(f"{g.name} carries {g.value:.1f}x its declared "
+                               f"allowable, needs {g.limit:.0f}x")
+                penalty += 10.0 * max(g.limit - g.value, 0.0)
+
     # --- can the powertrain actually hold this speed? ---
     if mission.powertrain is not None:
         drag_n = 0.5 * perf.RHO_AIR * v * v * plan.area_m2 * cd
@@ -1840,6 +1866,7 @@ def _evaluate_once(
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
         aeroelastic=aero_e,
+        joints=tuple(fleet_joints),
         sm_band=(mission.min_static_margin, mission.max_static_margin),
         cruise_band=tuple(mission.cruise_band_ms),
         max_loading_gdm2=mission.max_wing_loading_gdm2,

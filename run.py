@@ -111,6 +111,9 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.lateral.report(), ""]
     if getattr(ev, "aeroelastic", None) is not None:
         lines += [ev.aeroelastic.report(), ""]
+    if getattr(ev, "joints", None):
+        from washout import joints as _jnt
+        lines += [_jnt.report(ev.joints), ""]
     if getattr(ev, "linkage", None) is not None:
         from washout import linkage as _lkg
         lines += [_lkg.report(ev.linkage, ev.max_elevon_deflect_deg), ""]
@@ -122,7 +125,30 @@ def report(ev, settings: vase.PrintSettings) -> str:
     return "\n".join(lines)
 
 
-def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
+def export_companions(ev, settings: vase.PrintSettings, out: Path,
+                      mission) -> list:
+    """The parts one spiral cannot be: printed in normal mode, generated
+    to the shell that was scored. -> [(part, gates), ...]
+
+    Every dimension comes from the design; every claim about fit is a
+    gate with a number, reported here beside the part rather than left
+    for the builder to discover."""
+    from washout.printing import parts as _parts
+
+    made = []
+    if mission is not None and mission.powertrain is not None:
+        try:
+            part, gates = _parts.mount_for(ev.plan, settings,
+                                           mission.powertrain,
+                                           f"{ev.plan.name}_motor_mount")
+            made.append((part, gates))
+        except Exception as e:                       # noqa: BLE001
+            print(f"  motor mount skipped ({type(e).__name__}: {e})")
+    return made
+
+
+def do_export(ev, settings: vase.PrintSettings, out: Path,
+              mission=None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
         from washout.report import figure
@@ -171,6 +197,20 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         print(f"  {ev.plan.name + '_tip_fin':<14} flat plate {w_mm:.0f}x{h_mm:.0f} mm, "
               f"{fins.thickness_m*1000:.1f} mm -- print TWO in normal (not vase) "
               f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
+    companions = export_companions(ev, settings, out, mission)
+    if companions:
+        print("\n  companion parts (normal mode, solid PLA -- NOT vase):")
+    for part, gates in companions:
+        rep = part.export_stl(out / f"{part.name}.stl")
+        w, h, d = part.footprint_mm
+        print(f"  {part.name:<22} x{part.quantity}  {w:.0f}x{h:.0f}x{d:.0f} mm  "
+              f"{part.mass_g():5.1f} g  "
+              f"{'OK' if rep['watertight'] else 'CHECK MESH'}")
+        print(f"      {part.orientation}")
+        for n in part.notes:
+            print(f"      {n}")
+        for g in list(part.gates) + list(gates):
+            print("    " + g.line())
     sheet = build_sheet.write(ev, panels, settings, out / "BUILD.md")
     print(f"\n  build sheet: {sheet}")
     # The slicer settings are in BUILD.md and nowhere else now. The
@@ -312,7 +352,7 @@ def main(argv=None) -> int:
         print(report(ev, settings))
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons), "\n")
-        do_export(ev, ev.print_settings or settings, a.out)
+        do_export(ev, ev.print_settings or settings, a.out, mission)
         return 0
 
     seed_phys = (load_seed_physical(a.seed_design) if a.seed_design
@@ -340,7 +380,7 @@ def main(argv=None) -> int:
         print(f"    {k:<16} {v:8.3f}")
     if best.ok:
         # the settings the verdict was reached with: spar and ribs sized
-        do_export(best, best.print_settings or settings, a.out)
+        do_export(best, best.print_settings or settings, a.out, mission)
     else:
         print("\nbest design still violates:", "; ".join(best.reasons))
         print("no STL written -- fix the mission or widen the bounds")

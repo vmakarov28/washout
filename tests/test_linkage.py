@@ -399,3 +399,49 @@ def test_the_bom_does_not_double_count_the_pairs():
         assert f"{2*f.reach_mm:.0f} mm" in text
     total = sum(i.mass_kg for i in ev.mass.items)
     assert total == pytest.approx(ev.mass.total_kg - ev.mass.shell_kg)
+
+
+def test_the_linkage_is_solved_where_the_elevon_exists():
+    """The four-bar was solved at a station with no control surface.
+
+    `linkage.for_station` builds a hinge at the hinge line and a horn on
+    the elevon at whatever eta it is given, and it was given the servo
+    bay's seat. On every aircraft in the fleet that seat is INBOARD of
+    the elevon: the trainer's servos sit at eta 0.30 with the elevon
+    starting at 0.49, so the mechanism that proves the deflection
+    demon1's whole speed objective is scored from was solved on a
+    trailing edge that is not cut there.
+
+    Two halves to the fix and both are pinned here. The linkage is now
+    solved at the elevon's own root when the shaft falls short, so it
+    models a mechanism that exists; and the shortfall is named in
+    millimetres and priced, rather than repaired by moving the servo --
+    clamping the seat outboard was tried and dragged the CG, the trim,
+    the spar seats and the rib corridors with it, silently."""
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        if ev.linkage is None:
+            continue
+        xh = lkg_hinge_frac(ev)
+        assert ev.print_settings.elevon_eta < 1.0
+        # the hinge the four-bar used is on the elevon, never inboard of it
+        assert ev.linkage.hinge_x_mm > 0.0
+        bay = next((b for b in mission.bays if b.drives_elevon), None)
+        if bay is None:
+            continue
+        short = [r for r in ev.reasons if "servo shaft" in r]
+        half_mm = ev.plan.half_span_m * 1000.0
+        e_servo = next(e for n, e in _servo_etas(ev, mission) if n == "servos")
+        e_shaft = e_servo + mission.servo_shaft_offset_mm / half_mm
+        if e_shaft < ev.print_settings.elevon_eta - 1e-9:
+            assert short, (
+                f"{name}: shaft at eta {e_shaft:.3f}, elevon starts at "
+                f"{ev.print_settings.elevon_eta:.3f}, and nothing said so")
+            assert not ev.ok
+        else:
+            assert not short, short
+
+
+def lkg_hinge_frac(ev):
+    from washout.printing import elevons as _elv
+    return _elv.hinge_x(ev.print_settings)

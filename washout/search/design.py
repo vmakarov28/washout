@@ -126,6 +126,26 @@ class Bay:
     on the elevon's upper surface, and the belly stays clean for the
     landing and the CG mark. The lower skin is still a legal choice for
     a bay that needs no wiring."""
+    drives_elevon: bool = False
+    """Whether this bay holds the servos for the control surface.
+
+    If it does, its output shaft must lie outboard of the hinge
+    station, and that is GATED rather than imposed. On every aircraft in
+    the fleet the solver put the servos inboard of the elevon they drive
+    -- the trainer's at eta 0.30 with the elevon starting at 0.49 -- and
+    `linkage.for_station` then built a hinge and a horn at a station
+    where the trailing edge is not cut, so the four-bar that proves the
+    deflection demon1's whole speed objective is scored from was solved
+    on a surface that does not exist there. The pushrod runs chordwise
+    from the shaft to a horn on the elevon; both ends have to be at the
+    same station.
+
+    Clamping the seat instead was tried, and it is the wrong shape of
+    fix: it moved the trainer's servos a fifth of the span outboard, into
+    the thin outer panels and through the TE spar's corridor, and the CG,
+    the trim, the spar seats and the rib corridors all moved with them --
+    silently, because a solver that relocates a part reports nothing.
+    Penalties rank the infeasible; they do not rearrange the aircraft."""
     lidded: bool = True
     """Whether the opening gets a ledge and a printed lid. Payload does;
     a servo pocket does not -- the servo's arm comes up through the
@@ -535,7 +555,8 @@ class Mission:
                   Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.68,
                       eta_lo=0.30, eta_hi=0.80,
-                      lidded=False, holds=("servos x2",))),
+                      lidded=False, drives_elevon=True,
+                      holds=("servos x2",))),
             battery_kg=0.110,
             cruise_band_ms=(7.0, 11.0),
             min_static_margin=0.15, max_static_margin=0.32,
@@ -593,7 +614,8 @@ class Mission:
                   Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.25, eta_hi=0.75,
-                      lidded=False, holds=("servos x2",))),
+                      lidded=False, drives_elevon=True,
+                      holds=("servos x2",))),
             battery_kg=0.105,
             # This band is the HANDS-OFF trim window, not the top end:
             # top speed is the objective and is scored separately with
@@ -646,7 +668,8 @@ class Mission:
                   Bay("servos", 0.55, (24.0, 20.0, 9.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.30, eta_hi=0.80,
-                      lidded=False, holds=("servos x2",))),
+                      lidded=False, drives_elevon=True,
+                      holds=("servos x2",))),
             # sub-micro hardware to match the sub-micro servos
             servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
             battery_kg=0.028,
@@ -1723,12 +1746,28 @@ def _evaluate_once(
     link = None
     if elv.has_elevon(settings) and "servos" in bay_seats:
         servo_bay = next(b for b in mission.bays if b.name == "servos")
+        # Where the SHAFT is, which is where the pushrod leaves and where
+        # the horn must therefore be. A servo whose shaft is inboard of
+        # the hinge station has no elevon beside it to drive: the four-bar
+        # is solved at the elevon's own root, the nearest station where
+        # the mechanism it models exists, and the shortfall is a gate
+        # below rather than something the geometry pretends away.
+        half_mm = plan.half_span_m * 1000.0
+        e_servo = bay_etas.get("servos") or 0.5 * (e_start + 1.0)
+        e_shaft = e_servo + mission.servo_shaft_offset_mm / max(half_mm, 1e-9)
         link = lkg.for_station(
-            plan, bay_etas.get("servos") or 0.5 * (e_start + 1.0),
+            plan, max(e_shaft, float(settings.elevon_eta)),
             elv.hinge_x(settings), bay_seats["servos"],
             mission.servo_arm_mm, mission.horn_below_mm,
             mission.servo_travel_deg, wall,
             side=+1.0 if servo_bay.open_from == "upper" else -1.0)
+        if servo_bay.drives_elevon and e_shaft < settings.elevon_eta - 1e-9:
+            short = (settings.elevon_eta - e_shaft) * half_mm
+            reasons.append(
+                f"servo shaft at eta {e_shaft:.2f} is {short:.0f} mm inboard "
+                f"of the elevon it drives (starts at eta "
+                f"{settings.elevon_eta:.2f})")
+            penalty += 0.25 * short
         # A lock inside the servo's travel is geometry, not a fault, so
         # long as it comes well AFTER the deflection the score spends: a
         # 17 mm horn on an 11 mm arm always locks before 54 degrees of

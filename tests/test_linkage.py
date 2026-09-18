@@ -103,17 +103,34 @@ def test_a_four_bar_is_differential():
 
 
 def test_the_horn_arm_comes_from_the_section_not_a_constant():
-    """A control horn screws to the elevon's LOWER surface while the hinge
-    is on the upper one, so its arm is the section's own thickness plus the
-    protrusion -- and the section thins outboard. The mechanism's leverage
-    changes along the span whether or not anyone models it."""
+    """A control horn on the elevon's LOWER surface, with the hinge on the
+    upper one, has an arm of the section's own thickness plus the
+    protrusion -- and the section thins outboard, so the mechanism's
+    leverage changes along the span whether or not anyone models it.
+
+    The fleet's horns stand on the UPPER surface now, on the same side as
+    the hinge, and that is exactly why: the arm is then the hinge-to-hole
+    vector, the same at every station, and the leverage no longer depends
+    on where along the span the servo was seated. Both facts are pinned,
+    because the first is the physical reason for the second."""
     _, _, _, plan = _fleet("trainer_v3")
-    inner = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL)
-    outer = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL)
+    inner = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                            side=-1.0)
+    outer = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                            side=-1.0)
     assert inner.horn_arm_mm > outer.horn_arm_mm + 1.0, (
         f"{inner.horn_arm_mm:.1f} vs {outer.horn_arm_mm:.1f}")
     # and the leverage difference is real, not a rounding one
     assert lkg.sweep(outer)[0] > lkg.sweep(inner)[0]
+
+    top_in = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                             side=+1.0)
+    top_out = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                              side=+1.0)
+    assert np.allclose(top_in.horn_offset, top_out.horn_offset)
+    assert top_in.horn_dx_mm > lkg.HINGE_TAPE_ON_ELEVON_MM
+    # the neutral position is still consistent with a horn aft of the axis
+    assert lkg.deflection_at(top_in, 0.0) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_every_fleet_linkage_delivers_what_the_score_spends():

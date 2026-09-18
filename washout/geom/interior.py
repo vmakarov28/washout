@@ -96,6 +96,38 @@ class Volume:
     """Clearance between the anchor skin and the part. A printed bore
     carries first-layer squish and a little sag, and a bay floor is a
     bead thick, so nothing sits at exactly zero."""
+    length_mm: float | None = None
+    """The part's chordwise extent in MILLIMETRES, when it has one.
+
+    `x0`/`x1` are root-chord fractions -- the datum every chord fraction
+    in the program uses -- and they are the right coordinates for a
+    centre. They are the wrong coordinates for a WIDTH: applied at a
+    station whose chord is half the root's, a 23 mm servo's band came out
+    11.5 mm wide, and the pocket that was cut from it narrowed outboard
+    across its own span (17.8 mm at its inboard end, 15.5 at its
+    outboard). A box does not get shorter because the chord did. With a
+    length, `band()` gives the part's true extent at any station."""
+
+    x_abs_mm: float | None = None
+    """The part's centre as an ABSOLUTE station, mm aft of the root
+    leading edge, when it has one. A rigid box does not follow the chord
+    fraction as the wing sweeps and tapers under it: with a physical
+    width on a fractional centre, the trainer's two root bays -- 5.6 mm
+    apart at the root -- overlapped by 0.9 mm where their grooves ran
+    out at z = 81 mm. A tube DOES follow a chord fraction (that is how
+    `spars.place` fits it), so this stays None for a spar."""
+
+    def band(self, plan, eta: float) -> tuple[float, float]:
+        """(x0, x1) as fractions of the LOCAL chord at this station."""
+        if self.length_mm is None:
+            return (self.x0, self.x1)
+        st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+        c_mm = st.chord_m * 1000.0
+        h = 0.5 * self.length_mm / max(c_mm, 1e-9)
+        if self.x_abs_mm is not None:
+            mid = (self.x_abs_mm - st.x_le_m * 1000.0) / max(c_mm, 1e-9)
+            return (mid - h, mid + h)
+        return (self.x_mid - h, self.x_mid + h)
 
     def __post_init__(self) -> None:
         if self.anchor not in ANCHORS:
@@ -134,7 +166,8 @@ class Volume:
         1 mm too deep must rank above one 10 mm too deep."""
         worst = np.inf
         for eta in np.linspace(self.eta0, self.eta1, n_eta):
-            for x in np.linspace(self.x0, self.x1, n_x):
+            x0, x1 = self.band(plan, float(eta))
+            for x in np.linspace(x0, x1, n_x):
                 d = depth_mm(plan, float(eta), float(x), wall_mm)
                 worst = min(worst, d - self.height_mm - self.offset_mm)
         return bool(worst >= 0.0), float(worst)
@@ -156,12 +189,17 @@ def overlap_mm(a: Volume, b: Volume, plan, wall_mm: float,
     an interpolated aerofoil is not worth its own solver.
     """
     e0, e1 = max(a.eta0, b.eta0), min(a.eta1, b.eta1)
-    x0, x1 = max(a.x0, b.x0), min(a.x1, b.x1)
-    if e1 < e0 or x1 < x0:
-        return 0.0                       # no shared chord or span at all
+    if e1 < e0:
+        return 0.0                       # no shared span at all
 
     worst = 0.0
     for eta in np.linspace(e0, e1, n_eta):
+        # the bands are LOCAL to this station: a part with a physical
+        # length is wider, as a fraction, where the chord is shorter
+        ax, bx = a.band(plan, float(eta)), b.band(plan, float(eta))
+        x0, x1 = max(ax[0], bx[0]), min(ax[1], bx[1])
+        if x1 < x0:
+            continue                     # no shared chord here
         for x in np.linspace(x0, x1, n_x):
             alo, ahi = a.z_interval(plan, float(eta), float(x), wall_mm)
             blo, bhi = b.z_interval(plan, float(eta), float(x), wall_mm)
@@ -171,12 +209,28 @@ def overlap_mm(a: Volume, b: Volume, plan, wall_mm: float,
             if dz <= 0.0:
                 continue                 # stacked clear of each other
             # the separation is the cheapest axis to move along
-            dx = (min(a.x1, b.x1) - max(a.x0, b.x0))
+            dx = x1 - x0
             st = plan.at(float(eta))
             dx_mm = dx * st.chord_m * 1000.0
             de_mm = (min(a.eta1, b.eta1) - max(a.eta0, b.eta0)) \
                 * plan.half_span_m * 1000.0
             worst = max(worst, min(dz, dx_mm, de_mm))
+    return float(worst)
+
+
+def gap_mm(a: Volume, b: Volume, plan, n_eta: int = 5) -> float:
+    """Chordwise clearance between two volumes' bands, in mm, at the
+    tightest of their shared stations. Negative means they overlap in
+    chord. Two openings side by side must leave a WALL between them,
+    not a fin, and the wall is a physical width wherever it is."""
+    e0, e1 = max(a.eta0, b.eta0), min(a.eta1, b.eta1)
+    if e1 < e0:
+        return float("inf")
+    worst = float("inf")
+    for eta in np.linspace(e0, e1, n_eta):
+        ax, bx = a.band(plan, float(eta)), b.band(plan, float(eta))
+        c_mm = plan.at(float(eta)).chord_m * 1000.0
+        worst = min(worst, max(ax[0] - bx[1], bx[0] - ax[1]) * c_mm)
     return float(worst)
 
 
@@ -237,15 +291,23 @@ def bay_volume(name: str, x_frac: float, box_mm, plan,
     length, width, height = box_mm
     root_c_mm = plan.stations[0].chord_m * 1000.0
     half_mm = half_span_mm or plan.half_span_m * 1000.0
-    dx = 0.5 * length / max(root_c_mm, 1e-9)
     de = 0.5 * width / max(half_mm, 1e-9)
     if eta_frac is None:
         e0, e1 = 0.0, min(de, 1.0)
     else:
         e0, e1 = max(float(eta_frac) - de, 0.0), min(float(eta_frac) + de, 1.0)
-    return Volume(name=name, x0=x_frac - dx, x1=x_frac + dx,
+    # `x_frac` is a fraction of the chord AT THE BOX'S OWN STATION -- the
+    # root for centreline payload, its solved eta for a servo -- and the
+    # box then sits at that absolute x across its whole width. `x0`/`x1`
+    # keep the root-chord form for the callers that want a centre.
+    st = plan.at(0.0 if eta_frac is None else float(eta_frac))
+    x_abs = st.x_le_m * 1000.0 + x_frac * st.chord_m * 1000.0
+    dx = 0.5 * length / max(root_c_mm, 1e-9)
+    mid = x_abs / max(root_c_mm, 1e-9)
+    return Volume(name=name, x0=mid - dx, x1=mid + dx,
                   eta0=e0, eta1=e1,
-                  height_mm=height, anchor=anchor, offset_mm=offset_mm)
+                  height_mm=height, anchor=anchor, offset_mm=offset_mm,
+                  length_mm=float(length), x_abs_mm=float(x_abs))
 
 
 def spar_volume(fit, wall_mm: float, plan) -> Volume:
@@ -258,8 +320,28 @@ def spar_volume(fit, wall_mm: float, plan) -> Volume:
     """
     root_c_mm = plan.stations[0].chord_m * 1000.0
     d = fit.spec.d_mm
-    dx = 0.5 * d / max(root_c_mm, 1e-9)
+    # Chordwise extent is the tube's diameter PLUS its fit clearance on
+    # each side, for the same reason the bore gate measures an inscribed
+    # circle: a tube is round, and it needs its clearance in every
+    # direction, not only through the depth. Without it a servo pocket
+    # whose wall stood 4 mm from an 8 mm tube's centre passed the volume
+    # check -- no shared x -- while the bore gate, which asks whether a
+    # circle fits, rightly reported 4 mm of corridor. The reservation has
+    # to be at least as strict as the gate, or the solver seats tubes the
+    # gate then rejects.
+    half_mm = 0.5 * d + fit.spec.clearance_mm
+    dx = half_mm / max(root_c_mm, 1e-9)
+    # And in z the same: the tube PLUS its clearance, flush against the
+    # skin it seats on. Reserving the bare diameter with half a clearance
+    # of offset left the reservation a rectangle that cleared a servo
+    # pocket's ceiling by 0.2 mm while the bore gate -- a circle -- caught
+    # the pocket's top corner and reported 7.66 mm of corridor for an
+    # 8 mm tube. The reservation has to be at least as strict as the gate
+    # in every direction, or the solver seats tubes the gate then
+    # rejects. d + 2c here against d + wall + c at the gate: strictly
+    # stricter, by a bead less a clearance.
     return Volume(name=fit.spec.name, x0=fit.x_frac - dx, x1=fit.x_frac + dx,
                   eta0=0.0, eta1=float(fit.reach_eta),
-                  height_mm=d, anchor=getattr(fit, "anchor", MID),
-                  offset_mm=0.5 * fit.spec.clearance_mm)
+                  height_mm=d + 2.0 * fit.spec.clearance_mm,
+                  anchor=getattr(fit, "anchor", MID), offset_mm=0.0,
+                  length_mm=2.0 * half_mm)

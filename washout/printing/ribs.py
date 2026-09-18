@@ -340,61 +340,14 @@ def insert_ribs(
     """
     if not spec.enabled or spec.n_ribs <= 0:
         return loop_unit
+    # One pass with the bay code, so a skin that already carries a bay's
+    # vertical walls is never re-interpolated by the rib inserter: that
+    # put a ledge vertex 7.2 mm down a wall between two layers a
+    # millimetre apart on the trainer's centre body.
+    from .bays import insert_detours
 
-    n = (len(loop_unit) + 1) // 2
-    upper = loop_unit[:n]                    # TE -> LE, x decreasing
-    lower = loop_unit[n - 1:]                # LE -> TE, x increasing
-    up_x, up_y = upper[::-1, 0], upper[::-1, 1]      # ascending for interp
-
-    slit = slit_mm / chord_mm
-    gap = gap_mm / chord_mm
-    # The loop's OWN trailing edge, not an assumed 1.0. A panel truncated
-    # at the hinge line ends at x_hinge, and walking the segments from 1.0
-    # made np.interp clamp every point of the first segment onto the cut
-    # face -- a flat pile of vertices on top of each other, which the
-    # clearance gate reads as a wall touching itself and the bore gate
-    # reads as a section a third of its real depth.
-    x_te = float(max(up_x.max(), lower[:, 0].max()))
-    xr = np.sort(np.clip(spec.stations(z_mm, chord_mm),
-                         spec.x_clip[0],
-                         min(spec.x_clip[1], x_te - 1.5 * slit)))[::-1]
-
-    def y_up(x):
-        return np.interp(x, up_x, up_y)
-
-    def y_lo(x):
-        return np.interp(x, lower[:, 0], lower[:, 1])
-
-    # segment boundaries, walking TE -> LE (x descending)
-    edges = [x_te]
-    for x in xr:
-        edges += [x + 0.5 * slit, x - 0.5 * slit]
-    edges += [0.0]
-    segs = [(edges[2 * i], edges[2 * i + 1]) for i in range(len(xr) + 1)]
-    counts = segment_counts(n, len(segs))
-
-    out: list[np.ndarray] = []
-    for k, ((x_hi, x_lo), c) in enumerate(zip(segs, counts)):
-        # cosine spacing inside the segment keeps the LE segment dense
-        t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, c)))
-        xs = x_hi + (x_lo - x_hi) * t
-        out.append(np.stack([xs, y_up(xs)], 1))
-        if k < len(xr):                       # the rib detour itself
-            xa, xb = x_lo, x_lo - slit
-            # The floor clears the lower skin over a NEIGHBOURHOOD of the
-            # slit, not at three sample points inside it. The clearance
-            # rule is vertex-to-SEGMENT, so the skin just outside the slit
-            # is part of the floor corners' neighbourhood and three points
-            # cannot see a surface curving up between or beyond them --
-            # the same mistake `bays.floor_limits` documents, in the module
-            # it was copied from. Hardening, not a fix for anything
-            # observed: it changed no measured clearance on this fleet.
-            pad = 2.0 * slit
-            xs_f = np.linspace(xb - pad, xa + pad, 9)
-            floor = float(np.max(y_lo(xs_f))) + gap
-            out.append(np.array([[xa, floor], [xb, floor]]))
-    out.append(lower[1:])
-    return np.concatenate(out, axis=0)
+    return insert_detours(loop_unit, chord_mm, z_mm, (), spec,
+                          slit_mm=slit_mm, gap_mm=gap_mm)
 
 
 def rib_point_budget(spec: RibSpec) -> int:

@@ -1,4 +1,4 @@
-"""The payload bay, cut into the shell as a detour of the skin loop.
+"""The payload bays, cut into the shell as detours of the skin loop.
 
 Until now a `Bay` was reserved *volume*: a box checked against the
 section's depth, against the spars and against the print joints, and then
@@ -7,48 +7,63 @@ not cut. The battery went in through a hole someone made with a knife.
 ## An opening in vase mode is a recess, never a hole
 
 The loop has to go somewhere. To open the top of a bay the contour runs
-aft-to-forward along the upper skin, **dives** at the bay's trailing
-edge, runs forward along a **floor** one bead above the lower skin,
-**climbs** back at the bay's leading edge, and carries on to the nose.
-Later in the same loop it comes back along the real lower skin, one bead
-under that floor, and the two weld.
+along the upper skin, **dives** at one wall, runs across a **floor**,
+**climbs** the other wall, and carries on. The floor sits exactly deep
+enough to hold the box, and the closed cell UNDER it is where the spar
+lives and where most of the torsion box survives.
 
-    upper  -----.                    .--------
-                |                    |
-                |    the bay         |          <- dives, floors, climbs
-                |                    |
-    floor       '--------------------'
-    lower  ------------------------------------  (one bead below: welds)
+    upper  -----.  .____________.  .--------      <- ledge for the lid
+                |__|            |__|
+                |     the bay      |              <- dives, floors, climbs
+                '------------------'
+                     closed cell
+    lower  ----------------------------------
 
-Topologically still one simple closed curve. It is the rib detour of
-`printing/ribs.py` widened from a slit to a chord band, and it inherits
-that module's two invariants: the point count per layer is CONSTANT, and
-every inserted vertex stays at least one extrusion width from every
-non-adjacent part of the contour.
+A pocket that opens DOWNWARD -- a servo's, whose arm has to reach the
+horn under the wing -- is the same detour on the lower skin, mirrored.
 
-## The bay fades out, and it only has to do it once
+Topologically the section is still one simple closed curve. It is the
+rib detour of `printing/ribs.py` widened from a slit to a chord band, and
+it inherits that module's two invariants: the point count per layer is
+CONSTANT, and every inserted vertex stays at least one extrusion width
+from every non-adjacent part of the contour.
+
+## Every bay is cut in ONE pass
+
+All of a skin's bays are inserted by a single reparametrisation, exactly
+as `insert_ribs` inserts all the ribs. The first version cut them one at
+a time, and the second call assumed the loop it was handed still had its
+leading edge at index n-1 -- which a loop that already carries one bay
+does not. It split one vertex early, duplicated the leading edge, and the
+zero-length edge that produced stalled the ear-clipper into an invalid
+fan: six non-manifold edges on both caps of the trainer's centre body.
+The same index assumption that broke `spar_fit` on ribbed panels,
+arriving by a different route. The leading edge is now found by
+geometry -- it is the vertex of minimum x -- and never assumed.
+
+## The bay fades in and out, and a root bay only has to fade once
 
 A wall normal to the span is a roof in this print orientation and
-spiralize cannot build one, so the bay's depth is a function of Z and the
-rate of change is an overhang (`vase.ramp_budget`). But the root face is
-open anyway -- the spar has to get in and the two halves join there -- so
-a bay that starts at the centreline needs only **one** ramp, at its
-outboard end. That halves the span it costs.
+spiralize cannot build one, so a bay's depth is a function of Z and the
+rate of change is an overhang (`vase.ramp_budget`). A bay at the
+centreline starts at the root face -- which is open anyway, because the
+spar has to get in and the halves join there -- so it needs only ONE
+ramp, at its outboard end. A bay out in the wing needs two. Treating a
+servo pocket as if it started at the root cut it into the centre body at
+full depth, which is how that was found.
 
-Where the bay has closed, the detour does not vanish: it becomes a
-one-bead groove in the upper skin. That keeps the point count constant
-without coincident vertices, and the groove is useful in its own right --
-it scribes the hatch rim on the finished part.
+Where a bay has closed the detour does not vanish: it becomes a one-bead
+groove. That keeps the point count constant without coincident vertices,
+and the groove scribes the hatch rim on the finished part.
 
 ## What it costs, and the cost is the point
 
 The upper skin is the compression member and the closed cell is the
-torsion box. Cutting the bay open removes both, over the bay's span:
-`aeroelastic.gj_open_nmm2` is one to two orders below the closed value,
-which takes demon1's divergence from 122 m/s to 72. That is not a reason
-not to cut the bay -- you cannot load a battery through an unbroken skin
--- it is a reason the cut has to be paid for in the same evaluation that
-scores the aircraft.
+torsion box. Cutting the bay open removes both over the bay's span:
+`aeroelastic.gj_open_nmm2` is one to two orders below the closed value.
+That is not a reason not to cut the bay -- you cannot load a battery
+through an unbroken skin -- it is a reason the cut has to be paid for in
+the same evaluation that scores the aircraft.
 """
 
 from __future__ import annotations
@@ -58,18 +73,49 @@ from dataclasses import dataclass
 import numpy as np
 
 _NEIGHBOURHOOD = 0.05
-"""How far outside the bay's own band the floor's clearance is measured,
-as a chord fraction. See `floor_limits`: the clearance rule is
-vertex-to-segment, so the lower skin just beyond a corner is part of the
-corner's neighbourhood whether or not it is inside the band."""
+"""How far outside a bay's own band the floor's clearance is measured,
+as a chord fraction. The clearance rule is vertex-to-SEGMENT, so the
+opposite skin just beyond a corner is part of that corner's
+neighbourhood whether or not it is inside the band: on the trainer's
+root section the lower surface just aft of the pack's trailing edge is
+0.4 mm higher than anything inside the band, and a floor placed against
+the in-band maximum left its corner 0.255 mm from a segment it was never
+measured against."""
 
-POINTS_PER_BAY = 2
-"""Two vertices: the floor's aft corner and its forward corner.
+POINTS_PER_BAY = 6
+"""Per bay, per layer, always: at each wall a ledge-outer and a
+ledge-inner vertex, and between them the floor's two corners. The walls
+are the segments a closed contour already has. Six whether the bay is
+open, closing, a pocket with no ledge, or a groove -- and never
+coincident with the skin's own vertices, so no zero-length edge can
+reach the ear-clipper."""
 
-The dive and the climb are the segments BETWEEN those corners and the
-upper-surface points either side of them, which a closed contour already
-has. Adding a ladder of points down each wall would only give the slicer
-somewhere to round the corner off."""
+UPPER = "upper"
+LOWER = "lower"
+
+BAND_MARGIN = 0.02
+"""How close to the leading or trailing edge, as a chord fraction, an
+opening's wall may come. Inside that the skin is turning through the
+nose or thinning to the blunt edge, and a detour there is a detour with
+nowhere to be."""
+
+MIN_BAND_MM = 4.0
+"""An opening narrower than this is not an opening: its six vertices
+would sit closer than a lip apart. Below it the detour is dropped and
+its vertices go back to the skin."""
+
+GROOVE_TAIL_MM = 2.0
+"""Span over which a closed bay's groove fades from one bead to nothing."""
+
+FIT_MM = 0.6
+"""Chordwise clearance between a box and the walls of its pocket, total.
+
+A pocket cut to exactly the box's length has the box's length between
+its two bead CENTRES, so the walls intrude half a bead each and the box
+does not go in. The cut is therefore the box plus two beads plus this,
+which is a declared fit allowance -- 0.3 mm a side -- not a measured one.
+The ramps give a pocket all the spanwise slack it needs; chordwise there
+is nothing else to give it."""
 
 
 @dataclass(frozen=True)
@@ -79,158 +125,341 @@ class BaySpec:
     name: str
     x0: float                   # forward edge
     x1: float                   # aft edge
-    span_mm: float              # full-depth run from the root face
-    ramp_mm: float              # span over which it closes
-    depth_mm: float             # how deep the floor sits below the upper skin
-    floor_gap_mm: float         # clearance the floor must keep from the lower skin
+    start_mm: float             # z at which full depth BEGINS (0 = root face)
+    span_mm: float              # z at which full depth ENDS
+    ramp_mm: float              # span over which it CLOSES, outboard
+    depth_mm: float             # how deep the floor sits below the opened skin
+    gap_mm: float               # clearance the floor keeps from the far skin
+    open_from: str = UPPER
+    ledge_mm: float = 0.0       # lid thickness; 0 means a pocket, no ledge
+    ramp_in_mm: float = 0.0     # span over which it OPENS, inboard; 0 = a root bay
+    length_mm: float | None = None
+    """The opening's chordwise extent in MILLIMETRES. When set, `x0` and
+    `x1` only give the centre and the band is recomputed at every layer
+    from that layer's chord, because a pocket is a box and a box does
+    not get shorter as the chord tapers: cut as a fraction, the trainer's
+    servo pocket was 17.8 mm wide at its inboard end and 15.5 at its
+    outboard, for a 23 mm servo."""
+    x_abs_mm: float | None = None
+    """The opening's centre as an absolute station, mm aft of the ROOT
+    leading edge. A box is rigid: its centre does not slide with the
+    chord fraction as the wing sweeps under it. With a physical width on
+    a fractional centre, the trainer's two root bays overlapped where
+    their grooves ran out. Needs the layer's own `x_le_mm` to convert."""
+
+    def band(self, chord_mm: float, x_le_mm: float = 0.0,
+             skin_x0: float = 0.0, skin_x1: float = 1.0
+             ) -> tuple[float, float] | None:
+        """(x0, x1) in this layer's own chord fractions, CLIPPED to the
+        skin's extent less `BAND_MARGIN`; None if what is left is
+        narrower than `MIN_BAND_MM`.
+
+        The clipping is what lets a root bay on a swept body close at
+        all: its box is rigid and sits at an absolute station, but the
+        ramp that closes the opening is not a box, and as the leading
+        edge comes round outboard the recess simply narrows with it."""
+        if self.length_mm is None:
+            return (self.x0, self.x1)
+        h = 0.5 * self.length_mm / max(chord_mm, 1e-9)
+        if self.x_abs_mm is not None:
+            mid = (self.x_abs_mm - x_le_mm) / max(chord_mm, 1e-9)
+        else:
+            mid = 0.5 * (self.x0 + self.x1)
+        lo = max(mid - h, skin_x0 + BAND_MARGIN)
+        hi = min(mid + h, skin_x1 - BAND_MARGIN)
+        if (hi - lo) * chord_mm < MIN_BAND_MM:
+            return None
+        return (lo, hi)
+
+    def groove_frac(self, z_mm: float) -> float:
+        """How much of the one-bead groove remains at this height.
+
+        A closed bay used to leave its groove all the way to the tip: a
+        scribe line down the whole wing, 0.45 mm deep, for the sake of a
+        constant point count. It now fades to nothing over `GROOVE_TAIL_MM`
+        past each ramp, at a rate far inside the overhang limit, and a
+        bay that has faded out is not a detour at all."""
+        r_out = max(self.ramp_mm, 1e-9)
+        end = self.span_mm + r_out
+        if z_mm > end:
+            return float(max(0.0, 1.0 - (z_mm - end) / GROOVE_TAIL_MM))
+        if self.ramp_in_mm > 0.0 and self.start_mm > 0.0:
+            begin = self.start_mm - max(self.ramp_in_mm, 1e-9)
+            if z_mm < begin:
+                return float(max(0.0, 1.0 - (begin - z_mm) / GROOVE_TAIL_MM))
+        elif self.start_mm > 0.0 and z_mm < self.start_mm:
+            return 0.0
+        return 1.0
+
+    def present(self, z_mm: float) -> bool:
+        return self.groove_frac(z_mm) > 0.0
 
     def depth_frac(self, z_mm: float) -> float:
-        """How open the bay is at this height. 1 at the root, 0 outboard.
+        """How open the bay is at this height: a trapezoid in Z.
 
-        Full depth from the root face to `span_mm`, then a linear ramp to
-        closed over `ramp_mm`. Linear because the overhang limit is a
-        limit on the RATE, so the cheapest profile that respects it is
-        the one with constant rate."""
-        if z_mm <= self.span_mm:
-            return 1.0
-        if self.ramp_mm <= 0.0:
+        Ramps in from `start - ramp_in` to `start`, full to `span`, ramps
+        out to `span + ramp`. A root bay has start = 0 and no ramp-in --
+        one ramp, as the root face is open anyway. The two ramps are
+        sized SEPARATELY, because they cross different panels: sizing the
+        ramp-in from the outboard walk that sized the ramp-out let the
+        trainer's servo pocket open at 1.04 mm/mm through a panel whose
+        budget there was 0.98. Linear because the overhang limit is a
+        limit on the RATE, so the cheapest profile that respects it has
+        constant rate."""
+        r_out = max(self.ramp_mm, 1e-9)
+        r_in = max(self.ramp_in_mm, 1e-9)
+        if z_mm > self.span_mm + r_out:
             return 0.0
-        return float(np.clip(1.0 - (z_mm - self.span_mm) / self.ramp_mm,
-                             0.0, 1.0))
+        if z_mm >= self.start_mm:
+            return 1.0 if z_mm <= self.span_mm else float(
+                1.0 - (z_mm - self.span_mm) / r_out)
+        if self.ramp_in_mm <= 0.0:
+            return 1.0 if self.start_mm <= 0.0 else 0.0
+        if z_mm < self.start_mm - r_in:
+            return 0.0
+        return float((z_mm - (self.start_mm - r_in)) / r_in)
+
+
+def split_skins(loop_unit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(upper LE->TE, lower LE->TE), the leading edge found by GEOMETRY.
+
+    The LE is the vertex of minimum x. Assuming it sits at index n-1 is
+    true only of a loop nothing has been inserted into."""
+    i_le = int(np.argmin(loop_unit[:, 0]))
+    return loop_unit[:i_le + 1][::-1], loop_unit[i_le:]
+
+
+def floor_limits_skins(near: np.ndarray, far: np.ndarray, x0: float,
+                       x1: float, chord_mm: float, depth_mm: float,
+                       gap_mm: float, min_groove_mm: float,
+                       open_from: str) -> tuple[float, float] | None:
+    """(y at fully closed, y at fully open), in chord units.
+
+    `near` is the skin being opened, `far` the one the floor must clear.
+    Returns None only when not even the one-bead groove fits. Everything
+    else is CLAMPED: the floor is as deep as the box needs where the
+    section allows and as deep as the section allows where it does not,
+    so the geometry can never self-intersect; whether the box fits is
+    `Volume.fits`'s question, reported as a gate with the shortfall.
+    Declining instead left the layer short of vertices and the contour
+    array would not broadcast.
+    """
+    pad = _NEIGHBOURHOOD
+    sel_n = (near[:, 0] >= x0) & (near[:, 0] <= x1)
+    sel_f = (far[:, 0] >= x0 - pad) & (far[:, 0] <= x1 + pad)
+    if sel_n.sum() < 2 or sel_f.sum() < 2:
+        return None
+    if open_from == UPPER:                       # deeper is DOWN
+        y_top = float(near[sel_n, 1].min()) - min_groove_mm / chord_mm
+        y_lim = float(far[sel_f, 1].max()) + gap_mm / chord_mm
+        if y_top <= y_lim:
+            return None
+        return y_top, max(y_top - depth_mm / chord_mm, y_lim)
+    y_top = float(near[sel_n, 1].max()) + min_groove_mm / chord_mm     # UP
+    y_lim = float(far[sel_f, 1].min()) - gap_mm / chord_mm
+    if y_top >= y_lim:
+        return None
+    return y_top, min(y_top + depth_mm / chord_mm, y_lim)
 
 
 def floor_limits(loop_unit: np.ndarray, x0: float, x1: float,
                  chord_mm: float, depth_mm: float, gap_mm: float,
-                 min_groove_mm: float) -> tuple[float, float] | None:
-    """(y at fully closed, y at fully open) for the floor, in chord units.
-
-    Returns None only when not even the one-bead groove fits between the
-    skins, which on a real aerofoil means the band runs off the trailing
-    edge. Everything else is CLAMPED rather than refused -- see below.
-
-    The floor sits exactly deep enough to hold the box and **no deeper**,
-    and the difference matters more than it looks.
-
-    Cutting to one bead above the lower skin -- the first version -- opens
-    the section over the whole of the bay's chord band, which destroys the
-    very solution the spar seat solver had found: on the trainer the TE
-    spar clears the pack by taking the upper skin while the pack sits on
-    the lower one, and a full-depth cut removes the upper region the tube
-    was seated in. A real bay has a FLOOR with closed section underneath
-    it, and that residual cell is where the spar lives and most of the
-    torsion box survives.
-
-    The floor is one horizontal line across the whole band, so it is
-    measured from the LOWEST point of the upper skin in the band, and it
-    must clear the HIGHEST point of the lower skin. Taking those extremes
-    rather than the values at the band's centre is what stops the floor
-    poking through a cambered surface near the nose.
-
-    The band is WIDENED before taking those extremes, and that is not
-    padding for luck. The clearance rule is a distance from a vertex to a
-    SEGMENT, and the floor's corners sit at x0 and x1 with the lower skin
-    running on past them -- on the trainer's root section the lower
-    surface just aft of the bay's trailing edge is 0.4 mm higher than
-    anything inside the band, so a floor placed against the in-band
-    maximum left its corner 0.255 mm from a segment it was never measured
-    against. Measuring the neighbourhood is the fix; a bigger gap would
-    only have hidden it.
-    """
-    n = (len(loop_unit) + 1) // 2
-    upper = loop_unit[:n][::-1]                  # LE -> TE
-    lower = loop_unit[n - 1:]
-    pad = _NEIGHBOURHOOD
-    sel_u = (upper[:, 0] >= x0) & (upper[:, 0] <= x1)
-    sel_l = (lower[:, 0] >= x0 - pad) & (lower[:, 0] <= x1 + pad)
-    if sel_u.sum() < 2 or sel_l.sum() < 2:
-        return None
-    y_top = float(upper[sel_u, 1].min()) - min_groove_mm / chord_mm
-    y_limit = float(lower[sel_l, 1].max()) + gap_mm / chord_mm
-    if y_top <= y_limit:
-        return None          # not even a one-bead groove fits: no cut
-    # CLAMPED, not declined. The floor is deep enough for the box where
-    # the section allows it and as deep as the section allows where it
-    # does not, so the geometry can never self-intersect -- and whether
-    # the box actually fits is `Volume.fits`'s question, reported as a
-    # gate with the shortfall in millimetres.
-    #
-    # Declining instead broke the point-count invariant outright: the
-    # budget counts the cuts REQUESTED, so a bay that silently refused to
-    # cut left the layer two vertices short of every other layer and the
-    # contour array would not broadcast. The first version did exactly
-    # that, on the one panel that carries two bays.
-    y_floor = max(y_top - depth_mm / chord_mm, y_limit)
-    return y_top, y_floor
+                 min_groove_mm: float, open_from: str = UPPER
+                 ) -> tuple[float, float] | None:
+    """`floor_limits_skins` for a whole loop."""
+    upper, lower = split_skins(loop_unit)
+    near, far = (upper, lower) if open_from == UPPER else (lower, upper)
+    return floor_limits_skins(near, far, x0, x1, chord_mm, depth_mm,
+                              gap_mm, min_groove_mm, open_from)
 
 
-def insert_bay(loop_unit: np.ndarray, chord_mm: float, z_mm: float,
-               spec: BaySpec, min_groove_mm: float) -> np.ndarray:
-    """Rebuild the upper skin around one bay detour -> longer contour.
-
-    The upper surface is REPARAMETRISED, not spliced, for the same reason
-    `ribs.insert_ribs` does it: snapping the bay's corners onto whichever
-    existing vertices happen to be nearest quantises them to the contour
-    grid, and a corner that jumps a grid interval as the depth ramps is a
-    step in the wall the printer has to build in mid-air.
-    """
-    n = (len(loop_unit) + 1) // 2
-    upper = loop_unit[:n]                        # TE -> LE
-    lower = loop_unit[n - 1:]
-    up_x, up_y = upper[::-1, 0], upper[::-1, 1]  # ascending for interp
-
-    def y_up(x):
-        return np.interp(x, up_x, up_y)
-
-    # two segments of upper skin, with FIXED vertex counts: the count per
-    # segment is what keeps the total per layer constant, and only the
-    # positions inside a segment move as the bay's corners do.
-    n_aft = max(int(round(n * (1.0 - spec.x1))), 2)
-    n_fwd = max(n - n_aft, 2)
-    if n_aft + n_fwd != n:                        # keep the budget exact
-        n_aft = n - n_fwd
-
-    t_aft = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_aft)))
-    xs_aft = 1.0 + (spec.x1 - 1.0) * t_aft        # TE -> x1
-    t_fwd = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_fwd)))
-    xs_fwd = spec.x0 + (0.0 - spec.x0) * t_fwd    # x0 -> LE
-
-    # The detour ALWAYS contributes its two vertices, and that is what
-    # makes the point-count invariant structural rather than conditional.
-    # Returning the loop unchanged when the section cannot hold the bay --
-    # the first version -- left that layer two vertices short of every
-    # other layer in the panel, and the contour array would not broadcast.
-    # It only showed up on the panels carrying two bays.
-    #
-    # With no room the two vertices sit ON the upper skin at the bay's own
-    # corners: distinct in x, collinear with the surface, geometrically a
-    # no-op. The depth gate is what reports that the box does not fit.
-    lim = floor_limits(loop_unit, spec.x0, spec.x1, chord_mm,
-                       spec.depth_mm, spec.floor_gap_mm, min_groove_mm)
+def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
+            chord_mm: float, z_mm: float, min_groove_mm: float,
+            x_le_mm: float = 0.0) -> np.ndarray:
+    """The six detour vertices for one bay, forward wall to aft wall."""
+    sx, sy = near[:, 0], near[:, 1]
+    sign = 1.0 if spec.open_from == UPPER else -1.0   # +1: deeper is down
+    groove = min_groove_mm / chord_mm * spec.groove_frac(z_mm)
+    x0, x1 = spec.band(chord_mm, x_le_mm, float(sx[0]), float(sx[-1]))
+    lip = 0.04 * (x1 - x0)                            # the lid's bearing
+    lim = floor_limits_skins(near, far, x0, x1, chord_mm,
+                             spec.depth_mm, spec.gap_mm, min_groove_mm,
+                             spec.open_from)
     if lim is None:
-        detour = np.array([[spec.x1, float(y_up(spec.x1))],
-                           [spec.x0, float(y_up(spec.x0))]])
-    else:
-        y_closed, y_open = lim
-        floor = y_closed - spec.depth_frac(z_mm) * (y_closed - y_open)
-        detour = np.array([[spec.x1, floor], [spec.x0, floor]])
+        # not even a groove fits: six distinct vertices a groove inside
+        # the skin, so the count holds and nothing is coincident
+        xs = np.linspace(x0, x1, 6)
+        ys = np.interp(xs, sx, sy) - sign * groove
+        return np.stack([xs, ys], 1)
 
-    out = [np.stack([xs_aft, y_up(xs_aft)], 1),
-           detour,
-           np.stack([xs_fwd, y_up(xs_fwd)], 1),
-           lower[1:]]
-    return np.concatenate(out, axis=0)
+    y_closed, y_open = lim
+    d = spec.depth_frac(z_mm)
+
+    # The floor follows the SKIN when closed and is flat only when open.
+    # A box is flat, so an open bay's floor is one horizontal line; a
+    # scribe line is not, and a horizontal groove at the band's lowest
+    # skin point is a 2-3 mm step on a cambered surface -- which is what
+    # the rendered section showed on both skins. Blended linearly in the
+    # depth fraction, so the corners move smoothly through the ramp.
+    def floor_at(x):
+        hug = float(np.interp(x, sx, sy)) - sign * groove
+        return (1.0 - d) * hug + d * y_open
+
+    if spec.ledge_mm <= 0.0:
+        # a pocket: the floor's corners, and two more spread along it
+        xs = np.array([x0, x0 + lip, x0 + 2 * lip,
+                       x1 - 2 * lip, x1 - lip, x1])
+        return np.stack([xs, [floor_at(x) for x in xs]], 1)
+
+    # a ledge one lid-thickness inside the skin at each wall, but never
+    # deeper than the floor itself -- on a nearly closed bay the ledge
+    # simply IS the floor
+    ledge = spec.ledge_mm / chord_mm
+    f0, f1 = floor_at(x0 + lip), floor_at(x1 - lip)
+    y_l0 = float(np.interp(x0, sx, sy)) - sign * ledge
+    y_l1 = float(np.interp(x1, sx, sy)) - sign * ledge
+    if sign > 0:
+        y_l0, y_l1 = max(y_l0, f0), max(y_l1, f1)
+    else:
+        y_l0, y_l1 = min(y_l0, f0), min(y_l1, f1)
+    return np.array([[x0, y_l0],
+                     [x0 + lip, y_l0],
+                     [x0 + lip, f0],
+                     [x1 - lip, f1],
+                     [x1 - lip, y_l1],
+                     [x1, y_l1]])
+
+
+def rebuild_skin(near: np.ndarray, detours, extra_pts: int = 0) -> np.ndarray:
+    """One skin, LE -> TE, resampled around its detours -> (M, 2).
+
+    `detours` are (x_a, x_b, points) with x_a < x_b in the skin's own
+    chord fractions and `points` the detour's vertices, forward to aft,
+    which are kept EXACTLY. Only the free skin between detours is
+    resampled: it is divided into segments with FIXED vertex counts, so
+    the total per layer is constant and the vertices inside a segment
+    slide smoothly as its ends move. Snapping a detour onto existing
+    vertices would quantise it to the contour grid, and a corner that
+    jumps a grid interval as the depth ramps is a step in a wall the
+    printer builds in mid-air.
+
+    This is the one function every detour goes through. Bays and ribs
+    used to have one each, applied in sequence, and the second
+    re-interpolated a skin that already carried the first's vertical
+    walls: on the trainer's centre body a ledge vertex dropped 7.2 mm to
+    the floor between two layers a millimetre apart, 72.8 degrees of
+    overhang from a bay whose ramp had been budgeted at 50.
+
+    The skin's own ends bound the segments -- a panel truncated at the
+    hinge line ends at x_hinge, not 1.0, and walking to 1.0 clamped the
+    last segment's vertices onto the cut face in a pile."""
+    sx, sy = near[:, 0], near[:, 1]
+    n_pts = len(near) + int(extra_pts)     # a faded-out bay's six, as skin
+    detours = sorted(detours, key=lambda d: d[0])
+    for (a0, b0, _), (a1, b1, _) in zip(detours, detours[1:]):
+        if a1 < b0 - 1e-12:
+            raise ValueError(f"detours overlap: [{a0:.4f}, {b0:.4f}] and "
+                             f"[{a1:.4f}, {b1:.4f}]")
+    edges = [float(sx[0])]
+    for a, b, _ in detours:
+        edges += [a, b]
+    edges += [float(sx[-1])]
+    segs = [(edges[2 * i], edges[2 * i + 1]) for i in range(len(detours) + 1)]
+    widths = np.array([max(b - a, 1e-6) for a, b in segs])
+    counts = np.maximum(np.round(n_pts * widths / widths.sum()), 2).astype(int)
+    while counts.sum() > n_pts:
+        counts[int(np.argmax(counts))] -= 1
+    while counts.sum() < n_pts:
+        counts[int(np.argmax(widths / counts))] += 1
+    out = []
+    for k, ((a, b), cnt) in enumerate(zip(segs, counts)):
+        t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, cnt)))
+        xs = a + (b - a) * t
+        out.append(np.stack([xs, np.interp(xs, sx, sy)], 1))
+        if k < len(detours):
+            out.append(np.asarray(detours[k][2], dtype=float))
+    return np.concatenate(out, 0)
+
+
+def rib_detours(upper: np.ndarray, lower: np.ndarray, chord_mm: float,
+                z_mm: float, spec, slit_mm: float, gap_mm: float) -> list:
+    """Every rib slit on the upper skin at this height, as detours.
+
+    A rib is a chordwise web from the upper skin to one bead above the
+    lower: the detour is two vertices on the floor, `slit` apart, and
+    the walls are the segments the closed contour already has. The floor
+    clears the lower skin over a NEIGHBOURHOOD of the slit, not at three
+    sample points inside it, because the clearance rule is
+    vertex-to-segment and the skin just outside the slit is part of the
+    floor corners' neighbourhood."""
+    if spec is None or not spec.enabled or spec.n_ribs <= 0:
+        return []
+    slit = slit_mm / chord_mm
+    gap = gap_mm / chord_mm
+    x_te = float(max(upper[:, 0].max(), lower[:, 0].max()))
+    xr = np.sort(np.clip(spec.stations(z_mm, chord_mm),
+                         spec.x_clip[0],
+                         min(spec.x_clip[1], x_te - 1.5 * slit)))
+    out = []
+    for x in xr:
+        xa, xb = x - 0.5 * slit, x + 0.5 * slit
+        pad = 2.0 * slit
+        xs_f = np.linspace(xa - pad, xb + pad, 9)
+        floor = float(np.max(np.interp(xs_f, lower[:, 0], lower[:, 1]))) + gap
+        out.append((float(xa), float(xb),
+                    np.array([[xa, floor], [xb, floor]])))
+    return out
+
+
+def insert_detours(loop_unit: np.ndarray, chord_mm: float, z_mm: float,
+                   bay_specs=(), rib_spec=None, slit_mm: float = 0.5,
+                   gap_mm: float = 0.5, min_groove_mm: float = 0.45,
+                   x_le_mm: float = 0.0) -> np.ndarray:
+    """Every detour on both skins, in ONE pass -> longer contour.
+
+    Bays open from whichever skin they were declared on; ribs are slits
+    in the upper skin. All of a skin's detours are inserted by a single
+    reparametrisation (`rebuild_skin`), so none of them is ever
+    re-interpolated by a later one. The loop comes back in Selig order:
+    TE over the upper to the LE, then the lower to the TE, sharing the LE
+    vertex exactly once.
+    """
+    bay_specs = list(bay_specs)
+    upper, lower = split_skins(loop_unit)
+    # A bay that has faded out, or whose band has narrowed to nothing
+    # against the section's edge, is six plain skin points, not a
+    # detour: the count per layer stays constant and nothing is scribed.
+    up_b = [b for b in bay_specs if b.open_from == UPPER]
+    lo_b = [b for b in bay_specs if b.open_from == LOWER]
+
+    def live(b, skin):
+        return (b.present(z_mm)
+                and b.band(chord_mm, x_le_mm, float(skin[0, 0]),
+                           float(skin[-1, 0])) is not None)
+
+    up = [(*b.band(chord_mm, x_le_mm, float(upper[0, 0]), float(upper[-1, 0])),
+           _detour(b, upper, lower, chord_mm, z_mm, min_groove_mm, x_le_mm))
+          for b in up_b if live(b, upper)]
+    up += rib_detours(upper, lower, chord_mm, z_mm, rib_spec, slit_mm, gap_mm)
+    lo = [(*b.band(chord_mm, x_le_mm, float(lower[0, 0]), float(lower[-1, 0])),
+           _detour(b, lower, upper, chord_mm, z_mm, min_groove_mm, x_le_mm))
+          for b in lo_b if live(b, lower)]
+    gone_up = POINTS_PER_BAY * sum(1 for b in up_b if not live(b, upper))
+    gone_lo = POINTS_PER_BAY * sum(1 for b in lo_b if not live(b, lower))
+    new_up = rebuild_skin(upper, up, gone_up) if (up or gone_up) else upper
+    new_lo = rebuild_skin(lower, lo, gone_lo) if (lo or gone_lo) else lower
+    return np.concatenate([new_up[::-1], new_lo[1:]], 0)
+
+
+def insert_bays(loop_unit: np.ndarray, chord_mm: float, z_mm: float,
+                specs, min_groove_mm: float) -> np.ndarray:
+    """The bays alone. `insert_detours` with no ribs."""
+    specs = list(specs)
+    if not specs:
+        return loop_unit
+    return insert_detours(loop_unit, chord_mm, z_mm, specs, None,
+                          min_groove_mm=min_groove_mm)
 
 
 def bay_point_budget(n_bays: int) -> int:
     return POINTS_PER_BAY * max(int(n_bays), 0)
-
-
-def ramp_for(depth_mm: float, rate_mm_per_mm: float) -> float:
-    """Span needed to close a bay `depth_mm` deep at the allowed rate.
-
-    inf when the wing has already spent its whole overhang budget, which
-    means the bay cannot be closed in this panel at all -- micro's centre
-    body, where 33 mm is needed and 10 mm remain."""
-    if rate_mm_per_mm <= 0.0:
-        return float("inf")
-    return float(depth_mm / rate_mm_per_mm)

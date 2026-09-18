@@ -228,9 +228,22 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
             A(f"  delivers more, so set the transmitter endpoints, not the horn.")
         if ev.linkage is not None:
             k = ev.linkage
+            where = ("above the surface, {:.0f} mm aft of the hinge axis"
+                     .format(k.horn_dx_mm) if k.side > 0
+                     else "below the hinge axis")
             A(f"- Servo arm **{k.servo_arm_mm:.0f} mm**, horn hole "
-              f"**{k.horn_arm_mm:.0f} mm** below the hinge axis, pushrod "
+              f"**{k.horn_arm_mm:.0f} mm** {where}, pushrod "
               f"**{k.rod_mm:.0f} mm** between centres.")
+            from . import linkage as _lkg
+            th_dn, th_up = _lkg.endpoints_deg(k, ev.max_elevon_deflect_deg)
+            lock = _lkg.lock_angle_deg(k)
+            if th_dn is not None and th_up is not None:
+                A(f"- **Transmitter endpoints: {th_dn:+.0f}° / {th_up:+.0f}° of "
+                  f"servo** give the full ±{ev.max_elevon_deflect_deg:.0f}° of "
+                  f"surface.")
+                if np.isfinite(lock):
+                    A(f"  The linkage locks at {lock:.0f}° of servo; never set "
+                      f"an endpoint past {_lkg.LOCK_MARGIN * lock:.0f}°.")
         A("")
 
     # ------------------------------------------------------- aeroelastic
@@ -339,8 +352,9 @@ def bom(ev, parts) -> str:
                  f"at {i.x_m*1000:.0f} mm aft of the root LE |")
     if ev.linkage is not None:
         k = ev.linkage
-        L.append(f"| 2 | control horn | hole {k.horn_arm_mm:.0f} mm below the "
-                 f"hinge axis | — | bonded to the elevon's lower surface |")
+        face = "upper" if k.side > 0 else "lower"
+        L.append(f"| 2 | control horn | hole {k.horn_arm_mm:.0f} mm off the "
+                 f"{face} surface | — | tongue glued into the elevon's socket |")
         L.append(f"| 2 | pushrod | {k.rod_mm:.0f} mm between centres | — | "
                  f"1 mm wire with a clevis, or a Z-bend |")
     if ev.print_settings is not None and elv.has_elevon(ev.print_settings):

@@ -343,22 +343,40 @@ def test_the_ramp_budget_improves_outboard():
     assert rates[-1] > rates[0], f"{rates}"
 
 
-def test_a_shallow_panel_cannot_close_a_deep_bay():
-    """Micro's centre body is 24.5 mm tall and its pack is 17 mm deep.
+def test_a_bay_may_close_across_a_print_joint():
+    """Micro's centre body is 24.5 mm tall and its pack is 17 mm deep:
+    closing the bay needs 22 mm of span and there were 10 mm left in p0.
 
-    Closing the bay needs 33 mm of span at the rate available and there
-    are 10 mm left outboard of the pack, so the bay cannot be closed
-    inside p0 at all -- it has to run clear through the panel and be shut
-    by the joint, or move outboard. That is a per-aircraft architectural
-    consequence of the print constraint, and it is the reason this gate
-    exists rather than a blanket rule about bay depth."""
+    This test used to assert that micro therefore FAILED. It was pinning
+    a constraint nothing physical asks for. What must not straddle a joint
+    is the box -- half a battery in each shell is not a thing -- and that
+    is gated separately. The taper that closes the opening is just
+    geometry, both panels are lofted from the same planform, so the
+    contours match across the joint by construction, and the ramp may run
+    on into the next panel. Given the whole span outboard to close in,
+    micro has room, and the gate must say so."""
     u, mission, base, plan = _fleet("micro")
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
     closes = [r for r in ev.reasons if "cannot be closed" in r]
-    assert closes, f"micro p0 must fail the closure gate; got {ev.reasons}"
-    assert any(mission.bays[0].name in r for r in closes)
+    assert not closes, f"micro must be allowed to close across p0/p1: {closes}"
+
+
+def test_a_bay_with_no_span_outboard_still_cannot_close():
+    """The gate survives the relaxation. A bay whose ramp needs more span
+    than exists outboard of it is still rejected -- the ramp may cross
+    joints, not the tip."""
+    from dataclasses import replace as _replace
+    u, mission, base, plan = _fleet("trainer_v3")
+    # a pack parked at the very tip: nothing left outboard to close in
+    far = _replace(mission.bays[0], x_var=None, x_frac=0.45,
+                   eta_frac=0.985, eta_lo=0.98, eta_hi=0.99)
+    m2 = _replace(mission, bays=(far,) + mission.bays[1:])
+    settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                                  bed_z_mm=250.0)
+    ev = evaluate(u, m2, base, settings)
+    assert any("cannot be closed" in r for r in ev.reasons), ev.reasons
 
 
 def test_the_trainer_can_close_its_bays():
@@ -370,3 +388,33 @@ def test_the_trainer_can_close_its_bays():
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
     assert not [r for r in ev.reasons if "cannot be closed" in r], ev.reasons
+
+
+# ---------------------------------------------- penalties reach the score
+
+def test_interior_penalties_reach_the_score():
+    """Penalties rank the infeasible -- that is the whole scoring rule.
+
+    Half way through `evaluate` a second `penalty = 0.0` threw away every
+    millimetre of clash, depth shortfall, joint straddle and closure
+    failure priced before it, so a bay 1 mm too shallow and a bay 40 mm
+    too shallow scored the same and the optimizer saw the flat cliff the
+    rule exists to prevent. A design whose electronics box is made far
+    too tall to fit must score BELOW the same design with the box as
+    declared, by at least the depth penalty."""
+    from dataclasses import replace as _replace
+
+    u, mission, base, _ = _fleet("trainer_v3")
+    s = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                           bed_z_mm=250.0)
+    base_ev = evaluate(u, mission, base, s, size_structure=False)
+    bays = tuple(_replace(b, box_mm=(b.box_mm[0], b.box_mm[1], 60.0))
+                 if b.name == "AR630 + esc" else b for b in mission.bays)
+    tall = evaluate(u, _replace(mission, bays=bays), base, s,
+                    size_structure=False)
+    assert not tall.ok
+    assert any("needs 60" in r for r in tall.reasons), tall.reasons
+    # 20 per unit of shortfall over need: a 60 mm box in a ~35 mm section
+    # is short by ~25 mm, so the gap is at least 20 * 25 / 60 = 8 points
+    assert tall.score < base_ev.score - 8.0, (
+        f"{tall.score:.1f} is not below {base_ev.score:.1f} by the depth penalty")

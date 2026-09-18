@@ -133,7 +133,13 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         # Any plotting failure, not just a missing matplotlib: the figure
         # is drawn BEFORE the STLs, and must never cost the parts.
         print(f"\nfigure skipped ({type(e).__name__}: {e})")
-    panels = vase.build_panels(ev.plan, settings)
+    # EXPORT THE PANELS THAT WERE SCORED. `evaluate(want_panels=True)`
+    # hands them back on the Evaluation, bays cut and ribs laid out, and
+    # rebuilding them here from the plan alone dropped the bay cuts: the
+    # search scored an aircraft with openings in it and the export printed
+    # a sealed shell. The oldest failure mode in the project, one more
+    # time, and the reason the panels travel with the verdict.
+    panels = list(ev.panels) if ev.panels else vase.build_panels(ev.plan, settings)
     # The control surfaces, as their own parts. The hinge line runs
     # spanwise and print Z is the span, so an elevon prints root-down in
     # exactly the same orientation as the wing panel it came off.

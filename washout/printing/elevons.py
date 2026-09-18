@@ -52,7 +52,9 @@ from dataclasses import replace
 
 import numpy as np
 
-from .vase import LayerStack, PrintSettings, arc_length_mm, thicken_for_nozzle
+from .bays import BaySpec, POINTS_PER_BAY, insert_detours
+from .vase import (LayerStack, PrintSettings, arc_length_mm, skin_drift_abs,
+                   solve_ramp_mm, thicken_for_nozzle)
 
 
 def hinge_x(settings: PrintSettings) -> float:
@@ -167,8 +169,13 @@ def nose_swing_mm(depth_mm: float, deflect_deg: float) -> float:
 
 def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
                  name: str, chamfer_deg: float,
-                 z_step_mm: float | None = None) -> LayerStack:
-    """One elevon panel, printed root-down like the wing it came off."""
+                 z_step_mm: float | None = None, sockets=()) -> LayerStack:
+    """One elevon panel, printed root-down like the wing it came off.
+
+    `sockets` are `BaySpec`s in this panel's own z: the horn's socket, a
+    pocket in the UPPER skin cut by the same detour machinery as a bay,
+    so the tongue is held in bearing by the skin and the glue only keeps
+    it there. It ramps in and out like everything else."""
     tip, root = plan.at(eta1), plan.at(eta0)
     dy = (eta1 - eta0) * plan.half_span_m
     dz = tip.z_le_m - root.z_le_m
@@ -180,7 +187,8 @@ def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
     z = z[z <= panel_len_mm + 1e-9]
     eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
 
-    n_pts = 2 * settings.contour_points
+    sockets = tuple(sockets)
+    n_pts = 2 * settings.contour_points + POINTS_PER_BAY * len(sockets)
     contours = np.empty((len(z), n_pts, 2))
     xh = hinge_x(settings)
     for k, e in enumerate(eta):
@@ -190,6 +198,10 @@ def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
                                   chord_mm, settings)
         loop = elevon_loop(loop, xh, chord_mm, settings.hinge_gap_mm,
                            chamfer_deg, settings.contour_points)
+        if sockets:
+            loop = insert_detours(loop, chord_mm, float(z[k]), sockets, None,
+                                  min_groove_mm=settings.extrusion_width_mm,
+                                  x_le_mm=st.x_le_m * 1000.0)
         p = loop - np.array([0.25, 0.0])
         a = np.radians(-st.twist_deg)
         ca, sa = np.cos(a), np.sin(a)
@@ -199,23 +211,85 @@ def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
             [st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
 
     flat = contours.reshape(-1, 2)
-    contours -= 0.5 * (flat.min(0) + flat.max(0))
+    origin = 0.5 * (flat.min(0) + flat.max(0))
+    contours -= origin
     return LayerStack(z_mm=z, eta=eta, contours=contours, settings=settings,
                       name=name, z_step_mm=step, has_ribs=False,
-                      role="elevon", n_upper=settings.contour_points)
+                      has_cuts=bool(sockets), bay_specs=sockets,
+                      origin_mm=(float(origin[0]), float(origin[1])),
+                      role="elevon",
+                      n_upper=settings.contour_points + POINTS_PER_BAY * len(sockets))
+
+
+SOCKET_RUN_CLEAR_MM = 0.15
+"""Fit clearance each side of the horn's tongue in the socket's
+full-depth run, so the socket is the tongue's thickness plus twice this
+along the span."""
+
+
+def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
+               x_abs_mm: float, length_mm: float, depth_mm: float,
+               tongue_t_mm: float, chamfer_deg: float, margin: float,
+               z_step_mm: float | None = None):
+    """The horn's socket as a `BaySpec` in the z of the elevon panel that
+    holds station `eta_h`. -> (panel index among the elevons, spec) or
+    (None, None) if no elevon holds that station or the socket cannot
+    ramp within the panel.
+
+    The ramps are measured on the BARE elevon at the socket's absolute
+    station, on the upper skin, with the same drift profile and the same
+    solve a bay gets. A socket whose ramp would run off the panel's end
+    is reported as unmakeable rather than cut short."""
+    if not has_elevon(settings):
+        return None, None
+    lim = np.tan(np.radians(settings.max_overhang_deg))
+    j = 0
+    for a, b in panel_etas:
+        if a < settings.elevon_eta - 1e-9:
+            continue
+        if a - 1e-9 <= eta_h <= b + 1e-9:
+            bare = build_elevon(plan, settings, a, b, "bare", chamfer_deg,
+                                z_step_mm=z_step_mm)
+            z_h = arc_length_mm(plan, a, eta_h)
+            run = tongue_t_mm + 2.0 * SOCKET_RUN_CLEAR_MM
+            zs, drift = skin_drift_abs(bare, x_abs_mm - 0.5 * length_mm,
+                                       x_abs_mm + 0.5 * length_mm, side="upper")
+            ramps = []
+            for sign in (+1.0, -1.0):
+                edge = z_h + sign * 0.5 * run
+                sel = (zs - edge) * sign > 0.0
+                d = np.abs(zs[sel] - edge)
+                order = np.argsort(d)
+                ramps.append(solve_ramp_mm(d[order], drift[sel][order],
+                                           depth_mm, lim, margin))
+            ramp_out, ramp_in = ramps
+            if not (np.isfinite(ramp_out) and np.isfinite(ramp_in)):
+                return j, None
+            spec = BaySpec("horn socket", 0.0, 0.0,
+                           z_h - 0.5 * run, z_h + 0.5 * run, ramp_out, depth_mm,
+                           settings.extrusion_width_mm, open_from="upper",
+                           ledge_mm=0.0, ramp_in_mm=ramp_in,
+                           length_mm=length_mm, x_abs_mm=x_abs_mm)
+            return j, spec
+        j += 1
+    return None, None
 
 
 def build_elevons(plan, settings: PrintSettings, panel_etas,
                   chamfer_deg: float,
-                  z_step_mm: float | None = None) -> list[LayerStack]:
+                  z_step_mm: float | None = None,
+                  sockets: dict | None = None) -> list[LayerStack]:
     """Every elevon part, split at the same joints as the wing panels.
 
     Sharing the wing's joint stations is not tidiness: each elevon panel
     then sits against exactly one wing panel, one hinge rod or one strip
     of tape serves both, and the parts cannot be assembled in the wrong
-    order."""
+    order.
+
+    `sockets` maps an elevon index to the `BaySpec`s cut into it."""
     if not has_elevon(settings):
         return []
+    sockets = sockets or {}
     out = []
     j = 0
     for a, b in panel_etas:
@@ -223,7 +297,8 @@ def build_elevons(plan, settings: PrintSettings, panel_etas,
             continue
         out.append(build_elevon(plan, settings, a, b,
                                 f"{plan.name}_elevon{j}", chamfer_deg,
-                                z_step_mm=z_step_mm))
+                                z_step_mm=z_step_mm,
+                                sockets=tuple(sockets.get(j, ()))))
         j += 1
     return out
 

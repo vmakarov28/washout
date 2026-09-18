@@ -32,6 +32,7 @@ from ..geom.planform import Planform, Segment, bwb, faired, lofted
 from ..geom import fairness as fz
 from ..geom import interior as it
 from ..printing import vase
+from ..printing import bays as bays_mod
 from ..printing import elevons as elv
 from ..aero import performance as perf
 from ..aero import lateral
@@ -110,6 +111,24 @@ class Bay:
     `[eta_lo, eta_hi]` along with its chordwise seat. A zero-width band
     means "not spanwise-solved", which keeps every existing bay exactly
     where it was."""
+    open_from: str = "upper"
+    """Which skin the opening is cut in.
+
+    Every bay in the fleet opens from the UPPER skin, and that is not a
+    styling choice. In vase mode an opening is a recess: exterior space,
+    sealed from the wing's interior and from every other recess by one
+    bead. A wire cannot pass from the receiver's pocket to a servo's
+    through the wing -- there is no through. It runs in a channel cut
+    into the surface, and a channel lives on one skin, so every pocket
+    it joins has to be on that skin too. The servo therefore sits in the
+    top of the wing with its arm up through the opening, the horn stands
+    on the elevon's upper surface, and the belly stays clean for the
+    landing and the CG mark. The lower skin is still a legal choice for
+    a bay that needs no wiring."""
+    lidded: bool = True
+    """Whether the opening gets a ledge and a printed lid. Payload does;
+    a servo pocket does not -- the servo's arm comes up through the
+    opening and the servo is taped in."""
     holds: tuple[str, ...] = ()
     """Payload item names that physically live inside this bay.
 
@@ -160,6 +179,32 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
     return bool(worst >= height), float(worst), float(height)
 
 
+def _box_outside_mm(plan, v, margin: float = bays_mod.BAND_MARGIN,
+                    n: int = 5) -> float:
+    """How far, in mm, a volume's band pokes out of the section anywhere
+    over its OWN span. 0.0 when the box is inside everywhere."""
+    worst = 0.0
+    for e in np.linspace(v.eta0, v.eta1, n):
+        st = plan.at(float(e))
+        c_mm = st.chord_m * 1000.0
+        x0, x1 = v.band(plan, float(e))
+        worst = max(worst, (margin - x0) * c_mm, (x1 - (1.0 - margin)) * c_mm)
+    return float(worst)
+
+
+def _band_leaves(plan, v, edge_eta: float, outboard: bool,
+                 margin: float = 0.02, n: int = 80) -> float:
+    """The station at which a volume's band would leave the section --
+    forward of `margin` chord or aft of 1 - margin -- walking away from
+    `edge_eta`. The tip or root if it never does."""
+    end = 1.0 if outboard else 0.0
+    for e in np.linspace(edge_eta, end, n):
+        x0, x1 = v.band(plan, float(e))
+        if x0 < margin or x1 > 1.0 - margin:
+            return float(e)
+    return end
+
+
 def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
               n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
     """Where every bay actually goes.
@@ -196,8 +241,18 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
     eta_seats: dict = {}
 
     def volume(bay, x, eta=None):
+        # A top-opening bay's box rests on a FLOOR that sits one box-depth
+        # below the upper skin, so the box occupies the TOP of the section
+        # and is anchored there. Anchoring every box to the lower skin --
+        # the first version -- reserved the bottom of the section for
+        # nothing, which is exactly where the spar seat solver wanted to
+        # put the TE spar under the pack; it pushed the tube out to 0.61c
+        # instead. A pocket that opens downward really does sit against
+        # the lower skin.
         return it.bay_volume(bay.name, x, bay.box_mm, plan,
                              offset_mm=wall_mm,
+                             anchor=(it.UPPER if bay.open_from == "upper"
+                                     else it.LOWER),
                              eta_frac=bay.eta_frac if eta is None else eta)
 
     for bay in mission.bays:
@@ -226,12 +281,31 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
                 # band to choose from and should not need telling twice.
                 first, last = it.straddles(vol, joint_etas)
                 split = 0.0 if last <= first else 20.0
+                # The BOX's own span must be inside the section: a rigid
+                # box at an absolute station on a swept body is overtaken
+                # by the leading edge some way outboard, and the opening
+                # may narrow while it closes, but not while the box is in
+                # it. Millimetres of box outside the section count as
+                # interference.
+                room = _box_outside_mm(plan, vol)
+                # And two openings side by side must leave a WALL between
+                # them, not a fin. The rendered root section showed the
+                # electronics bay seated 5 mm from the pack: a 5 mm wide,
+                # 30 mm tall, two-bead sliver of skin standing between two
+                # holes. Closer than a real wall counts as interference.
+                thin = 0.0
+                for other in placed:
+                    if other.eta1 < vol.eta0 or other.eta0 > vol.eta1:
+                        continue
+                    gap = it.gap_mm(vol, other, plan)
+                    if 0.0 <= gap < MIN_BAY_WALL_MM:
+                        thin += MIN_BAY_WALL_MM - gap
                 # Total millimetres of interference, then nearest the seat
                 # the mission declared. SUMMED, not ranked: a clash and a
                 # depth shortfall are both "millimetres of something that
                 # does not fit", and ranking clash above depth made the
                 # solver accept a 6 mm depth miss to dodge a 0.1 mm graze.
-                key = (clash + max(-spare, 0.0) + split,
+                key = (clash + max(-spare, 0.0) + split + thin + room,
                        abs(float(x) - bay.x_frac))
                 if best is None or key < best[0]:
                     best = (key, float(x), vol, e)
@@ -307,6 +381,12 @@ class Mission:
     servo_arm_mm: float = 11.0
     horn_below_mm: float = 8.0
     servo_travel_deg: float = 60.0
+    servo_shaft_offset_mm: float = 11.35
+    """How far the servo's output shaft sits from the middle of its body
+    along the span: half of a 9 g servo's 22.7 mm. The servo is mounted
+    with the shaft OUTBOARD, so the arm, the pushrod and the horn all
+    live at the pocket's centre plus this, and the linkage is solved
+    there."""
     """The mechanism, as declared hardware.
 
     A 9 g servo's outermost arm hole is about 11 mm from the shaft, a
@@ -440,17 +520,21 @@ class Mission:
                   Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0),
                       x_lo=0.12, x_hi=0.86,
                       holds=("AR630 rx", "esc + wiring")),
-                  # A 9 g servo (the 18 g declared for two), LYING FLAT:
+                  # A 9 g servo (the 18 g declared for two), ON ITS SIDE:
                   # 22.5 x 11.8 x 22.7 mm standing up will not go into an
                   # outer panel 17 mm deep, so the long axis runs chordwise
                   # and the 12 mm dimension is the one through the section.
-                  # Seated out in the wing near the surface it drives, and
-                  # both sides' mass is carried at the same x because the
-                  # aircraft is symmetric and only x enters the CG.
-                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                  # The 22.5 is the BODY; the mounting ears take the
+                  # chordwise length to 32, and a pocket cut to the body
+                  # alone is a pocket the servo does not go into without
+                  # trimming its ears off. Seated out in the wing near the
+                  # surface it drives, and both sides' mass is carried at
+                  # the same x because the aircraft is symmetric and only
+                  # x enters the CG.
+                  Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.68,
                       eta_lo=0.30, eta_hi=0.80,
-                      holds=("servos x2",))),
+                      lidded=False, holds=("servos x2",))),
             battery_kg=0.110,
             cruise_band_ms=(7.0, 11.0),
             min_static_margin=0.15, max_static_margin=0.32,
@@ -505,10 +589,10 @@ class Mission:
                   Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0),
                       x_lo=0.14, x_hi=0.86,
                       holds=("AR630 rx", "esc + wiring")),
-                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                  Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.25, eta_hi=0.75,
-                      holds=("servos x2",))),
+                      lidded=False, holds=("servos x2",))),
             battery_kg=0.105,
             # This band is the HANDS-OFF trim window, not the top end:
             # top speed is the objective and is scored separately with
@@ -555,14 +639,15 @@ class Mission:
                   Bay("AR630", 0.44, (30.0, 20.0, 12.0),
                       x_lo=0.14, x_hi=0.88,
                       holds=("AR630 rx", "esc + wiring")),
-                  # 5 g sub-micro, flat: 20 x 8.6 x 20 mm becomes
-                  # 20 chordwise x 20 spanwise x 9 through the section.
-                  Bay("servos", 0.55, (20.0, 20.0, 9.0),
+                  # 5 g sub-micro, on its side: 20 x 8.6 x 20 mm becomes
+                  # 20 chordwise x 20 spanwise x 9 through the section,
+                  # and its ears take the chordwise length to 24.
+                  Bay("servos", 0.55, (24.0, 20.0, 9.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.30, eta_hi=0.80,
-                      holds=("servos x2",))),
+                      lidded=False, holds=("servos x2",))),
             # sub-micro hardware to match the sub-micro servos
-            servo_arm_mm=7.0, horn_below_mm=5.0,
+            servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
             battery_kg=0.028,
             cruise_band_ms=(8.0, 17.0),
             min_static_margin=0.10, max_static_margin=0.26,
@@ -730,6 +815,25 @@ SECTION_BOUNDS = (
     Bound("fin_below", 0.0, 0.4, ""),
 )
 BATTERY_NAME = "battery"
+RAMP_MARGIN = 0.85
+"""Fraction of the measured overhang budget a bay's ramp may use.
+
+MEASURED, in the style `build_stack` measures the rib truss's factor. The
+budget is taken on the bare skin, but a cut's corners sit off that skin
+and, rotated by twist and judged against the nearest previous-layer
+vertex, move up to 7% faster between layers than the skin at the same
+station -- on the trainer's servo pocket 1.048 mm/mm was allowed and
+0.977 was available, 51.3 degrees against a 50 degree limit, on both
+sides of the p0/p1 joint. 0.85 keeps every measured case under the limit
+with margin; a larger factor is a longer ramp, which is the right way to
+be wrong."""
+MIN_BAY_WALL_MM = 10.0
+"""Narrowest wall two openings may leave between them.
+
+A declared print-process minimum, in the same category as the overhang
+limit: a two-bead skin 5 mm wide and 30 mm tall between two holes is a
+fin, and one that is 10 mm wide is a wall. Not derived -- there is no
+buckling model for a free-standing sliver here -- and stated as such."""
 
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
@@ -1051,10 +1155,32 @@ def _evaluate_once(
     # while the printed floor sat on top of it, and the bore gate --
     # which measures the contour rather than the reservation -- was the
     # one that noticed. Two places disagreeing about the same opening.
+    open_side = {b.name: b.open_from for b in mission.bays}
+    root_c_mm = plan.stations[0].chord_m * 1000.0
+
+    def cut_length(v):
+        """The opening is the box plus a bead each side plus the fit."""
+        return v.length_mm + 2.0 * wall + bays_mod.FIT_MM
+
+    def ledge(bay):
+        return settings.lid_mm if (bay.lidded and bay.open_from == "upper") else 0.0
+
+    def cut_depth(bay):
+        """Box, a bead of floor, and the lid's thickness over a lidded
+        bay -- the lid rests on a ledge that deep, so the box has to
+        stop below it."""
+        return bay.box_mm[2] + wall + ledge(bay)
+
     cut_vols = tuple(
-        it.Volume(f"{v.name} opening", v.x0, v.x1, v.eta0, v.eta1,
-                  height_mm=v.height_mm + 2.0 * wall, anchor=it.UPPER,
-                  offset_mm=0.0)
+        it.Volume(f"{v.name} opening",
+                  v.x_mid - 0.5 * cut_length(v) / root_c_mm,
+                  v.x_mid + 0.5 * cut_length(v) / root_c_mm,
+                  v.eta0, v.eta1,
+                  height_mm=v.height_mm + 2.0 * wall,
+                  anchor=(it.LOWER if open_side.get(v.name) == "lower"
+                          else it.UPPER),
+                  offset_mm=0.0, length_mm=cut_length(v),
+                  x_abs_mm=v.x_abs_mm)
         for v in bay_vols)
 
     spar_fits = []
@@ -1078,17 +1204,129 @@ def _evaluate_once(
     # cut counts the ramp's own dive and climb walls as the wing's motion,
     # comes back zero, and reports that a 24 mm bay needs an infinite span
     # to close. Which is what the first version of this did.
-    bare = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
+    # Bare AND rib-free: the budget is about the skin's own motion, and a
+    # rib slit's two floor vertices, read as part of the skin, put a 35 mm
+    # step into the interpolated surface wherever the slit swept across
+    # a sample station -- which zeroed the trainer's centre-body budget.
+    bare = vase.build_panels(plan, replace(settings, ribs=False),
+                             z_step_mm=z_step_mm)
     bare_by_eta = tuple(zip(joint_etas, bare))
     bay_ramp: dict = {}
+    bay_ramp_in: dict = {}
+    bay_dead_out: dict = {}
+    bay_dead_in: dict = {}
     for bay in mission.bays:
         v = next(x for x in bay_vols if x.name == bay.name)
-        pan = next((pn for (a, b), pn in bare_by_eta
-                    if a <= v.eta1 <= b + 1e-9), None)
-        depth = bay.box_mm[2] + wall
-        bay_ramp[bay.name] = (
-            vase.ramp_span_mm(pan, depth, v.x0, v.x1) if pan is not None
-            else float("inf"))
+        # The floor's TRAVEL, not the box's depth. The closed groove hugs
+        # the skin, so at any x the floor moves from (skin - groove) down
+        # to the flat open floor, which sits box-deep below the band's
+        # LOWEST skin point: the corner under the crown of the section
+        # travels the box depth plus the skin's rise above that low
+        # point. Sized from the box alone, the ramp let that corner move
+        # faster than the overhang budget and the trainer's centre body
+        # failed max overhang the moment the groove learned to hug.
+        st_b = plan.at(0.5 * (v.eta0 + v.eta1))
+        xs_b = np.linspace(*v.band(plan, 0.5 * (v.eta0 + v.eta1)), 25)
+        skin = (st_b.airfoil.y_upper(xs_b) if bay.open_from == "upper"
+                else -st_b.airfoil.y_lower(xs_b)) * st_b.chord_m * 1000.0
+        rise = float(skin.max() - skin.min())
+        depth = cut_depth(bay) + rise
+        # The ramp may run on past a print joint -- what must not straddle
+        # one is the BOX, which is gated separately -- so the rate it can
+        # use is the TIGHTEST budget over every panel it crosses, not the
+        # budget of the panel that happens to hold the box. Solved by
+        # walking outboard: each panel's budget says how much depth it can
+        # close, and the ramp keeps going until the depth is spent.
+        def walk(panels_in_order, edge_eta, outboard):
+            """Span the ramp needs, crossing panels away from `edge_eta`.
+
+            Each panel's budget says how much depth it can fade; the
+            ramp keeps going until the depth is spent. Outboard for the
+            ramp-out from eta1; INBOARD for the ramp-in from eta0 -- the
+            two cross different panels and must be budgeted where they
+            live. Sizing the ramp-in from the outboard walk let the
+            trainer's servo pocket open at 1.04 mm/mm through a panel
+            whose budget there was 0.98."""
+            # ONE slope for the whole ramp, at the tightest budget it
+            # crosses. The profile `depth_frac` applies is linear, so a
+            # ramp walked piecewise -- each panel fading at its own rate,
+            # the lengths summed -- ends up with a slope that is the
+            # weighted AVERAGE of those rates, which overruns the tighter
+            # panel: the trainer's servo pocket opened at 1.04 mm/mm
+            # through a panel budgeted at 0.98, after three fixes that
+            # each made the walk more careful and none of which touched
+            # this. Slightly longer ramps, never over budget.
+            # A panel with NO budget cannot be faded through at all: the
+            # wing alone already spends the whole overhang there. The bay
+            # stays fully open across it and the ramp begins in the next
+            # panel that has room -- micro's centre body is exactly this,
+            # and fading through it anyway was its p0 overhang failure.
+            # The dead span is returned so the full-depth run is extended
+            # over it.
+            # The skin's drift at the cut's ABSOLUTE station, gathered
+            # along the span away from the bay's edge across every panel
+            # it may cross, and the ramp solved against that profile:
+            # the shortest L whose one linear rate, (limit - worst drift
+            # within L) * margin, fades the depth in L. A panel-wide
+            # worst case said the trainer's pack could never close,
+            # because its band runs into the nose 100 mm out while the
+            # ramp is over by 55.
+            #
+            # And the ramp has to finish while the band is still INSIDE
+            # the section: a root bay at an absolute station passes
+            # ahead of the local leading edge somewhere outboard on a
+            # swept body, and a ramp still fading there is a detour with
+            # nowhere to be. Samples beyond that station are dropped.
+            #
+            # Where the drift already exceeds the limit -- micro's centre
+            # body -- no ramp can live, so the bay stays fully open
+            # across that DEAD span and the ramp begins where it can.
+            half = 0.5 * cut_length(v)
+            dist, rate, valid = [], [], []
+            for (a, b), pn in panels_in_order:
+                if outboard and b <= edge_eta:
+                    continue
+                if not outboard and a >= edge_eta:
+                    continue
+                zs, rt, ok = vase.cut_budget_profile(
+                    pn, v.x_abs_mm - half, v.x_abs_mm + half,
+                    side=bay.open_from, margin_frac=bays_mod.BAND_MARGIN)
+                if len(zs) == 0:
+                    continue
+                e_of = a + zs / max(pn.height_mm, 1e-9) * (b - a)
+                for e, r, o in zip(e_of, rt, ok):
+                    if outboard and e < edge_eta:
+                        continue
+                    if not outboard and e > edge_eta:
+                        continue
+                    dist.append(vase.arc_length_mm(plan, min(e, edge_eta),
+                                                   max(e, edge_eta), n=40))
+                    rate.append(r)
+                    valid.append(o)
+            if not dist:
+                return float("inf"), 0.0
+            order = np.argsort(dist)
+            dist = np.array(dist)[order]
+            rate = np.array(rate)[order]
+            valid = np.array(valid)[order]
+            # the profile ends where the band leaves the section
+            bad = np.where(~valid)[0]
+            if len(bad):
+                dist, rate = dist[:bad[0]], rate[:bad[0]]
+            live = np.where(rate > 0.0)[0]
+            if len(live) == 0:
+                return float("inf"), 0.0
+            dead = float(dist[live[0]]) if live[0] > 0 else 0.0
+            dist, rate = dist[live[0]:] - dead, rate[live[0]:]
+            return vase.solve_ramp_from_rates(dist, rate, depth, RAMP_MARGIN), dead
+
+        bay_ramp[bay.name], bay_dead_out[bay.name] = walk(
+            bare_by_eta, v.eta1, outboard=True)
+        if v.eta0 > 1e-9:
+            bay_ramp_in[bay.name], bay_dead_in[bay.name] = walk(
+                list(reversed(bare_by_eta)), v.eta0, outboard=False)
+        else:
+            bay_ramp_in[bay.name], bay_dead_in[bay.name] = 0.0, 0.0
 
     # Only bays that FIT and are CLEAR of each other are cut. Two bays
     # that overlap in chord would put two floors within a fraction of a
@@ -1098,9 +1336,50 @@ def _evaluate_once(
     # geometry must not also become invalid because of it.
     clashing = {n for a, b, _ in it.clashes(bay_vols, plan, wall)
                 for n in (a, b)}
+    # ... nor may two openings coexist on a layer in the same chord: a
+    # skin cannot carry two detours in one band. The box volumes are
+    # kept apart above; the CUTS reach further, by their ramps, so a
+    # pocket out in the wing can meet a root bay's tail. The later one
+    # in declaration order gives way, and the design pays for it.
+    for a_bay, b_bay in ((x, y) for i, x in enumerate(mission.bays)
+                         for y in mission.bays[i + 1:]):
+        if a_bay.open_from != b_bay.open_from:
+            continue
+        va = next(x for x in bay_vols if x.name == a_bay.name)
+        vb = next(x for x in bay_vols if x.name == b_bay.name)
+        za = (vase.arc_length_mm(plan, 0.0, va.eta0) - bay_ramp_in[a_bay.name]
+              - bay_dead_in[a_bay.name],
+              vase.arc_length_mm(plan, 0.0, va.eta1) + bay_ramp[a_bay.name]
+              + bay_dead_out[a_bay.name])
+        zb = (vase.arc_length_mm(plan, 0.0, vb.eta0) - bay_ramp_in[b_bay.name]
+              - bay_dead_in[b_bay.name],
+              vase.arc_length_mm(plan, 0.0, vb.eta1) + bay_ramp[b_bay.name]
+              + bay_dead_out[b_bay.name])
+        if not (np.isfinite(za[1]) and np.isfinite(zb[1])):
+            continue
+        lo, hi = max(za[0], zb[0]), min(za[1], zb[1])
+        if hi <= lo:
+            continue
+        # chord gap at the shared span, both cuts at full width
+        e_mid = float(np.interp(0.5 * (lo + hi),
+                                [0.0, vase.arc_length_mm(plan, 0.0, 1.0)],
+                                [0.0, 1.0]))
+        ca = it.Volume("a", va.x0, va.x1, e_mid, e_mid, 1.0,
+                       length_mm=cut_length(va), x_abs_mm=va.x_abs_mm)
+        cb = it.Volume("b", vb.x0, vb.x1, e_mid, e_mid, 1.0,
+                       length_mm=cut_length(vb), x_abs_mm=vb.x_abs_mm)
+        gap = it.gap_mm(ca, cb, plan)
+        if gap < 1.5:
+            reasons.append(f"{b_bay.name} opening meets {a_bay.name}'s over "
+                           f"{hi - lo:.0f} mm of span ({gap:.1f} mm apart)")
+            penalty += 10.0 + max(1.5 - gap, 0.0)
+            clashing.add(b_bay.name)
     cut_list = tuple(
-        (bay.name, v.x0, v.x1, v.eta1, bay.box_mm[2] + wall,
-         bay_ramp[bay.name])
+        vase.BayCut(bay.name, v.x0, v.x1, v.eta0, v.eta1, cut_depth(bay),
+                    bay_ramp[bay.name], bay_ramp_in[bay.name], bay.open_from,
+                    ledge(bay),
+                    bay_dead_out[bay.name], bay_dead_in[bay.name],
+                    length_mm=cut_length(v), x_abs_mm=v.x_abs_mm)
         for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
                        for b in mission.bays)
         if v.fits(plan, wall)[0] and bay.name not in clashing)
@@ -1125,9 +1404,14 @@ def _evaluate_once(
     # "AR630 + esc" bay was declared at 0.42c while the two masses it
     # contains were declared at 0.34c and 0.50c -- three stations for two
     # objects in one box, and the CG was computed from the wrong two.
+    # ... and it sits at the bay's ABSOLUTE station. A servo's seat is a
+    # fraction of the chord at its own eta, which is what the linkage
+    # wants; read as a root-chord fraction it put 18 g of servos 30 mm
+    # aft of where they are on the trainer.
     in_bay = {n: bay.name for bay in mission.bays for n in bay.holds}
+    bay_x_abs = {v.name: v.x_abs_mm / (root_c * 1000.0) for v in bay_vols}
     items = tuple(
-        replace(i, x_frac=bay_seats[in_bay[i.name]]).at(root_c)
+        replace(i, x_frac=bay_x_abs[in_bay[i.name]]).at(root_c)
         if i.name in in_bay else i.at(root_c)
         for i in mission.payload)
     items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
@@ -1183,18 +1467,29 @@ def _evaluate_once(
         # for a single closure at its outboard end.
         if 0 <= first < len(panels):
             need = bay_ramp.get(bay.name, float("inf"))
-            # What is LEFT of the panel outboard of the bay, as arc length
-            # along the span -- the same quantity print height is measured
-            # in, because dihedral makes a panel taller than its projected
-            # span and the ramp is built in printed layers.
-            have = vase.arc_length_mm(plan, min(vol.eta1, joint_etas[first][1]),
-                                      joint_etas[first][1])
+            need_in = bay_ramp_in.get(bay.name, 0.0)
+            if not np.isfinite(need_in):
+                reasons.append(
+                    f"{bay.name} cannot be opened: no span inboard of it "
+                    f"fades {bay.box_mm[2]:.0f} mm within the overhang limit")
+                penalty += 15.0
+            # Everything outboard of the bay, as arc length along the span
+            # -- the same quantity print height is measured in, because
+            # dihedral makes a panel taller than its projected span and
+            # the ramp is built in printed layers. The whole remaining
+            # half-span, not just the rest of one panel: the ramp is
+            # allowed to cross joints, and the per-panel budgets are
+            # already accounted for in `need`.
+            have = vase.arc_length_mm(plan, vol.eta1, 1.0)
             if need > have:
                 reasons.append(
-                    f"{bay.name} cannot be closed: needs {need:.0f} mm of "
-                    f"span to ramp {bay.box_mm[2]:.0f} mm deep, has "
-                    f"{have:.0f} mm left in p{first}")
-                penalty += 15.0 * min((need - have) / max(need, 1e-6), 1.0)
+                    f"{bay.name} cannot be closed: needs "
+                    f"{'inf' if not np.isfinite(need) else f'{need:.0f}'} mm "
+                    f"of span to ramp {bay.box_mm[2]:.0f} mm deep, has "
+                    f"{have:.0f} mm of span outboard of it")
+                # inf / inf is NaN, and a NaN score ranks nowhere
+                penalty += 15.0 * (1.0 if not np.isfinite(need)
+                                   else min((need - have) / need, 1.0))
 
     for a_name, b_name, mm in it.clashes(
             bay_vols + [it.spar_volume(f, wall, plan) for f in spar_fits],
@@ -1241,7 +1536,12 @@ def _evaluate_once(
     # happened. A design 0.5 m/s outside the cruise band must rank above
     # one 8 m/s outside it, or the optimizer sees a flat cliff instead of
     # a slope and never finds its way back into the feasible set.
-    penalty = 0.0
+    #
+    # `penalty` is NOT reset here. It was, for the whole life of the
+    # interior gates: every millimetre of clash, depth shortfall, joint
+    # straddle and closure failure priced above this line was thrown
+    # away before the score, so a 1 mm graze and a 12 mm tube through the
+    # pack scored the same -- exactly the cliff this comment warns about.
 
     def band(value: float, lo: float, hi: float, scale: float) -> float:
         return max(lo - value, 0.0, value - hi) / scale
@@ -1390,21 +1690,25 @@ def _evaluate_once(
     # show the differential a real linkage has.
     link = None
     if elv.has_elevon(settings) and "servos" in bay_seats:
+        servo_bay = next(b for b in mission.bays if b.name == "servos")
         link = lkg.for_station(
             plan, bay_etas.get("servos") or 0.5 * (e_start + 1.0),
             elv.hinge_x(settings), bay_seats["servos"],
             mission.servo_arm_mm, mission.horn_below_mm,
-            mission.servo_travel_deg, wall)
-        thr_down, thr_up, locked = lkg.sweep(link)
+            mission.servo_travel_deg, wall,
+            side=+1.0 if servo_bay.open_from == "upper" else -1.0)
+        # A lock inside the servo's travel is geometry, not a fault, so
+        # long as it comes well AFTER the deflection the score spends: a
+        # 17 mm horn on an 11 mm arm always locks before 54 degrees of
+        # servo, and the transmitter's endpoints are what stop the servo
+        # short of it. A lock BEFORE the wanted deflection is the fault.
         want = mission.max_elevon_deflect_deg
-        got = min(thr_down, -thr_up)
-        if locked:
-            reasons.append("linkage locks inside the servo's travel")
-            penalty += 30.0
-        if got < want:
-            reasons.append(f"linkage reaches {thr_down:+.1f}/{thr_up:+.1f} deg, "
-                           f"the score spends +/-{want:.0f}")
-            penalty += 8.0 * (want - got)
+        ok_link, why = lkg.delivers(link, want)
+        if not ok_link:
+            thr_down, thr_up, _ = lkg.sweep(link)
+            got = min(thr_down, -thr_up)
+            reasons.append(why)
+            penalty += 8.0 * max(want - got, 1.0)
 
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:

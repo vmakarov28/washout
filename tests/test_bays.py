@@ -101,9 +101,9 @@ def test_the_floor_clears_the_lower_skin_beyond_the_band_too():
     _, _, _, plan = _plan("trainer_v3")
     s = vase.PrintSettings()
     loop, c = _loop(plan, 0.02, s)
-    spec = bays.BaySpec("b", 0.291, 0.586, span_mm=20.0, ramp_mm=30.0,
-                        depth_mm=33.0, floor_gap_mm=WALL)
-    got = bays.insert_bay(loop, c, 0.0, spec, WALL) * c
+    spec = bays.BaySpec("b", 0.291, 0.586, 0.0, span_mm=20.0, ramp_mm=30.0,
+                        depth_mm=33.0, gap_mm=WALL)
+    got = bays.insert_bays(loop, c, 0.0, [spec], WALL) * c
     assert min_clearance_mm(got, skip=8) >= WALL, (
         f"{min_clearance_mm(got, skip=8):.3f} mm is under one bead")
 
@@ -118,10 +118,10 @@ def test_the_point_count_is_constant_even_where_the_bay_cannot_be_cut():
     _, _, _, plan = _plan("micro")
     s = vase.PrintSettings()
     loop, c = _loop(plan, 0.02, s)
-    roomy = bays.BaySpec("ok", 0.30, 0.50, 20.0, 30.0, 8.0, WALL)
-    absurd = bays.BaySpec("no", 0.90, 0.99, 20.0, 30.0, 500.0, WALL)
-    a = bays.insert_bay(loop, c, 0.0, roomy, WALL)
-    b = bays.insert_bay(loop, c, 0.0, absurd, WALL)
+    roomy = bays.BaySpec("ok", 0.30, 0.50, 0.0, 20.0, 30.0, 8.0, WALL)
+    absurd = bays.BaySpec("no", 0.90, 0.99, 0.0, 20.0, 30.0, 500.0, WALL)
+    a = bays.insert_bays(loop, c, 0.0, [roomy], WALL)
+    b = bays.insert_bays(loop, c, 0.0, [absurd], WALL)
     assert len(a) == len(b) == len(loop) + bays.POINTS_PER_BAY
 
 
@@ -132,8 +132,8 @@ def test_the_depth_clamps_rather_than_refusing():
     _, _, _, plan = _plan("micro")
     s = vase.PrintSettings()
     loop, c = _loop(plan, 0.5, s)
-    deep = bays.BaySpec("deep", 0.30, 0.50, 20.0, 30.0, 500.0, WALL)
-    got = bays.insert_bay(loop, c, 0.0, deep, WALL) * c
+    deep = bays.BaySpec("deep", 0.30, 0.50, 0.0, 20.0, 30.0, 500.0, WALL)
+    got = bays.insert_bays(loop, c, 0.0, [deep], WALL) * c
     assert min_clearance_mm(got, skip=8) >= WALL
 
 
@@ -141,8 +141,8 @@ def test_the_bay_ramps_closed_and_leaves_a_groove():
     """Where the bay has closed the detour does not vanish -- it becomes a
     one-bead groove, which keeps the point count constant without
     coincident vertices and scribes the hatch rim on the part."""
-    spec = bays.BaySpec("b", 0.30, 0.55, span_mm=20.0, ramp_mm=25.0,
-                        depth_mm=20.0, floor_gap_mm=WALL)
+    spec = bays.BaySpec("b", 0.30, 0.55, 0.0, span_mm=20.0, ramp_mm=25.0,
+                        depth_mm=20.0, gap_mm=WALL)
     assert spec.depth_frac(0.0) == 1.0
     assert spec.depth_frac(20.0) == 1.0
     assert spec.depth_frac(32.5) == pytest.approx(0.5)
@@ -191,7 +191,8 @@ def test_the_ramp_budget_is_measured_on_a_bare_panel():
     rate_bare = vase.ramp_budget(bare, 0.29, 0.59)
     assert rate_bare > 0.0, "a bare panel must have some budget left"
     cut = vase.build_panels(
-        plan, s, bays=(("b", 0.29, 0.59, 0.039, 24.0, 30.0),))[0]
+        plan, s, bays=(("b", 0.29, 0.59, 0.0, 0.039, 24.0, 30.0, 0.0,
+                        "upper", 1.35, 0.0, 0.0),))[0]
     assert vase.ramp_budget(cut, 0.29, 0.59) < rate_bare, (
         "the cut must consume budget -- that is why it cannot measure it")
 
@@ -291,3 +292,83 @@ def test_the_rib_layout_does_not_change_between_layers():
         assert len(xs) == len(bases), f"rib count changed at z={z}"
     # and a layout solved for one chord is not silently resolved for another
     assert spec.stations(0.0, 200.0).size == spec.stations(0.0, 150.0).size
+
+
+# ------------------------------------------------- a box is millimetres
+
+def _openings_mm(contour, min_depth_mm=3.0):
+    """(x_left, x_right, depth) of every recess wider than 3 mm in one
+    printed contour, found from its walls: a wall is a segment that drops
+    or climbs more than `min_depth_mm` while barely moving in x, and a
+    recess is a dropping wall followed by a climbing one. The width is
+    taken between the FLOOR ends of the two walls, which sit exactly at
+    the cut's x0 and x1."""
+    d = np.diff(contour, axis=0)
+    walls = np.where((np.abs(d[:, 1]) > min_depth_mm) & (np.abs(d[:, 0]) < 1.5))[0]
+    out = []
+    i = 0
+    while i < len(walls) - 1:
+        a, b = walls[i], walls[i + 1]
+        if np.sign(d[a, 1]) != np.sign(d[b, 1]):
+            # floor ends: the far end of the first wall, the near end of
+            # the second
+            xa, xb = contour[a + 1, 0], contour[b, 0]
+            if abs(xb - xa) > 3.0:
+                out.append((min(xa, xb), max(xa, xb), abs(d[a, 1])))
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def test_a_pocket_out_in_the_wing_is_as_wide_as_its_box():
+    """A box is millimetres, not a chord fraction.
+
+    The bay's band was a root-chord fraction, applied at every layer's
+    LOCAL chord. At the root the two agree; at the trainer's servo
+    station the chord is half the root's, so the pocket came out 17.8 mm
+    wide for a 23 mm servo and narrowed to 15.5 mm across its own span as
+    the chord tapered. The reservation gates never saw it because they
+    asked about depth, and depth was fine. The pocket is now cut to the
+    box plus two beads plus the declared fit clearance, at every layer."""
+    from washout.printing.bays import FIT_MM
+
+    ev, mission = _built("trainer_v3")
+    servo = next(b for b in mission.bays if b.name == "servos")
+    want = servo.box_mm[0] + 2 * WALL + FIT_MM
+    seen = 0
+    for pan in ev.panels:
+        for k in range(len(pan.contours)):
+            for x0, x1, depth in _openings_mm(pan.contours[k]):
+                # the servo pocket at full depth: box + bead of floor
+                if depth < servo.box_mm[2] + WALL - 0.5:
+                    continue
+                if abs(x1 - x0) > 60.0:
+                    continue                   # a root bay, not the pocket
+                seen += 1
+                assert abs((x1 - x0) - want) < 0.4, (
+                    f"{pan.name} z={pan.z_mm[k]:.0f}: pocket {x1 - x0:.1f} mm "
+                    f"wide for a {servo.box_mm[0]:.0f} mm servo (want {want:.1f})")
+    assert seen >= 3, "the servo pocket must be fully open on several layers"
+
+
+def test_a_cut_panel_without_ribs_measures_clearance_generally():
+    """The plain-section clearance test pairs upper[i] with lower[i] by
+    index. A cut inserts six vertices into ONE skin, so from the cut aft
+    every pairing is off by six and the gate measures a vertex against
+    the wrong mirror point. The search's first pass -- bare shell, bays
+    cut, no ribs yet -- was being judged exactly that way. Cut or ribbed,
+    the gate takes the general vertex-to-segment path."""
+    _, mission, _, plan = _plan("trainer_v3")
+    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0)
+    pan = vase.build_panels(
+        plan, s, bays=(vase.BayCut("b", 0.29, 0.59, 0.0, 0.039, 24.0, 30.0,
+                                   0.0, "upper", 0.9, 0.0, 0.0),))[0]
+    assert pan.has_cuts and not pan.has_ribs
+    chk = vase.check(pan)
+    g = next(x for x in chk.gates if x.name == "min wall separation")
+    step = max(len(pan.contours) // 40, 1)
+    general = min(min_clearance_mm(c, skip=8) for c in pan.contours[::step])
+    assert abs(g.value - general) < 1e-9, (
+        f"gate measured {g.value:.3f} mm, the general test says {general:.3f}")
+    assert "cut" in g.detail

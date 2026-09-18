@@ -33,7 +33,8 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 from ..geom.planform import Planform
-from .bays import BaySpec, bay_point_budget, insert_detours
+from .bays import (BaySpec, bay_point_budget, insert_detours,
+                   clamp_band as _bay_clamp_band)
 from .ribs import (POINTS_PER_RIB, RibSpec, insert_ribs,
                    min_clearance_mm, ribs_that_fit)
 
@@ -319,35 +320,53 @@ def thicken_for_nozzle(
     return np.concatenate([up[::-1], lo[1:]], 0)
 
 
-def _present_etas(cut: BaySpec, z: np.ndarray, eta: np.ndarray, n: int = 9):
-    """The stations at which this cut exists on a panel, thinned to n."""
-    sel = np.array([cut.present(float(zk)) for zk in z])
-    if not sel.any():
-        return []
-    e = eta[sel]
-    return [float(v) for v in e[np.linspace(0, len(e) - 1, min(n, len(e))).astype(int)]]
-
-
-def _avoid_band(cut: BaySpec, plan: Planform, etas) -> tuple[float, float]:
+def _avoid_band(cut: BaySpec, z: np.ndarray, chord_mm: np.ndarray,
+                x_le_mm: np.ndarray, layout_chord_mm: float,
+                pad_mm: float) -> tuple[float, float] | None:
     """(centre chord fraction, half-width mm) of a cut, for the ribs.
 
-    The ENVELOPE of the cut's band over every station where the cut is
-    present, in the local chord, because the rib layout is solved once
-    per panel while a cut at an absolute station slides across the chord
-    fractions as the wing sweeps under it: on the trainer's centre body
-    the pack's band runs from 0.29c-0.59c at the root to 0.15c-0.48c
-    where its ramp ends, and a rib clear of the band at the panel's mid
-    station sat inside it at the root. The half-width gets a bead so a
-    rib's slit never lands on the cut's wall."""
-    lo, hi, c_mid = np.inf, -np.inf, 0.0
-    etas = list(etas) or [0.0]
-    for eta in etas:
-        st = plan.at(float(eta))
-        c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
-        x0, x1 = cut.band(c_mm, x_le)
-        lo, hi = min(lo, x0), max(hi, x1)
-    c_mid = plan.at(float(np.median(etas))).chord_m * 1000.0
-    return (0.5 * (lo + hi), 0.5 * (hi - lo) * c_mid + 0.5)
+    The ENVELOPE of the cut's band over the layers this panel will
+    actually BUILD, in each layer's own chord, because the rib layout is
+    solved once per panel while a cut at an absolute station slides
+    across the chord fractions as the wing sweeps under it: on the
+    trainer's centre body the pack's band runs from 0.29c-0.59c at the
+    root to 0.15c-0.48c where its ramp ends, and a rib clear of the band
+    at the panel's mid station sat inside it at the root.
+
+    Over the layers BUILT, and every one of them, which makes the
+    envelope exact rather than an estimate. Sampling nine stations of a
+    thousand left the trainer's servo cut reaching 0.7175c while the
+    envelope said 0.7089c, and `with_layout` duly placed a rib at 0.7117c
+    -- in the sliver between the estimate's edge and the rib band's aft
+    limit, and inside the real opening. `rebuild_skin` then refused the
+    layer, which is a crash in the geometry rather than a gate with a
+    number. A detour is only ever cut at one of these z values, so an
+    envelope taken over exactly them cannot be exceeded by anything that
+    prints.
+
+    Over the layers where the bay is OPEN or still scribing its groove,
+    which is where its walls are geometry that may not move. A bay keeps
+    its six vertices for the whole panel, but once it has closed they lie
+    on the skin and `pack_detours` is free to park them in whatever chord
+    the openings and the truss have left. Excluding the closed run as
+    well cost the trainer's centre body its entire rib truss -- the two
+    bays and two spar corridors between them covered all of 0.20c to
+    0.72c -- and the buckling pitch the structure had sized was then
+    silently not delivered.
+
+    `pad_mm` is the clearance a rib's slit keeps from the opening's wall.
+    Returns None when the bay is open nowhere on this panel.
+    """
+    lo, hi = np.inf, -np.inf
+    for k in range(len(z)):
+        zk = float(z[k])
+        if cut.depth_frac(zk) <= 0.0 and cut.groove_frac(zk) <= 0.0:
+            continue                     # closed: its vertices may move
+        band = cut.band(float(chord_mm[k]), float(x_le_mm[k]))
+        lo, hi = min(lo, band[0]), max(hi, band[1])
+    if not np.isfinite(lo):
+        return None
+    return (0.5 * (lo + hi), 0.5 * (hi - lo) * layout_chord_mm + pad_mm)
 
 
 def build_stack(
@@ -384,6 +403,13 @@ def build_stack(
     z = z[z <= panel_len_mm + 1e-9]
     eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
 
+    # Every layer's station, once: the exclusion envelopes below and the
+    # contour loop beneath both want them, and `plan.at` is the expensive
+    # call in this function.
+    stations = [plan.at(float(e)) for e in eta]
+    chord_of = np.array([s_.chord_m * 1000.0 for s_ in stations])
+    x_le_of = np.array([s_.x_le_m * 1000.0 for s_ in stations])
+    layout_chord = plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
@@ -396,8 +422,13 @@ def build_stack(
                            # for the whole panel rather than only where
                            # the bay is open, because the rib count per
                            # layer has to stay constant.
-                           _avoid_band(c, plan, _present_etas(c, z, eta))
-                           for c in bay_cuts))
+                           band for band in (
+                               _avoid_band(c, z, chord_of, x_le_of,
+                                           layout_chord,
+                                           settings.extrusion_width_mm
+                                           * settings.rib_clearance_factor)
+                               for c in bay_cuts)
+                           if band is not None))
     if truncated:
         # The loop now spans [0, x_hinge], so the truss has to fit the box
         # that exists. Scaled rather than clipped: the ribs keep the same
@@ -452,9 +483,8 @@ def build_stack(
     n_pts = 2 * settings.contour_points - 1 + (
         POINTS_PER_RIB * n_rib_eff) + bay_point_budget(len(cuts))
     contours = np.empty((len(z), n_pts, 2))
-    for k, e in enumerate(eta):
-        st = plan.at(float(e))
-        chord_mm = st.chord_m * 1000.0
+    for k, st in enumerate(stations):
+        chord_mm = float(chord_of[k])
         loop = st.airfoil.coords(settings.contour_points)
         loop = thicken_for_nozzle(loop, chord_mm, settings)
         if truncated:
@@ -713,9 +743,11 @@ def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
     """Depth a cut may fade per mm of Z, station by station, with the
     band CLIPPED to the section as `BaySpec.band` clips it.
 
-    -> (z_mm, rate, valid). `valid` is False where nothing of the band is
-    inside the section, so no cut can exist; `rate` is 0 where the wing
-    alone spends the whole budget. Inside the band the cost is the
+    -> (z_mm, rate, valid, rise). `valid` is False where nothing of the
+    band is inside the section, so no cut can exist; `rate` is 0 where
+    the wing alone spends the whole budget; `rise` is the skin's own rise
+    across the opening there, which the floor's deepest corner travels on
+    top of the box depth. Inside the band the cost is the
     skin's vertical drift at fixed absolute stations (`skin_drift_abs`),
     subtracted linearly. At an edge the clipping has moved onto the
     skin, the wall's corner rides the skin itself, so its cost is the
@@ -734,7 +766,7 @@ def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
         o = np.argsort(pts[:, 0])
         return pts[o]
 
-    zs, rate, valid = [], [], []
+    zs, rate, valid, rise_mm = [], [], [], []
     for k in range(0, len(c) - stride, stride):
         rise = float(stack.z_mm[k + stride] - stack.z_mm[k])
         if rise <= 0.0:
@@ -742,12 +774,16 @@ def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
         sa, sb = skin(c[k]), skin(c[k + stride])
         x_le, x_te = float(sb[0, 0]), float(sb[-1, 0])
         chord = x_te - x_le
-        lo = max(xa0, x_le + margin_frac * chord)
-        hi = min(xa1, x_te - margin_frac * chord)
+        # the SAME rule the cutter uses, so the budget never calls a
+        # station unusable that `insert_detours` will happily cut
+        f0, f1 = _bay_clamp_band(0.5 * (xa0 + xa1 - 2.0 * x_le) / max(chord, 1e-9),
+                                 0.5 * (xa1 - xa0) / max(chord, 1e-9), chord)
+        lo, hi = x_le + f0 * chord, x_le + f1 * chord
         zs.append(0.5 * float(stack.z_mm[k] + stack.z_mm[k + stride]))
         if hi - lo < 1e-6:
             rate.append(0.0)
             valid.append(False)
+            rise_mm.append(0.0)
             continue
         xs = np.linspace(lo, hi, n_x)
         ya = np.interp(xs, sa[:, 0], sa[:, 1])
@@ -760,21 +796,33 @@ def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
                 cost = max(cost, d / rise)
         rate.append(float(max(lim - cost, 0.0)))
         valid.append(True)
-    return np.array(zs), np.array(rate), np.array(valid, dtype=bool)
+        # how far the floor's deepest corner travels BEYOND the box depth
+        # at this station: the skin's own rise across the opening
+        rise_mm.append(float(yb.max() - yb.min()))
+    return (np.array(zs), np.array(rate), np.array(valid, dtype=bool),
+            np.array(rise_mm))
 
 
 def solve_ramp_from_rates(dist_mm: np.ndarray, rate: np.ndarray,
-                          depth_mm: float, margin: float) -> float:
-    """Shortest ramp that fades `depth_mm` against a rate profile: a
-    ramp of length L runs at one linear rate, at most the smallest rate
-    within L times the margin. inf if no L in the profile suffices."""
+                          rise_mm: np.ndarray, depth_mm: float,
+                          margin: float) -> float:
+    """Shortest ramp that fades a bay of `depth_mm` against a profile.
+
+    A ramp of length L runs at ONE linear rate, because `depth_frac` is
+    linear, so every station it crosses must afford it. At station k the
+    floor's deepest corner travels `depth_mm + rise_mm[k]`, so the ramp
+    must be at least `(depth + rise[k]) / (rate[k] * margin)` long for
+    each k it covers, and the answer is the running maximum of that. inf
+    if no L in the profile satisfies its own stations."""
     if len(dist_mm) == 0:
         return float("inf")
-    worst = np.minimum.accumulate(rate) * margin
-    ok = np.where(dist_mm * worst >= depth_mm)[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        need = (depth_mm + rise_mm) / np.maximum(rate * margin, 1e-12)
+    worst = np.maximum.accumulate(need)
+    ok = np.where(dist_mm >= worst)[0]
     if len(ok) == 0:
         return float("inf")
-    return float(depth_mm / worst[int(ok[0])])
+    return float(worst[int(ok[0])])
 
 
 def solve_ramp_mm(dist_mm: np.ndarray, drift: np.ndarray, depth_mm: float,

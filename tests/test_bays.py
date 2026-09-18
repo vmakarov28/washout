@@ -338,17 +338,20 @@ def test_a_pocket_out_in_the_wing_is_as_wide_as_its_box():
     want = servo.box_mm[0] + 2 * WALL + FIT_MM
     seen = 0
     for pan in ev.panels:
-        for k in range(len(pan.contours)):
-            for x0, x1, depth in _openings_mm(pan.contours[k]):
-                # the servo pocket at full depth: box + bead of floor
-                if depth < servo.box_mm[2] + WALL - 0.5:
-                    continue
-                if abs(x1 - x0) > 60.0:
-                    continue                   # a root bay, not the pocket
-                seen += 1
-                assert abs((x1 - x0) - want) < 0.4, (
-                    f"{pan.name} z={pan.z_mm[k]:.0f}: pocket {x1 - x0:.1f} mm "
-                    f"wide for a {servo.box_mm[0]:.0f} mm servo (want {want:.1f})")
+        spec = next((b for b in pan.bay_specs if b.name == servo.name), None)
+        if spec is None:
+            continue
+        for k in range(len(pan.z_mm)):
+            if spec.depth_frac(float(pan.z_mm[k])) < 1.0 - 1e-9:
+                continue                       # still ramping: not full width
+            st = ev.plan.at(float(pan.eta[k]))
+            c_mm = st.chord_m * 1000.0
+            x0, x1 = spec.band(c_mm, st.x_le_m * 1000.0)
+            seen += 1
+            assert (x1 - x0) * c_mm == pytest.approx(want, abs=0.4), (
+                f"{pan.name} z={pan.z_mm[k]:.0f}: pocket "
+                f"{(x1 - x0) * c_mm:.1f} mm wide for a "
+                f"{servo.box_mm[0]:.0f} mm servo (want {want:.1f})")
     assert seen >= 3, "the servo pocket must be fully open on several layers"
 
 
@@ -372,3 +375,132 @@ def test_a_cut_panel_without_ribs_measures_clearance_generally():
     assert abs(g.value - general) < 1e-9, (
         f"gate measured {g.value:.3f} mm, the general test says {general:.3f}")
     assert "cut" in g.detail
+
+
+# ------------------------------------------- the opening and the truss
+
+def _layer_bands(ev, pan):
+    """Every bay's band on every layer of a panel, in that layer's own
+    chord fractions -- exactly what `insert_detours` cuts to."""
+    for k in range(len(pan.z_mm)):
+        st = ev.plan.at(float(pan.eta[k]))
+        c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
+        for spec in pan.bay_specs:
+            yield spec, k, spec.band(c_mm, x_le)
+
+
+def test_the_rib_exclusion_covers_the_opening_at_every_layer():
+    """A rib slit inside a bay's band is two detours wanting one chord.
+
+    The skin cannot carry that at any height -- `rebuild_skin` refuses
+    the layer -- so it leaves the geometry raising an exception instead
+    of reporting a gate with a number, and a search that meets it dies
+    rather than scoring the design. The exclusion handed to the rib
+    layout was an envelope over NINE sampled stations of a thousand: the
+    trainer's servo cut reached 0.7175c where the estimate said 0.7089c,
+    and `with_layout` duly placed a web at 0.7117c, in the sliver between
+    the estimate's edge and the rib band's aft limit.
+
+    The envelope is taken over the layers that are BUILT, every one of
+    them, which makes it exact rather than close: a detour is only ever
+    cut at one of those z values."""
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        s = ev.print_settings
+        for pan in ev.panels:
+            if not pan.bay_specs:
+                continue
+            chord = np.array([ev.plan.at(float(e)).chord_m * 1000.0
+                              for e in pan.eta])
+            x_le = np.array([ev.plan.at(float(e)).x_le_m * 1000.0
+                             for e in pan.eta])
+            mid_c = ev.plan.at(float(0.5 * (pan.eta[0] + pan.eta[-1]))
+                               ).chord_m * 1000.0
+            pad = s.extrusion_width_mm * s.rib_clearance_factor
+            for spec in pan.bay_specs:
+                band = vase._avoid_band(spec, pan.z_mm, chord, x_le,
+                                        mid_c, pad)
+                assert band is not None
+                centre, half_mm = band
+                half = half_mm / mid_c
+                lo, hi = centre - half, centre + half
+                seen = 0
+                for k in range(len(pan.z_mm)):
+                    zk = float(pan.z_mm[k])
+                    if (spec.depth_frac(zk) <= 0.0
+                            and spec.groove_frac(zk) <= 0.0):
+                        continue           # closed: `pack_detours` may move it
+                    seen += 1
+                    b0, b1 = spec.band(float(chord[k]), float(x_le[k]))
+                    assert lo <= b0 + 1e-9 and b1 <= hi + 1e-9, (
+                        f"{name} {pan.name} {spec.name}: layer {k} cuts "
+                        f"[{b0:.4f}, {b1:.4f}], excluded only "
+                        f"[{lo:.4f}, {hi:.4f}]")
+                assert seen, f"{name} {pan.name} {spec.name} is open nowhere"
+
+
+def test_a_bay_keeps_its_vertices_after_it_has_closed():
+    """A detour that disappears reparametrises the skin in one layer.
+
+    The depth fades continuously and the groove after it, but the
+    detour's EXISTENCE did not: the moment the groove reached zero its
+    segment left the list, the skin either side went from three segments
+    to one, and every vertex on it was redistributed between two
+    adjacent layers. The overhang gate reads that as material arriving in
+    mid-air -- 69 degrees on the trainer's centre body against a 50
+    degree limit, with the geometry either side of the step perfectly
+    printable.
+
+    So the six vertices stay for the whole panel. Where the bay is closed
+    they lie on the skin, which is what `_detour` already produces once
+    the groove has faded, and the point count and the segment structure
+    are both constant from root to tip."""
+    _, mission, _, plan = _plan("trainer_v3")
+    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0)
+    cut = vase.BayCut("b", 0.29, 0.59, 0.0, 0.039, 24.0, 30.0, 0.0,
+                      "upper", 0.9, 0.0, 0.0, length_mm=72.0, x_abs_mm=107.0)
+    pan = vase.build_panels(plan, s, bays=(cut,))[0]
+    spec = pan.bay_specs[0]
+    closed = [k for k in range(len(pan.z_mm))
+              if spec.groove_frac(float(pan.z_mm[k])) <= 0.0]
+    assert closed, "the bay must close somewhere on this panel"
+
+    # the detour is still six vertices, and they are ON the skin
+    k = closed[len(closed) // 2]
+    st = plan.at(float(pan.eta[k]))
+    c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
+    loop = vase.thicken_for_nozzle(st.airfoil.coords(s.contour_points),
+                                   c_mm, s)
+    upper, lower = bays.split_skins(loop)
+    det = bays._detour(spec, upper, lower, c_mm, float(pan.z_mm[k]),
+                       s.extrusion_width_mm, x_le)
+    assert len(det) == bays.POINTS_PER_BAY
+    on_skin = np.interp(det[:, 0], upper[:, 0], upper[:, 1])
+    assert np.abs(det[:, 1] - on_skin).max() * c_mm < 1e-6, (
+        "a closed bay's vertices must lie on the skin and scribe nothing")
+
+
+def test_the_ramp_is_budgeted_where_it_bites_not_where_it_started():
+    """A bay's floor travels the box depth PLUS the skin's rise.
+
+    The floor blends from the skin down to a flat plane, so the corner
+    under the crown of the section moves further than the corner under
+    the low point by the skin's rise across the opening. That rise was
+    measured once, at the bay's mid station, and the whole ramp sized
+    from it -- but the section changes along the ramp and the band slides
+    across it, so the rise where the ramp actually bites is a different
+    number. On the trainer's servo pocket 7.1 mm was assumed and 10.6 mm
+    was there, and the floor ran at 1.196 mm/mm against a 1.192 limit.
+
+    The constraint is per station, so the budget is too."""
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        lim = ev.print_settings.max_overhang_deg
+        for pan in ev.panels:
+            if not pan.bay_specs:
+                continue
+            ang, z_at = vase.overhang_deg(pan)
+            assert ang <= lim, (
+                f"{name} {pan.name}: {ang:.2f} deg at z={z_at:.0f} mm, "
+                f"limit {lim:.0f} -- a cut panel's own ramp must fit the "
+                f"budget at every station it crosses")

@@ -134,16 +134,27 @@ def test_the_horn_arm_comes_from_the_section_not_a_constant():
 
 
 def test_every_fleet_linkage_delivers_what_the_score_spends():
-    """The gate, on the designs that are actually tracked."""
+    """The gate, on the designs that are actually tracked.
+
+    A four-bar that runs out of solutions inside the servo's full travel
+    is not by itself a fault: a 17 mm horn on an 11 mm arm always does,
+    and what stops the servo short of it is the transmitter's endpoints.
+    The fault is a lock that comes BEFORE the surface has the deflection
+    the score spends, so that is what is asserted -- the deflection is
+    reached, and the lock (if there is one) stands clear of the servo
+    angle that reaches it."""
     for name in MISSIONS:
         ev, mission = _built(name)
         assert ev.linkage is not None, f"{name} has no linkage"
-        down, up, locked = lkg.sweep(ev.linkage)
-        assert not locked, f"{name}: linkage locks"
-        got = min(down, -up)
-        assert got >= mission.max_elevon_deflect_deg, (
-            f"{name}: reaches {down:+.1f}/{up:+.1f}, score spends "
-            f"+/-{mission.max_elevon_deflect_deg:.0f}")
+        want = mission.max_elevon_deflect_deg
+        ok, why = lkg.delivers(ev.linkage, want)
+        assert ok, f"{name}: {why}"
+        th_dn, th_up = lkg.endpoints_deg(ev.linkage, want)
+        assert th_dn is not None and th_up is not None
+        lock = lkg.lock_angle_deg(ev.linkage)
+        need = max(abs(th_dn), abs(th_up))
+        assert need <= lkg.LOCK_MARGIN * lock, (
+            f"{name}: needs {need:.0f} deg of servo, locks at {lock:.0f}")
         assert not [r for r in ev.reasons if "linkage" in r], ev.reasons
 
 
@@ -167,6 +178,21 @@ def test_the_servo_sits_beside_the_surface_it_drives():
         assert bay.eta_lo <= etas["servos"] <= bay.eta_hi
 
 
+def _servo_etas(ev, mission):
+    """(bay name, solved eta) for every bay with a spanwise seat, from the
+    geometry the verdict was reached with."""
+    from washout.search.design import seat_bays as _seat
+    from washout.search.design import unit_to_physical as _u2p
+    import json as _json
+    idx = _json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
+    name = ev.plan.name
+    d = _json.loads((RESULTS / idx[name] / "design.json").read_text(encoding="utf-8"))
+    joints = vase.panel_etas(ev.plan, ev.print_settings)
+    _, _, etas = _seat(ev.plan, mission, _u2p(np.array(d["u"])),
+                       ev.print_settings.extrusion_width_mm, joints)
+    return [(n, e) for n, e in etas.items() if e is not None]
+
+
 def test_the_servo_mass_moves_to_its_solved_seat():
     """Its station is an output now, so it has to be inside the evaluation
     loop. `choose_structure` taught this at a cost of four generations:
@@ -177,8 +203,17 @@ def test_the_servo_mass_moves_to_its_solved_seat():
         root_c = ev.plan.stations[0].chord_m
         item = next(i for i in ev.mass.items if i.name == "servos x2")
         bay = next(b for b in mission.bays if b.name == "servos")
-        # not at the old hardcoded nominal, and inside the solved band
-        assert bay.x_lo * root_c <= item.x_m <= bay.x_hi * root_c
+        # Inside the solved band, measured in the chord AT THE SERVO'S OWN
+        # STATION -- which is what the band means for a bay that lives out
+        # in the wing, and what the linkage is solved in. Read as a
+        # root-chord fraction it put the trainer's servos 64 mm forward.
+        eta_s = next(e for n, e in _servo_etas(ev, mission) if n == "servos")
+        st = ev.plan.at(float(eta_s))
+        lo = st.x_le_m + bay.x_lo * st.chord_m
+        hi = st.x_le_m + bay.x_hi * st.chord_m
+        assert lo <= item.x_m <= hi, (
+            f"{name}: servos at {item.x_m*1000:.1f} mm, band "
+            f"{lo*1000:.1f}-{hi*1000:.1f} mm at eta {eta_s:.2f}")
 
 
 def test_a_servo_bay_never_clashes_silently():

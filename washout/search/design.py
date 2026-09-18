@@ -1225,12 +1225,13 @@ def _evaluate_once(
         # point. Sized from the box alone, the ramp let that corner move
         # faster than the overhang budget and the trainer's centre body
         # failed max overhang the moment the groove learned to hug.
-        st_b = plan.at(0.5 * (v.eta0 + v.eta1))
-        xs_b = np.linspace(*v.band(plan, 0.5 * (v.eta0 + v.eta1)), 25)
-        skin = (st_b.airfoil.y_upper(xs_b) if bay.open_from == "upper"
-                else -st_b.airfoil.y_lower(xs_b)) * st_b.chord_m * 1000.0
-        rise = float(skin.max() - skin.min())
-        depth = cut_depth(bay) + rise
+        # The floor's travel is depth + the skin's rise over the opening,
+        # and the rise is a property of the STATION, not of the bay: it is
+        # gathered per sample by `cut_budget_profile` and applied there.
+        # Measured once at the bay's mid station it was 7.1 mm where the
+        # ramp needed 10.6, and the trainer's servo pocket ran 0.4% over
+        # the overhang limit.
+        depth = cut_depth(bay)
         # The ramp may run on past a print joint -- what must not straddle
         # one is the BOX, which is gated separately -- so the rate it can
         # use is the TIGHTEST budget over every panel it crosses, not the
@@ -1282,19 +1283,19 @@ def _evaluate_once(
             # body -- no ramp can live, so the bay stays fully open
             # across that DEAD span and the ramp begins where it can.
             half = 0.5 * cut_length(v)
-            dist, rate, valid = [], [], []
+            dist, rate, valid, rise_at = [], [], [], []
             for (a, b), pn in panels_in_order:
                 if outboard and b <= edge_eta:
                     continue
                 if not outboard and a >= edge_eta:
                     continue
-                zs, rt, ok = vase.cut_budget_profile(
+                zs, rt, ok, rs = vase.cut_budget_profile(
                     pn, v.x_abs_mm - half, v.x_abs_mm + half,
                     side=bay.open_from, margin_frac=bays_mod.BAND_MARGIN)
                 if len(zs) == 0:
                     continue
                 e_of = a + zs / max(pn.height_mm, 1e-9) * (b - a)
-                for e, r, o in zip(e_of, rt, ok):
+                for e, r, o, ri in zip(e_of, rt, ok, rs):
                     if outboard and e < edge_eta:
                         continue
                     if not outboard and e > edge_eta:
@@ -1303,22 +1304,27 @@ def _evaluate_once(
                                                    max(e, edge_eta), n=40))
                     rate.append(r)
                     valid.append(o)
+                    rise_at.append(ri)
             if not dist:
                 return float("inf"), 0.0
             order = np.argsort(dist)
             dist = np.array(dist)[order]
             rate = np.array(rate)[order]
             valid = np.array(valid)[order]
+            rise_at = np.array(rise_at)[order]
             # the profile ends where the band leaves the section
             bad = np.where(~valid)[0]
             if len(bad):
-                dist, rate = dist[:bad[0]], rate[:bad[0]]
+                dist, rate, rise_at = (dist[:bad[0]], rate[:bad[0]],
+                                       rise_at[:bad[0]])
             live = np.where(rate > 0.0)[0]
             if len(live) == 0:
                 return float("inf"), 0.0
             dead = float(dist[live[0]]) if live[0] > 0 else 0.0
-            dist, rate = dist[live[0]:] - dead, rate[live[0]:]
-            return vase.solve_ramp_from_rates(dist, rate, depth, RAMP_MARGIN), dead
+            dist, rate, rise_at = (dist[live[0]:] - dead, rate[live[0]:],
+                                   rise_at[live[0]:])
+            return (vase.solve_ramp_from_rates(dist, rate, rise_at, depth,
+                                               RAMP_MARGIN), dead)
 
         bay_ramp[bay.name], bay_dead_out[bay.name] = walk(
             bare_by_eta, v.eta1, outboard=True)

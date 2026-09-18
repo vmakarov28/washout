@@ -272,17 +272,30 @@ def test_the_solved_seat_is_the_seat_the_mass_uses():
     """`bay_fits` warns against a sweeping CHECK, and rightly: answering
     'does some seat exist' while modelling the mass elsewhere passed a
     design whose pack hung off the nose. A solved seat is different only
-    if it is also the station the mass is placed at."""
+    if it is also the station the mass is placed at.
+
+    The seat is a fraction of the chord AT THE BAY'S OWN STATION -- the
+    root for centreline payload, its solved eta for a servo -- and what
+    the CG is computed from is the absolute station that fraction lands
+    at. Read as a root-chord fraction instead, the trainer's 18 g of
+    servos sat 64 mm forward of where they are."""
     u, mission, base, plan = _fleet("trainer_v3")
     p = unit_to_physical(u)
-    vols, seats, _ = seat_bays(plan, mission, p, WALL)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0)
+    joints = vase.panel_etas(plan, settings)
+    vols, seats, etas = seat_bays(plan, mission, p, WALL, joints)
     ev = evaluate(u, mission, base, settings)
-    root_c = plan.stations[0].chord_m
     for bay in mission.bays:
+        vol = next(v for v in vols if v.name == bay.name)
+        st = plan.at(0.0 if etas[bay.name] is None else float(etas[bay.name]))
+        x_abs = (st.x_le_m + seats[bay.name] * st.chord_m) * 1000.0
+        assert vol.x_abs_mm == pytest.approx(x_abs, rel=1e-9), (
+            "the volume must sit where its own station's chord puts it")
         for item_name in bay.holds:
             item = next(i for i in ev.mass.items if i.name == item_name)
-            assert item.x_m == pytest.approx(seats[bay.name] * root_c, rel=1e-9)
+            assert item.x_m * 1000.0 == pytest.approx(x_abs, rel=1e-6), (
+                f"{item_name} is modelled at {item.x_m*1000:.1f} mm and its "
+                f"bay is at {x_abs:.1f} mm")
 
 
 def test_a_clash_is_penalised_by_how_far_it_reaches():

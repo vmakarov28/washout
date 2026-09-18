@@ -93,6 +93,35 @@ reach the ear-clipper."""
 UPPER = "upper"
 LOWER = "lower"
 
+
+def clamp_band(mid: float, half: float, chord_mm: float,
+               skin_x0: float = 0.0, skin_x1: float = 1.0
+               ) -> tuple[float, float]:
+    """An opening's (x0, x1) in chord fractions: centred on `mid`, half
+    width `half`, clipped into [skin_x0, skin_x1] less `BAND_MARGIN`,
+    and never narrower than `MIN_BAND_MM`.
+
+    The one place that decides where an opening's walls are. `BaySpec`
+    cuts to it and `vase.cut_budget_profile` budgets the ramp against it;
+    when the budget had its own clipping rule it declared stations
+    unusable that the cutter was happy to cut, and the trainer's
+    electronics bay was given 70 mm of span to close in when it has 453.
+    """
+    lo_lim, hi_lim = skin_x0 + BAND_MARGIN, skin_x1 - BAND_MARGIN
+    want = max(MIN_BAND_MM / max(chord_mm, 1e-9), 1e-6)
+    lo, hi = max(mid - half, lo_lim), min(mid + half, hi_lim)
+    if hi - lo >= want:
+        return (lo, hi)
+    # squeezed by the section's edge: hold the minimum width and slide it
+    # inside, so the band moves continuously instead of vanishing
+    if lo <= lo_lim + 1e-12:
+        lo = lo_lim
+        hi = min(lo + want, hi_lim)
+    else:
+        hi = hi_lim
+        lo = max(hi - want, lo_lim)
+    return (lo, hi)
+
 BAND_MARGIN = 0.02
 """How close to the leading or trailing edge, as a chord fraction, an
 opening's wall may come. Inside that the skin is turning through the
@@ -100,9 +129,12 @@ nose or thinning to the blunt edge, and a detour there is a detour with
 nowhere to be."""
 
 MIN_BAND_MM = 4.0
-"""An opening narrower than this is not an opening: its six vertices
-would sit closer than a lip apart. Below it the detour is dropped and
-its vertices go back to the skin."""
+"""The narrowest an opening's band may become. It is not a threshold for
+dropping the detour -- a detour is never dropped, because removing one
+reparametrises the whole skin in a single layer -- it is the width the
+band is held at when the section's edge would otherwise squeeze it to
+nothing. Below about this the six vertices would sit closer together
+than the lip between them."""
 
 GROOVE_TAIL_MM = 2.0
 """Span over which a closed bay's groove fades from one bead to nothing."""
@@ -149,15 +181,22 @@ class BaySpec:
 
     def band(self, chord_mm: float, x_le_mm: float = 0.0,
              skin_x0: float = 0.0, skin_x1: float = 1.0
-             ) -> tuple[float, float] | None:
+             ) -> tuple[float, float]:
         """(x0, x1) in this layer's own chord fractions, CLIPPED to the
-        skin's extent less `BAND_MARGIN`; None if what is left is
-        narrower than `MIN_BAND_MM`.
+        skin's extent less `BAND_MARGIN`, and never narrower than
+        `MIN_BAND_MM`.
 
         The clipping is what lets a root bay on a swept body close at
         all: its box is rigid and sits at an absolute station, but the
         ramp that closes the opening is not a box, and as the leading
-        edge comes round outboard the recess simply narrows with it."""
+        edge comes round outboard the recess simply narrows with it.
+
+        It is CLAMPED rather than refused, and slid inside the section
+        rather than dropped, because a detour that disappears takes its
+        segment with it and the skin either side is reparametrised in one
+        layer. Where the bay is closed these six vertices lie on the skin
+        and cost nothing; what they buy is a point distribution that
+        varies continuously from root to tip."""
         if self.length_mm is None:
             return (self.x0, self.x1)
         h = 0.5 * self.length_mm / max(chord_mm, 1e-9)
@@ -165,11 +204,7 @@ class BaySpec:
             mid = (self.x_abs_mm - x_le_mm) / max(chord_mm, 1e-9)
         else:
             mid = 0.5 * (self.x0 + self.x1)
-        lo = max(mid - h, skin_x0 + BAND_MARGIN)
-        hi = min(mid + h, skin_x1 - BAND_MARGIN)
-        if (hi - lo) * chord_mm < MIN_BAND_MM:
-            return None
-        return (lo, hi)
+        return clamp_band(mid, h, chord_mm, skin_x0, skin_x1)
 
     def groove_frac(self, z_mm: float) -> float:
         """How much of the one-bead groove remains at this height.
@@ -313,24 +348,38 @@ def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
 
     # a ledge one lid-thickness inside the skin at each wall, but never
     # deeper than the floor itself -- on a nearly closed bay the ledge
-    # simply IS the floor
-    ledge = spec.ledge_mm / chord_mm
-    f0, f1 = floor_at(x0 + lip), floor_at(x1 - lip)
-    y_l0 = float(np.interp(x0, sx, sy)) - sign * ledge
-    y_l1 = float(np.interp(x1, sx, sy)) - sign * ledge
-    if sign > 0:
-        y_l0, y_l1 = max(y_l0, f0), max(y_l1, f1)
-    else:
-        y_l0, y_l1 = min(y_l0, f0), min(y_l1, f1)
-    return np.array([[x0, y_l0],
-                     [x0 + lip, y_l0],
-                     [x0 + lip, f0],
-                     [x1 - lip, f1],
-                     [x1 - lip, y_l1],
-                     [x1, y_l1]])
+    # simply IS the floor.
+    #
+    # It fades with the groove, and did not until a test asked whether a
+    # closed bay's vertices lie on the skin: they did not, because the
+    # depth faded and the groove after it while the LEDGE was cut at full
+    # thickness regardless. A lidded bay therefore scribed a 0.9 mm notch
+    # along its whole panel, outboard of any lid there was to rest in it.
+    ledge = spec.ledge_mm / chord_mm * spec.groove_frac(z_mm)
+
+    def ledge_at(x):
+        """The lid's seat: one lid-thickness inside the skin, FOLLOWING
+        it, and never deeper than the floor under it.
+
+        Per station, not one height carried across the shelf's two
+        vertices. A flat shelf on a curved skin left its outer vertex
+        1.0 mm proud of the surface, and where the bay had closed -- so
+        the seat should have been the skin itself -- that bump ran the
+        whole panel. The lid is a lens built from the same station loops,
+        so a seat that follows the skin is also the seat it wants."""
+        y = float(np.interp(x, sx, sy)) - sign * ledge
+        f = floor_at(x)
+        return max(y, f) if sign > 0 else min(y, f)
+
+    return np.array([[x0, ledge_at(x0)],
+                     [x0 + lip, ledge_at(x0 + lip)],
+                     [x0 + lip, floor_at(x0 + lip)],
+                     [x1 - lip, floor_at(x1 - lip)],
+                     [x1 - lip, ledge_at(x1 - lip)],
+                     [x1, ledge_at(x1)]])
 
 
-def rebuild_skin(near: np.ndarray, detours, extra_pts: int = 0) -> np.ndarray:
+def rebuild_skin(near: np.ndarray, detours) -> np.ndarray:
     """One skin, LE -> TE, resampled around its detours -> (M, 2).
 
     `detours` are (x_a, x_b, points) with x_a < x_b in the skin's own
@@ -354,7 +403,7 @@ def rebuild_skin(near: np.ndarray, detours, extra_pts: int = 0) -> np.ndarray:
     hinge line ends at x_hinge, not 1.0, and walking to 1.0 clamped the
     last segment's vertices onto the cut face in a pile."""
     sx, sy = near[:, 0], near[:, 1]
-    n_pts = len(near) + int(extra_pts)     # a faded-out bay's six, as skin
+    n_pts = len(near)
     detours = sorted(detours, key=lambda d: d[0])
     for (a0, b0, _), (a1, b1, _) in zip(detours, detours[1:]):
         if a1 < b0 - 1e-12:
@@ -379,6 +428,64 @@ def rebuild_skin(near: np.ndarray, detours, extra_pts: int = 0) -> np.ndarray:
         if k < len(detours):
             out.append(np.asarray(detours[k][2], dtype=float))
     return np.concatenate(out, 0)
+
+
+def pack_detours(detours, near: np.ndarray, lo_lim: float, hi_lim: float):
+    """Slide CLOSED detours aside so no two slots overlap -> new list.
+
+    Every bay keeps its six vertices for the whole panel, so a bay whose
+    band has run off the front of the section still holds a slot, and two
+    of those pile up against the leading edge: on the trainer the
+    electronics bay, long closed and clamped to a sliver at the nose, met
+    the pack's band exactly.
+
+    Where a bay is closed its vertices lie on the skin and scribe
+    nothing, so their chordwise position is free and they may be moved.
+    Where it is OPEN the position IS the opening and may not move; two
+    open detours wanting the same chord is a real conflict that the seat
+    solver gates, and the geometry still refuses it rather than quietly
+    sliding an opening somewhere else.
+
+    Entries are (x0, x1, points, movable). The immovable ones are laid
+    down first and keep exactly the chord they asked for; the movable
+    ones are then fitted into the gaps that remain, each as near its own
+    station as it can get, and re-seated on `near` so its vertices still
+    lie on the skin after the slide.
+
+    Placing them in one ordered sweep instead is not enough: a closed bay
+    clamped to the nose and an open one clamped beside it both start at
+    the same limit, and whichever the sort happened to put first won.
+    """
+    fixed = [(a, b, q) for a, b, q, m in detours if not m]
+    free = [(a, b, q) for a, b, q, m in detours if m]
+    fixed.sort(key=lambda d: d[0])
+    for (a0, b0, _), (a1, b1, _) in zip(fixed, fixed[1:]):
+        if a1 < b0 - 1e-9:
+            raise ValueError(f"open detours overlap: [{a0:.4f}, {b0:.4f}] "
+                             f"and [{a1:.4f}, {b1:.4f}]")
+    sx, sy = near[:, 0], near[:, 1]
+    placed = list(fixed)
+    for a, b, q in sorted(free, key=lambda d: d[0] - d[1]):   # widest first
+        w = b - a
+        gaps, cur = [], lo_lim
+        for oa, ob, _ in sorted(placed, key=lambda d: d[0]):
+            if oa - cur >= w:
+                gaps.append((cur, oa))
+            cur = max(cur, ob)
+        if hi_lim - cur >= w:
+            gaps.append((cur, hi_lim))
+        if not gaps:
+            raise ValueError(f"no chord left to park a closed bay's "
+                             f"{len(q)} vertices ({w:.4f} wide)")
+        na = min((min(max(a, g0), g1 - w) for g0, g1 in gaps),
+                 key=lambda x: abs(x - a))
+        q = np.asarray(q, dtype=float).copy()
+        q[:, 0] += na - a
+        # back onto the skin: a closed detour's vertices ARE the skin, and
+        # translating them in x alone would leave them off the surface
+        q[:, 1] = np.interp(q[:, 0], sx, sy)
+        placed.append((na, na + w, q))
+    return sorted(placed, key=lambda d: d[0])
 
 
 def rib_detours(upper: np.ndarray, lower: np.ndarray, chord_mm: float,
@@ -426,28 +533,32 @@ def insert_detours(loop_unit: np.ndarray, chord_mm: float, z_mm: float,
     """
     bay_specs = list(bay_specs)
     upper, lower = split_skins(loop_unit)
-    # A bay that has faded out, or whose band has narrowed to nothing
-    # against the section's edge, is six plain skin points, not a
-    # detour: the count per layer stays constant and nothing is scribed.
+    # EVERY bay keeps its six vertices, at every height. Where it is
+    # closed they lie on the skin and scribe nothing; dropping them
+    # instead reparametrised the skin either side in a single layer and
+    # the overhang gate read the jump as material in mid-air.
     up_b = [b for b in bay_specs if b.open_from == UPPER]
     lo_b = [b for b in bay_specs if b.open_from == LOWER]
-
-    def live(b, skin):
-        return (b.present(z_mm)
-                and b.band(chord_mm, x_le_mm, float(skin[0, 0]),
-                           float(skin[-1, 0])) is not None)
+    def shut(b):
+        """Closed AND unscribed: the six points are plain skin."""
+        return b.depth_frac(z_mm) <= 0.0 and b.groove_frac(z_mm) <= 0.0
 
     up = [(*b.band(chord_mm, x_le_mm, float(upper[0, 0]), float(upper[-1, 0])),
-           _detour(b, upper, lower, chord_mm, z_mm, min_groove_mm, x_le_mm))
-          for b in up_b if live(b, upper)]
-    up += rib_detours(upper, lower, chord_mm, z_mm, rib_spec, slit_mm, gap_mm)
+           _detour(b, upper, lower, chord_mm, z_mm, min_groove_mm, x_le_mm),
+           shut(b))
+          for b in up_b]
+    up += [(a, b_, pts, False) for a, b_, pts in
+           rib_detours(upper, lower, chord_mm, z_mm, rib_spec, slit_mm, gap_mm)]
     lo = [(*b.band(chord_mm, x_le_mm, float(lower[0, 0]), float(lower[-1, 0])),
-           _detour(b, lower, upper, chord_mm, z_mm, min_groove_mm, x_le_mm))
-          for b in lo_b if live(b, lower)]
-    gone_up = POINTS_PER_BAY * sum(1 for b in up_b if not live(b, upper))
-    gone_lo = POINTS_PER_BAY * sum(1 for b in lo_b if not live(b, lower))
-    new_up = rebuild_skin(upper, up, gone_up) if (up or gone_up) else upper
-    new_lo = rebuild_skin(lower, lo, gone_lo) if (lo or gone_lo) else lower
+           _detour(b, lower, upper, chord_mm, z_mm, min_groove_mm, x_le_mm),
+           shut(b))
+          for b in lo_b]
+    up_lim = (float(upper[0, 0]) + BAND_MARGIN, float(upper[-1, 0]) - BAND_MARGIN)
+    lo_lim = (float(lower[0, 0]) + BAND_MARGIN, float(lower[-1, 0]) - BAND_MARGIN)
+    new_up = (rebuild_skin(upper, pack_detours(up, upper, *up_lim))
+              if up else upper)
+    new_lo = (rebuild_skin(lower, pack_detours(lo, lower, *lo_lim))
+              if lo else lower)
     return np.concatenate([new_up[::-1], new_lo[1:]], 0)
 
 

@@ -69,6 +69,10 @@ class RibSpec:
     which is the largest diagonal the truss can have and still print."""
     x_first: float = 0.20
     x_last: float = 0.72
+    slit_allowance_mm: float = 0.5
+    """The slit a rib carries, for spacing arithmetic. `insert_ribs` is
+    handed the real value; this is what `with_layout` reserves when it
+    bounds one rib's sweep against its neighbour's."""
     x_clip: tuple = (0.08, 0.88)
     """Hard limits on where a swept rib may end up, in the LOOP's own
     chord units. It was a literal (0.08, 0.88) inside `insert_ribs`, which
@@ -103,6 +107,20 @@ class RibSpec:
     is the whole of 'cut a spar hole': there is no hole, there is a
     corridor the truss is not allowed to cross."""
 
+    layout: tuple = ()
+    """((base_chord_frac, amplitude_mm), ...), solved ONCE per panel.
+
+    The gaps between exclusion bands are computed from the LOCAL chord, so
+    they move as the chord runs out -- and the number of ribs allotted to
+    each gap is an integer, so it changes in steps. Recomputing the layout
+    per layer therefore made ribs hop between gaps from one layer to the
+    next, which is the same quantisation failure `insert_ribs` documents
+    for a third time.
+
+    The truss is a property of the PANEL: its bases and amplitudes are
+    solved at the panel's mid station and only the sweep phase varies with
+    Z. `with_layout` fills this in; an empty tuple means "solve it now",
+    which keeps the spec usable on its own."""
     rate_mm_per_mm: float | None = None
     """Chordwise travel per mm of Z that the truss is allowed to use.
 
@@ -122,58 +140,96 @@ class RibSpec:
                 else np.tan(np.radians(self.max_overhang_deg)))
         return float(max(rate, 0.0) * self.pitch_mm / 4.0)
 
+    def with_layout(self, chord_mm: float) -> "RibSpec":
+        """Solve the truss layout once, for a whole panel."""
+        from dataclasses import replace as _replace
+
+        n = max(int(self.n_ribs), 0)
+        if n <= 0 or not self.enabled:
+            return _replace(self, layout=())
+        gaps = free_bands(self, chord_mm)
+        if not gaps:
+            return _replace(self, layout=())
+
+        widths = np.array([g1 - g0 for g0, g1 in gaps])
+        share = np.maximum(np.round(n * widths / widths.sum()), 0).astype(int)
+        while share.sum() > n:
+            share[int(np.argmax(share))] -= 1
+        while share.sum() < n:
+            share[int(np.argmax(widths / np.maximum(share, 1)))] += 1
+
+        out = []
+        for (g0, g1), cnt in zip(gaps, share):
+            if cnt <= 0:
+                continue
+            inset = 0.5 * (g1 - g0) / (cnt + 1)
+            base = np.linspace(g0 + inset, g1 - inset, cnt)
+            spacing = ((g1 - g0 - 2 * inset) / max(cnt - 1, 1)) * chord_mm
+            # A rib must not leave its own gap, and the INSET is what
+            # bounds that -- not a fraction of the gap's width. Clamping
+            # the amplitude to 0.30 of the width while the inset is only
+            # 0.25 of it let a rib swing 0.05 of a gap PAST the edge, into
+            # the exclusion band and toward the rib in the next gap. On
+            # demon1's tip panel two legs came within 0.34 mm against a
+            # 0.45 mm limit, and because they were in different gaps
+            # neither one's own spacing clamp could see it.
+            amp = min(self.amplitude_mm(),
+                      0.35 * spacing if cnt > 1 else 1e9,
+                      inset * chord_mm)
+            out.extend([float(b), float(amp), float(g0), float(g1)]
+                       for b in base)
+
+        # Now bound every amplitude by the room it ACTUALLY has, across
+        # gaps as well as within them. Two ribs in different gaps converge
+        # toward each other through the band between them, and neither
+        # one's own gap can see the other: on demon1's tip panel that put
+        # two legs 0.34 mm apart against a 0.45 mm limit. Adjacent ribs may
+        # each travel at most half the distance between their bases, less
+        # the slit they carry and a bead of clearance.
+        out.sort()
+        clear = 2.0 * self.slit_allowance_mm
+        for a, b in zip(out, out[1:]):
+            room = 0.5 * ((b[0] - a[0]) * chord_mm - clear)
+            a[1] = min(a[1], max(room, 0.0))
+            b[1] = min(b[1], max(room, 0.0))
+        for r in out:                       # and never leave its own gap
+            r[1] = min(r[1], max((r[0] - r[2]) * chord_mm - clear, 0.0),
+                       max((r[3] - r[0]) * chord_mm - clear, 0.0))
+        return _replace(self, layout=tuple((r[0], r[1]) for r in out))
+
     def stations(self, z_mm: float, chord_mm: float = 250.0) -> np.ndarray:
-        """Chordwise positions of every rib at this height, as x/c."""
-        if self.n_ribs <= 0:
+        """Chordwise positions of every rib at this height, as x/c.
+
+        Ribs live INSIDE the gaps between exclusion bands. They are not
+        placed evenly and then pushed clear, which is what the first two
+        versions did and what failed twice for the same reason: a push has
+        to choose a destination, and a destination chosen without looking
+        at the other bands lands in one of them.
+
+        Pushing to the nearer edge flips as a rib sweeps across a band's
+        centre -- a 72 mm jump and 64 degrees of overhang once a payload
+        bay became a band. Pushing to a side fixed by the unswept base is
+        stable in Z but still blind: on the trainer's centre body the
+        pack's band pushed the middle rib to 0.610c, inside the TE spar's
+        corridor at 0.593c-0.637c, so the rib's legs straddled the spar
+        station. The bore gate read 0.45 mm of corridor where the
+        reservation said the tube was clear, and it looked like two
+        measurements disagreeing rather than a third object on top of
+        both.
+
+        A gap is by construction clear of every band, so placing into one
+        cannot do that. Only the sweep phase varies with Z -- the bases
+        and amplitudes come from `with_layout`, solved once per panel.
+        """
+        spec = self if self.layout else self.with_layout(chord_mm)
+        if not spec.layout:
             return np.zeros(0)
-        base = (np.linspace(self.x_first, self.x_last, self.n_ribs)
-                if self.n_ribs > 1 else np.array([0.5 * (self.x_first + self.x_last)]))
-        spacing_mm = ((self.x_last - self.x_first) / max(self.n_ribs - 1, 1)
-                      * chord_mm)
-        # never let adjacent ribs reach each other, whatever the pitch says
-        amp_mm = min(self.amplitude_mm(), 0.35 * spacing_mm)
         phase = (z_mm / max(self.pitch_mm, 1e-6)) % 1.0
         tri = 4.0 * np.abs(phase - 0.5) - 1.0          # -1 .. +1
-        sign = np.where(np.arange(self.n_ribs) % 2 == 0, 1.0, -1.0)
-        x = base + sign * tri * amp_mm / max(chord_mm, 1e-6)
-        return self._push_clear(x, chord_mm, base)
-
-    def _push_clear(self, x: np.ndarray, chord_mm: float,
-                    base: np.ndarray | None = None) -> np.ndarray:
-        """Shove any rib that has wandered into an exclusion band out of
-        it. Nudged rather than dropped, because the layer's vertex count
-        must stay constant -- the STL skinner joins layer k index i to
-        layer k+1 index i, and a layer that lost a rib would shear the
-        whole mesh.
-
-        WHICH side it is pushed to is decided from the rib's UNSWEPT base
-        position, not from where the sweep has currently put it. Pushing
-        to the nearer edge is the obvious rule and it is discontinuous:
-        as a rib sweeps across the band's centre, "nearer" flips and the
-        rib jumps the band's whole width in one layer. That was harmless
-        while the only bands were 10 mm spar corridors and became a 72 mm
-        jump -- 64 degrees of overhang on a wall the printer builds in
-        mid-air -- as soon as a payload bay became an exclusion band. It
-        is the same quantisation failure `insert_ribs` documents, arriving
-        by a different route.
-
-        The base does not sweep, so the choice is stable in Z: a rib
-        seated below the band's centre stays at its low edge for the whole
-        panel and simply stops sweeping there.
-        """
-        if not self.avoid:
-            return x
-        x = np.asarray(x, dtype=float).copy()
-        ref = x if base is None else np.asarray(base, dtype=float)
-        for c, half_mm in self.avoid:
-            half = half_mm / max(chord_mm, 1e-6)      # mm -> local chord
-            lo, hi = c - half, c + half
-            inside = (x > lo) & (x < hi)
-            if inside.any():
-                to_lo = ref <= c                       # stable in Z
-                x = np.where(inside & to_lo, lo, x)
-                x = np.where(inside & ~to_lo, hi, x)
-        return x
+        base = np.array([b for b, _ in spec.layout])
+        amp = np.array([a for _, a in spec.layout])
+        sign = np.where(np.arange(len(base)) % 2 == 0, 1.0, -1.0)
+        return np.sort(base + sign * tri * amp / max(chord_mm, 1e-6))
 
 
 def ribs_that_fit(spec: "RibSpec", chord_mm: float,
@@ -224,7 +280,11 @@ def ribs_that_fit(spec: "RibSpec", chord_mm: float,
 
 
 def free_bands(spec: "RibSpec", chord_mm: float) -> list:
-    """The chord intervals a rib may occupy, exclusions removed."""
+    """The chord intervals a rib may occupy, exclusions removed.
+
+    Subtracting the bands one at a time is correct even when they
+    overlap, which is why placing into the result is safe where pushing
+    out of the bands one at a time was not. See `stations`."""
     lo, hi = spec.x_first, spec.x_last
     free = [(lo, hi)]
     for c, half_mm in spec.avoid:
@@ -321,8 +381,17 @@ def insert_ribs(
         out.append(np.stack([xs, y_up(xs)], 1))
         if k < len(xr):                       # the rib detour itself
             xa, xb = x_lo, x_lo - slit
-            floor = max(float(y_lo(xa)), float(y_lo(xb)),
-                        float(y_lo(0.5 * (xa + xb)))) + gap
+            # The floor clears the lower skin over a NEIGHBOURHOOD of the
+            # slit, not at three sample points inside it. The clearance
+            # rule is vertex-to-SEGMENT, so the skin just outside the slit
+            # is part of the floor corners' neighbourhood and three points
+            # cannot see a surface curving up between or beyond them --
+            # the same mistake `bays.floor_limits` documents, in the module
+            # it was copied from. Hardening, not a fix for anything
+            # observed: it changed no measured clearance on this fleet.
+            pad = 2.0 * slit
+            xs_f = np.linspace(xb - pad, xa + pad, 9)
+            floor = float(np.max(y_lo(xs_f))) + gap
             out.append(np.array([[xa, floor], [xb, floor]]))
     out.append(lower[1:])
     return np.concatenate(out, axis=0)

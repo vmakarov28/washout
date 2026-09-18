@@ -772,16 +772,50 @@ already documents arriving by a different route:*
   a 24 mm bay needed an infinite span to close. It is measured on bare
   panels and passed in.
 
-*And one disagreement that is still OPEN, flagged rather than papered
-over:* on the trainer's centre body the reservation says the TE spar is
-clear of the electronics bay by about 0.1 mm while the **bore gate**,
-which measures the printed contour rather than the reservation, reports
-0.45 mm of corridor at that station. The clearance gate passes, so the
-geometry is valid; the two measurements of the same opening disagree.
-Rib stations at that layer are 0.188, 0.466 and 0.714, so it is not a rib.
-This is exactly the class of bug the project cares about most and it
-should be chased before the gen6 re-search, because a search would
-otherwise optimise against whichever of the two numbers is wrong.
+*And the fourth, which looked like something else entirely.* The bore
+gate reported 0.45 mm of corridor at the trainer's TE spar station while
+the reservation said the tube was clear — two measurements of the same
+opening disagreeing, which is the class of bug this project cares about
+most. It was neither measurement. Dumping the contour's crossings by
+segment index showed **a rib's two legs at exactly that station**: the
+pack's exclusion band (0.266c–0.610c) had pushed the middle rib to
+0.610c, which is inside the TE spar's corridor at 0.593c–0.637c. A third
+object was sitting on top of both, and each gate was right.
+
+`_push_clear` is gone. **Ribs are now placed INSIDE the gaps between the
+exclusion bands** rather than placed evenly and pushed clear, because a
+push has to choose a destination and a destination chosen without looking
+at the other bands lands in one of them. That failed three times in three
+different ways in one session — nearer-edge (72 mm jumps, 64° of
+overhang), base-fixed side (blind to overlapping bands, the bug above),
+and merged-band edges (ribs piled against a band 0.107c–0.637c wide).
+A gap is by construction clear of every band, so placing into one cannot
+do it.
+
+Two more bounds were needed once the ribs lived in gaps, and both were
+found by measuring the closest pair on a failing panel rather than by
+reasoning about it — which is how the third one should have been found
+too. Clamping the sweep to 0.30 of a gap's width while the inset is 0.25
+of it let a rib swing 0.05 of a gap *past* the edge; and two ribs in
+**different** gaps converge toward each other through the band between
+them, which neither one's own gap can see. On demon1's tip panel that
+put two legs 0.34 mm apart against a 0.45 mm limit. Each amplitude is
+now bounded by half the real distance to its neighbour's base, less the
+slit and a bead, and by its own distance to each gap edge — exact, not a
+heuristic.
+
+The layout — which gap each rib lives in, and how far it may sweep — is
+solved **once per panel** at its mid station, and only the sweep phase
+varies with Z. The gaps are computed from the local chord and the share
+between them is an integer, so a layout recomputed per layer made ribs
+hop between gaps from one layer to the next. That is the same
+quantisation failure `insert_ribs` documents, for the fourth time; it is
+worth noticing that every one of them was a discontinuity introduced by
+solving a discrete choice per layer instead of per part.
+
+**The trainer's geometry now passes every print gate**, with the bays
+cut, and fails only on flight and hardware: cruise band, a spar joint
+depth, and wing loading.
 
 *Acceptance:* the pack loads without a knife, and the aircraft is
 *charged* for the hole in its torsion box. This is the phase that feeds

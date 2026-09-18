@@ -386,7 +386,12 @@ def build_stack(
     n_rib_eff = ribs_that_fit(
         rib_spec, plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0,
         settings.extrusion_width_mm * settings.rib_clearance_factor)
-    rib_spec = replace(rib_spec, n_ribs=n_rib_eff)
+    # Solved ONCE, at the panel's mid station: the gaps move with the
+    # local chord and the share between them is an integer, so a layout
+    # recomputed per layer made ribs hop between gaps from one layer to
+    # the next.
+    rib_spec = replace(rib_spec, n_ribs=n_rib_eff).with_layout(
+        plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0)
     n_pts = 2 * settings.contour_points - 1 + (
         POINTS_PER_RIB * n_rib_eff) + bay_point_budget(len(cuts))
     contours = np.empty((len(z), n_pts, 2))

@@ -235,3 +235,49 @@ def test_reach_is_a_constraint_and_clearance_is_the_objective():
         f"a clear seat exists at {held.x_frac:.2f}c and the solver must "
         f"take it; got {held.clash_mm:.1f} mm of clash")
     assert held.reach_eta >= mission.min_spar_reach_frac
+
+
+def test_a_rib_never_leaves_its_own_gap_or_reaches_its_neighbour():
+    """The sweep amplitude is bounded by the room a rib ACTUALLY has.
+
+    Two failures, both found on demon1's truncated tip panel. Clamping to
+    0.30 of a gap's width while the inset is 0.25 of it let a rib swing
+    0.05 of a gap past the edge, into the exclusion band. And two ribs in
+    DIFFERENT gaps converge toward each other through the band between
+    them, which neither one's own gap can see -- two legs came within
+    0.34 mm against a 0.45 mm limit.
+
+    So each amplitude is bounded by half the distance to its neighbour's
+    base, less the slit and a bead, and by its own distance to each gap
+    edge. Checked over a full sweep cycle rather than at one phase."""
+    spec = RibSpec(n_ribs=4, pitch_mm=20.0,
+                   avoid=((0.42, 18.0), (0.62, 10.0))).with_layout(180.0)
+    assert spec.layout, "this case must place some ribs"
+    gaps = [(g0, g1) for g0, g1 in
+            __import__("washout.printing.ribs", fromlist=["free_bands"])
+            .free_bands(spec, 180.0)]
+    for z in np.linspace(0.0, 40.0, 81):
+        xs = spec.stations(float(z), 180.0)
+        for x in xs:
+            assert any(g0 - 1e-9 <= x <= g1 + 1e-9 for g0, g1 in gaps), (
+                f"rib at {x:.4f}c left its gap at z={z:.1f}: {gaps}")
+        if len(xs) > 1:
+            gap_mm = np.diff(np.sort(xs)).min() * 180.0
+            assert gap_mm >= 2.0 * spec.slit_allowance_mm - 1e-6, (
+                f"two ribs {gap_mm:.3f} mm apart at z={z:.1f}")
+
+
+def test_the_rib_layout_does_not_change_between_layers():
+    """Only the sweep phase varies with Z. The gaps come from the local
+    chord and the share between them is an integer, so a layout
+    recomputed per layer made ribs hop between gaps from one layer to the
+    next -- the same quantisation failure `insert_ribs` documents, for the
+    fourth time in this codebase."""
+    spec = RibSpec(n_ribs=3, pitch_mm=25.0,
+                   avoid=((0.45, 20.0),)).with_layout(200.0)
+    bases = [b for b, _ in spec.layout]
+    for z in np.linspace(0.0, 50.0, 51):
+        xs = spec.stations(float(z), 200.0)
+        assert len(xs) == len(bases), f"rib count changed at z={z}"
+    # and a layout solved for one chord is not silently resolved for another
+    assert spec.stations(0.0, 200.0).size == spec.stations(0.0, 150.0).size

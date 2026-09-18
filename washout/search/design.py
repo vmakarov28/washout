@@ -33,6 +33,7 @@ from ..geom import fairness as fz
 from ..geom import interior as it
 from ..printing import vase
 from ..printing import bays as bays_mod
+from ..printing import parts as pmod
 from ..printing import elevons as elv
 from ..aero import performance as perf
 from ..aero import lateral
@@ -839,6 +840,14 @@ SECTION_BOUNDS = (
     Bound("fin_below", 0.0, 0.4, ""),
 )
 BATTERY_NAME = "battery"
+PROP_CLEARANCE_MM = 10.0
+"""Clearance the propeller disc keeps from the trailing edge.
+
+A DECLARED process limit, in the same category as `max_overhang_deg`: a
+motor mount bonded to foamed PLA flexes under thrust and gyroscopic
+load, the prop itself is not perfectly true, and a strike at 30 000 rpm
+destroys both. Not validated against a measurement."""
+
 RAMP_MARGIN = 0.85
 """Fraction of the measured overhang budget a bay's ramp may use.
 
@@ -1666,6 +1675,24 @@ def _evaluate_once(
             reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
                            f"(need {mission.min_spar_reach_frac:.2f})")
             penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
+
+    # --- can the propeller swing without striking the wing? ---
+    #
+    # A pusher at the trailing edge of a SWEPT wing loses its clearance
+    # outboard: the trailing edge runs aft as the disc runs out, so it is
+    # the blade tips that are in danger and not the root. The motor was a
+    # point mass at 0.97c and nothing else until the mount was generated,
+    # and two of the three aircraft turned out to swing their declared
+    # five-inch prop within a couple of millimetres of their own trailing
+    # edge -- micro 2.0 mm, demon1 0.3 mm, against the 10 mm a mount
+    # bonded to foam should keep.
+    if mission.powertrain is not None:
+        clear = pmod.prop_clearance_mm(plan, p_vec["prop_diam_in"])
+        if clear < PROP_CLEARANCE_MM:
+            reasons.append(
+                f"prop disc clears the trailing edge by {clear:.1f} mm, "
+                f"needs {PROP_CLEARANCE_MM:.0f}")
+            penalty += 2.0 * (PROP_CLEARANCE_MM - clear)
 
     # --- and do the BONDED joints carry what the spar does not? ---
     #

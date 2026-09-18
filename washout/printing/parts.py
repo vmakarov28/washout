@@ -197,6 +197,15 @@ class MeshBuilder:
         self._n += len(v)
         return off
 
+    def verts_at(self, i: int) -> np.ndarray:
+        """One accumulated vertex, by global index."""
+        n = 0
+        for block in self.verts:
+            if i < n + len(block):
+                return block[i - n]
+            n += len(block)
+        raise IndexError(i)
+
     def add_triangles(self, t: np.ndarray) -> None:
         t = np.asarray(t, dtype=np.int64).reshape(-1, 3)
         if len(t):
@@ -491,6 +500,40 @@ def motor_mount(name: str, skin_y_upper, skin_y_lower, x_te_of,
                                np.stack([us[::-1], vout[::-1]], 1)], 0)
         return ccw(loop)
 
+    def flange_at(w, sign, ring_uv=None):
+        """The flange's section at `w`, in the ring's own parameterisation.
+
+        `extrude_plate` triangulates the web with the flange roots as
+        holes, and its boundary recovery SPLITS any hole edge the
+        triangulation missed -- so the ring it hands back has more
+        vertices than the polygon that was passed in, and in an order
+        only it knows. The sweep has to start on that ring, so every
+        later section is built by carrying each of ITS points forward:
+        the point's u is kept, and its v is recomputed from the skin at
+        the new w, on whichever of the two edges it started on.
+
+        Rebuilding the section from `us` instead silently assumed the
+        recovery had changed nothing. It had not on a synthetic wedge or
+        on the trainer, and it had on micro, whose thinner root needed
+        the extra points -- `np.stack` then refused to wall a 20-point
+        ring against an 18-point section, and the mount was skipped."""
+        x = x_web - w
+        skin = skin_y_upper if sign > 0 else skin_y_lower
+        vin = np.array([skin(min(x, x_te_of(u) - 0.5), u) + sign * GLUE_GAP_MM
+                        for u in us])
+        if ring_uv is None:
+            vout = vin + sign * FLANGE_T_MM
+            return ccw(np.concatenate([np.stack([us, vin], 1),
+                                       np.stack([us[::-1], vout[::-1]], 1)], 0))
+        out = []
+        for u, v in ring_uv:
+            inner = float(np.interp(u, us, vin))
+            was_in = float(np.interp(u, us, vin_root))
+            # which edge did this vertex start on? the one it is nearer
+            on_outer = abs(v - (was_in + sign * FLANGE_T_MM)) < abs(v - was_in)
+            out.append((u, inner + (sign * FLANGE_T_MM if on_outer else 0.0)))
+        return np.array(out, dtype=float)
+
     roots = [flange_section(WEB_T_MM, +1), flange_section(WEB_T_MM, -1)]
     root_top = float(max(v for _, v in roots[0]))
     root_bot = float(min(v for _, v in roots[1]))
@@ -514,15 +557,18 @@ def motor_mount(name: str, skin_y_upper, skin_y_lower, x_te_of,
     rings = extrude_plate(mb, outer, holes, WEB_T_MM, frame,
                           connected=(len(holes) - 2, len(holes) - 1))
     for sign, key in ((+1, len(holes) - 2), (-1, len(holes) - 1)):
+        ring = rings[key]
+        ring_uv = [(float(mb.verts_at(i)[0]), float(mb.verts_at(i)[1]))
+                   for i in ring]
+        x0f = x_web - WEB_T_MM
+        skin0 = skin_y_upper if sign > 0 else skin_y_lower
+        vin_root = np.array([skin0(min(x0f, x_te_of(u) - 0.5), u)
+                             + sign * GLUE_GAP_MM for u in us])
         ws = np.linspace(WEB_T_MM, WEB_T_MM + FLANGE_L_MM, 12)
-        secs = np.array([[frame(u, v, w) for u, v in flange_section(w, sign)]
+        secs = np.array([[frame(u, v, w)
+                          for u, v in flange_at(w, sign, ring_uv)]
                          for w in ws])
-        # the root ring's order must match section 0's order exactly
-        root_pts = np.array([frame(u, v, WEB_T_MM)
-                             for u, v in roots[0 if sign > 0 else 1]])
-        if not np.allclose(root_pts, secs[0]):
-            raise ValueError("flange root does not match its ring")
-        sweep(mb, secs, start_ring=rings[key], cap_end=True)
+        sweep(mb, secs, start_ring=ring, cap_end=True)
     verts, tris = mb.build()
     part = SolidPart(name, verts, tris, role="motor mount",
                      orientation="web face down on the bed, flanges standing",
@@ -638,6 +684,51 @@ def skin_functions(plan, settings: PrintSettings, n: int = 25):
     return y_upper, y_lower, x_te
 
 
+def te_station(plan):
+    """x of the trailing edge, in mm aft of the root leading edge, as a
+    function of z in mm from the centreline.
+
+    From the planform alone -- leading edge plus chord -- so it costs two
+    interpolations rather than a rebuilt section loop, and the score can
+    afford to ask it. Dihedral is ignored, as it is for the mount.
+    """
+    half_mm = plan.half_span_m * 1000.0
+
+    def x_te(z_mm):
+        st = plan.at(float(np.clip(abs(z_mm) / max(half_mm, 1e-9), 0.0, 1.0)))
+        return (st.x_le_m + st.chord_m) * 1000.0
+
+    return x_te
+
+
+def disc_plane_mm(plan, span_mm: float = MOUNT_W_MM) -> float:
+    """Where the propeller disc sits, mm aft of the root leading edge:
+    the mount's web just aft of the trailing edge under it, its own
+    thickness, and the motor's shaft and hub."""
+    x_te = te_station(plan)
+    zs = np.linspace(-0.5 * span_mm, 0.5 * span_mm, 13)
+    return float(max(x_te(z) for z in zs)) + 0.5 + WEB_T_MM + PROP_PLANE_MM
+
+
+def prop_clearance_mm(plan, prop_diam_in: float, n: int = 25) -> float:
+    """Closest the disc plane comes to the trailing edge, anywhere the
+    disc reaches along the span.
+
+    A pusher on a SWEPT wing loses this outboard: the trailing edge runs
+    aft as the disc runs out, so the tips of the blades are the part in
+    danger, not the root. Measured over the disc's own radius, clipped to
+    the half span."""
+    x_te = te_station(plan)
+    plane = disc_plane_mm(plan)
+    r = 0.5 * prop_diam_in * 25.4
+    half_mm = plan.half_span_m * 1000.0
+    zs = np.linspace(-r, r, n)
+    zs = zs[np.abs(zs) <= half_mm]
+    if not len(zs):
+        return float(plane - x_te(0.0))
+    return float(min(plane - x_te(float(z)) for z in zs))
+
+
 def mount_for(plan, settings: PrintSettings, powertrain, name: str,
               span_mm: float = MOUNT_W_MM):
     """The motor mount and its gates, from the design that was scored.
@@ -655,8 +746,10 @@ def mount_for(plan, settings: PrintSettings, powertrain, name: str,
     torque_nm = p_shaft / max(omega, 1e-9)
     prop_r = 0.5 * powertrain.prop.diameter_in * 25.4
     belly = min(y_lo(x_te(0.0) - 5.0, 0.0), y_lo(0.5 * x_te(0.0), 0.0))
-    gates = mount_gates(part, thrust_n, torque_nm, x_te, prop_r, belly,
-                        plan.half_span_m * 1000.0)
+    # the SAME trailing edge the score's clearance gate uses, so the two
+    # can never disagree about where the wing ends
+    gates = mount_gates(part, thrust_n, torque_nm, te_station(plan), prop_r,
+                        belly, plan.half_span_m * 1000.0)
     return part, gates
 
 

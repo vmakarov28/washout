@@ -53,8 +53,10 @@ from dataclasses import replace
 import numpy as np
 
 from .bays import BaySpec, POINTS_PER_BAY, insert_detours
-from .vase import (LayerStack, PrintSettings, arc_length_mm, skin_drift_abs,
-                   solve_ramp_mm, thicken_for_nozzle)
+from .bays import BAND_MARGIN
+from .vase import (LayerStack, PrintSettings, arc_length_mm,
+                   cut_budget_profile, solve_ramp_from_rates,
+                   thicken_for_nozzle)
 
 
 def hinge_x(settings: PrintSettings) -> float:
@@ -242,7 +244,6 @@ def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
     is reported as unmakeable rather than cut short."""
     if not has_elevon(settings):
         return None, None
-    lim = np.tan(np.radians(settings.max_overhang_deg))
     j = 0
     for a, b in panel_etas:
         if a < settings.elevon_eta - 1e-9:
@@ -252,27 +253,66 @@ def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
                                 z_step_mm=z_step_mm)
             z_h = arc_length_mm(plan, a, eta_h)
             run = tongue_t_mm + 2.0 * SOCKET_RUN_CLEAR_MM
-            zs, drift = skin_drift_abs(bare, x_abs_mm - 0.5 * length_mm,
-                                       x_abs_mm + 0.5 * length_mm, side="upper")
+            zs, rate, ok, rise = cut_budget_profile(
+                bare, x_abs_mm - 0.5 * length_mm, x_abs_mm + 0.5 * length_mm,
+                side="upper", margin_frac=BAND_MARGIN)
+            # How deep the socket can ACTUALLY be, measured on the
+            # elevon's own contour rather than on the aerofoil it came
+            # from. The nose is chamfered for deflection and the trailing
+            # edge carries `min_te_mm`, so the part is thinner than the
+            # section at the same station -- taking the aerofoil's
+            # thickness put the trainer's socket floor within a bead of
+            # its own lower skin and the clearance gate failed the part.
+            k_h = int(np.argmin(np.abs(bare.z_mm - z_h)))
+            loop = bare.contours[k_h]
+            i_le = int(np.argmin(loop[:, 0]))
+            up, lo = loop[:i_le + 1][::-1], loop[i_le:]
+            xs_b = np.linspace(x_abs_mm - 0.5 * length_mm,
+                               x_abs_mm + 0.5 * length_mm, 9) - bare.origin_mm[0]
+            inside = ((xs_b >= max(up[0, 0], lo[0, 0]))
+                      & (xs_b <= min(up[-1, 0], lo[-1, 0])))
+            if not inside.any():
+                return j, None            # the socket is off the part
+            gap = (np.interp(xs_b[inside], up[:, 0], up[:, 1])
+                   - np.interp(xs_b[inside], lo[:, 0], lo[:, 1]))
+            w = settings.extrusion_width_mm
+            depth_mm = min(depth_mm, float(gap.min()) - 3.0 * w)
+            if depth_mm <= 0.0:
+                return j, None            # no section left to cut into
+            # A socket at the panel's ROOT FACE needs no ramp in: that
+            # face is open, exactly as a bay at the centreline is. The
+            # horn sits at the elevon's inboard end on every aircraft in
+            # the fleet -- the pushrod reaches it from the servo just
+            # inboard -- so this is the normal case, not the corner one.
+            start = max(z_h - 0.5 * run, 0.0)
+            at_root = start <= settings.extrusion_width_mm
             ramps = []
             for sign in (+1.0, -1.0):
                 edge = z_h + sign * 0.5 * run
-                sel = (zs - edge) * sign > 0.0
+                sel = ((zs - edge) * sign > 0.0) & ok
                 d = np.abs(zs[sel] - edge)
                 order = np.argsort(d)
-                ramps.append(solve_ramp_mm(d[order], drift[sel][order],
-                                           depth_mm, lim, margin))
+                ramps.append(solve_ramp_from_rates(
+                    d[order], rate[sel][order], rise[sel][order],
+                    depth_mm, margin))
             ramp_out, ramp_in = ramps
+            if at_root:
+                ramp_in, start = 0.0, 0.0
             if not (np.isfinite(ramp_out) and np.isfinite(ramp_in)):
                 return j, None
             spec = BaySpec("horn socket", 0.0, 0.0,
-                           z_h - 0.5 * run, z_h + 0.5 * run, ramp_out, depth_mm,
+                           start, z_h + 0.5 * run, ramp_out, depth_mm,
                            settings.extrusion_width_mm, open_from="upper",
                            ledge_mm=0.0, ramp_in_mm=ramp_in,
                            length_mm=length_mm, x_abs_mm=x_abs_mm)
             return j, spec
         j += 1
     return None, None
+
+
+def socket_depth_of(spec) -> float:
+    """The depth a `socket_for` spec was actually cut to."""
+    return 0.0 if spec is None else float(spec.depth_mm)
 
 
 def build_elevons(plan, settings: PrintSettings, panel_etas,

@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.spatial import Delaunay
 
+from .. import linkage as _lkg
 from . import stl as _stl
 from .bays import BaySpec, UPPER, _detour, split_skins
 from .vase import LayerStack, PrintSettings, arc_length_mm, thicken_for_nozzle
@@ -369,9 +370,34 @@ SOCKET_DEPTH_FACTOR = 3.0
 """The socket is this many horn thicknesses deep when the section
 allows: the tongue is held in bearing by the skin, and the glue only
 keeps it there."""
-SOCKET_MIN_FACTOR = 2.0
-"""Below this many thicknesses the socket is a groove, not a socket, and
-the horn is a glue joint in peel on foamed PLA. Gated."""
+HORN_BOND_MPA = 1.0
+"""Shear a bond between the horn and the socket's wall is credited with.
+The same DECLARED allowable the panel joints and the motor mount use,
+and for the same reason: the foam is the weak side, and it has not been
+tested here."""
+
+HORN_SAFETY = 1.5
+"""Factor on the servo's STALL torque, which is the load case: a servo
+that meets a jammed surface delivers it, and the horn is what stops the
+elevon rather than the socket tearing out."""
+
+
+def socket_moment_capacity_nmm(length_mm: float, depth_mm: float,
+                               allow_mpa: float = HORN_BOND_MPA) -> float:
+    """What a socket of this size can resist before the horn levers out.
+
+    The pushrod pulls the blade at a height above the surface, so the
+    buried tongue is loaded as a COUPLE, not in shear: the bond on the
+    forward half pulls one way and the aft half the other. Taking the
+    bond stress as triangular along the tongue, peaking at its ends, the
+    couple its two faces can carry is
+
+        M = tau * (2 * L * d) * L / 4
+
+    -- bonded area times the allowable times the lever between the two
+    halves' centroids. A thickness ratio cannot express this: it has no
+    length in it, and the tongue's LENGTH is most of the strength."""
+    return float(allow_mpa * (2.0 * length_mm * depth_mm) * length_mm / 4.0)
 SOCKET_CLEAR_MM = 0.15
 """Fit clearance each side of the tongue in the socket's full-depth run."""
 
@@ -379,12 +405,60 @@ SOCKET_CLEAR_MM = 0.15
 def socket_depth_mm(section_thick_mm: float, wall_mm: float) -> float:
     """How deep the socket can be: the tongue's wish, or what the section
     leaves after both skins and a bead of floor clearance."""
-    return float(min(SOCKET_DEPTH_FACTOR * HORN_T_MM,
-                     section_thick_mm - 2.0 * wall_mm - wall_mm))
+    return float(max(min(SOCKET_DEPTH_FACTOR * HORN_T_MM,
+                         section_thick_mm - 2.0 * wall_mm - wall_mm), 0.0))
+
+
+def horn_geometry(plan, link, eta_h: float, wall_mm: float):
+    """Where the horn sits and how deep its socket can be.
+
+    -> (x_mid_mm, socket_len_mm, socket_depth_mm, horn_above_mm), the
+    station in mm aft of the ROOT leading edge.
+
+    The hole has to end up where the four-bar put it: `hinge_x_mm` aft of
+    the local leading edge plus `horn_dx_mm` aft of the axis, which is
+    how far the horn stands clear of the hinge tape. The blade's lobe is
+    half a strap wide, so the tongue's forward end is that much ahead of
+    the hole, and the socket is the tongue plus a fit clearance at each
+    end."""
+    st = plan.at(float(np.clip(eta_h, 0.0, 1.0)))
+    c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
+    x_hole = x_le + link.hinge_x_mm + link.horn_dx_mm
+    x0 = x_hole - 0.5 * _lkg.HORN_STRAP_MM
+    xs = np.clip(np.linspace(x0 - x_le, x0 + HORN_TONGUE_MM - x_le, 5)
+                 / max(c_mm, 1e-9), 0.0, 1.0)
+    t_mm = float(st.airfoil.thickness(xs).min()) * c_mm
+    return (x0 + 0.5 * HORN_TONGUE_MM,
+            HORN_TONGUE_MM + 2.0 * SOCKET_CLEAR_MM,
+            socket_depth_mm(t_mm, wall_mm), float(link.horn_arm_mm))
+
+
+def horn_for(plan, link, eta_h: float, wall_mm: float, name: str,
+             applied_nmm: float = 0.0) -> SolidPart:
+    """The horn, built to the elevon's own surface at its station.
+
+    The tongue's top edge follows that surface rather than sitting flat
+    on its crown, so the blade stands square to the section instead of
+    rocking. The section is taken untwisted, which is the frame the horn
+    is glued in: twist rotates the whole section and the horn with it."""
+    x_mid, _, depth, above = horn_geometry(plan, link, eta_h, wall_mm)
+    st = plan.at(float(np.clip(eta_h, 0.0, 1.0)))
+    c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
+    x0 = x_mid - 0.5 * HORN_TONGUE_MM
+
+    def y_up(x_abs):
+        f = float(np.clip((x_abs - x_le) / max(c_mm, 1e-9), 0.0, 1.0))
+        return float(st.airfoil.y_upper(np.array([f]))[0]) * c_mm
+
+    y0 = y_up(x0)
+    return control_horn(name, depth, above, _lkg.HORN_STRAP_MM,
+                        lambda x: y_up(x0 + x) - y0,
+                        applied_nmm=applied_nmm)
 
 
 def control_horn(name: str, socket_depth: float, horn_above_mm: float,
-                 strap_mm: float, surface_y_at) -> SolidPart:
+                 strap_mm: float, surface_y_at,
+                 applied_nmm: float = 0.0) -> SolidPart:
     """The horn as a flat plate in the section plane (x aft, y up), the
     elevon's upper surface at y = 0 over the tongue.
 
@@ -395,6 +469,11 @@ def control_horn(name: str, socket_depth: float, horn_above_mm: float,
     follows the actual surface (`surface_y_at(x)`, mm relative to the
     forward end), so the plate sits on the skin rather than rocking on
     its crown. Prints lying flat; the hole is vertical."""
+    if socket_depth <= 0.0:
+        raise ValueError(
+            f"{name}: a horn with a {socket_depth:.2f} mm tongue is not a "
+            f"horn -- the section at its station has no depth to socket "
+            f"into, and the outline would come back degenerate")
     r = 0.5 * strap_mm
     xs_t = np.linspace(0.0, HORN_TONGUE_MM, 7)
     surf = np.array([surface_y_at(x) for x in xs_t])
@@ -420,10 +499,14 @@ def control_horn(name: str, socket_depth: float, horn_above_mm: float,
                      quantity=2,
                      notes=(f"tongue {HORN_TONGUE_MM:.0f} x {socket_depth:.1f} mm "
                             f"into the elevon's socket; hole {HORN_HOLE_MM} mm",))
-    part.gates.append(_gate("socket depth",
-                            socket_depth >= SOCKET_MIN_FACTOR * HORN_T_MM,
-                            socket_depth, SOCKET_MIN_FACTOR * HORN_T_MM, "mm",
-                            f"{socket_depth / HORN_T_MM:.1f} horn thicknesses"))
+    cap = socket_moment_capacity_nmm(HORN_TONGUE_MM, socket_depth)
+    if applied_nmm > 0.0:
+        part.gates.append(_gate(
+            "horn socket holds", cap >= HORN_SAFETY * applied_nmm,
+            cap / applied_nmm, HORN_SAFETY, "x",
+            f"{cap:.0f} N.mm of couple from a {HORN_TONGUE_MM:.0f} x "
+            f"{socket_depth:.1f} mm tongue at {HORN_BOND_MPA} MPa "
+            f"(declared) against {applied_nmm:.0f} the servo can lever"))
     return part
 
 
@@ -797,8 +880,16 @@ def hatch_lid(plan, settings: PrintSettings, cut, name: str,
     It covers the span over which the ledge is at its full depth. Beyond
     that the ramp has made the opening shallower than the lid and the
     ledge has become the floor; what remains there is a taper the lid
-    cannot sit in. One part for both halves, since a root bay is one
-    opening across the centreline; it also spans the centre joint."""
+    cannot sit in.
+
+    ONE PER HALF, printed from the centreline outward, and the pair meets
+    over the centre joint the panels already have. Mirroring it into a
+    single part across both halves was the first version and it failed
+    two gates at once: 259 mm of print height against a 250 mm envelope,
+    and a first layer of 32 mm2 against the 40 mm2 a small part needs to
+    stay on the bed -- because a tip-to-tip lid begins at an OUTBOARD end,
+    where the bay has narrowed to almost nothing. Begun at the
+    centreline it starts on the widest, thickest section it has."""
     if cut.open_from != UPPER or cut.ledge_mm <= 0.0 or cut.eta0 > 1e-9:
         return None
     step = z_step_mm or settings.layer_h_mm
@@ -836,16 +927,12 @@ def hatch_lid(plan, settings: PrintSettings, cut, name: str,
         z_keep.append(float(z))
     if len(contours) < 3:
         return None
-    half = np.array(contours)
-    z_half = np.array(z_keep)
-    # mirror across the centreline: one lid for both halves
-    full = np.concatenate([half[::-1], half[1:]], 0)
-    z_full = np.concatenate([z_half[-1] - z_half[::-1], z_half[-1] + z_half[1:]], 0)
+    full = np.array(contours)
+    z_full = np.array(z_keep)
     flat = full.reshape(-1, 2)
     origin = 0.5 * (flat.min(0) + flat.max(0))
     full = full - origin
-    eta_full = np.array([float(np.interp(abs(z - z_half[-1]), s_tab, e_tab))
-                         for z in z_full])
+    eta_full = np.array([float(np.interp(z, s_tab, e_tab)) for z in z_full])
     return LayerStack(z_mm=z_full, eta=eta_full, contours=full, settings=settings,
                       name=name, z_step_mm=step, has_ribs=False, role="lid",
                       n_upper=n_pts, origin_mm=(float(origin[0]), float(origin[1])))

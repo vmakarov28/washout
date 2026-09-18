@@ -34,6 +34,7 @@ from ..geom import interior as it
 from ..printing import vase
 from ..printing import bays as bays_mod
 from ..printing import parts as pmod
+from .. import wiring as wire
 from ..printing import elevons as elv
 from ..aero import performance as perf
 from ..aero import lateral
@@ -227,6 +228,82 @@ def _band_leaves(plan, v, edge_eta: float, outboard: bool,
     return end
 
 
+def ramp_walk(plan, bare_by_eta, x_abs_mm, length_mm, side, depth_mm,
+              edge_eta, outboard, margin=None):
+    """Span a ramp needs to fade `depth_mm`, walking away from `edge_eta`.
+
+    -> (ramp_mm, dead_mm). `inf` when no run of span either side affords
+    it; `dead_mm` is the span crossed at FULL depth first, where the wing
+    alone already spends the whole overhang budget and no ramp can live.
+
+    One slope for the whole ramp, because `BaySpec.depth_frac` is linear:
+    a ramp walked piecewise, each panel fading at its own rate and the
+    lengths summed, ends up at the weighted AVERAGE of those rates, which
+    overruns the tighter panel. The trainer's servo pocket opened at
+    1.04 mm/mm through a panel budgeted at 0.98 that way, after three
+    fixes that each made the walk more careful and none of which touched
+    it.
+
+    The profile comes from `vase.cut_budget_profile` at the cut's own
+    ABSOLUTE station, so it carries both the skin's drift there and the
+    rise the floor's deepest corner travels on top of the depth, station
+    by station. It ends where the band leaves the section: a root bay at
+    a fixed station passes ahead of the local leading edge somewhere
+    outboard on a swept body, and a ramp still fading there is a detour
+    with nowhere to be.
+
+    Outboard for the ramp OUT from eta1, inboard for the ramp IN from
+    eta0. The two cross different panels and must be budgeted where they
+    live -- sizing the ramp-in from the outboard walk was another way the
+    same pocket ran over.
+
+    Used by every detour that fades: the payload bays, the servo pockets,
+    and the wiring channels.
+    """
+    margin = RAMP_MARGIN if margin is None else margin
+    half = 0.5 * length_mm
+    dist, rate, valid, rise_at = [], [], [], []
+    for (a, b), pn in bare_by_eta:
+        if outboard and b <= edge_eta:
+            continue
+        if not outboard and a >= edge_eta:
+            continue
+        zs, rt, ok, rs = vase.cut_budget_profile(
+            pn, x_abs_mm - half, x_abs_mm + half,
+            side=side, margin_frac=bays_mod.BAND_MARGIN)
+        if len(zs) == 0:
+            continue
+        e_of = a + zs / max(pn.height_mm, 1e-9) * (b - a)
+        for e, r, o, ri in zip(e_of, rt, ok, rs):
+            if outboard and e < edge_eta:
+                continue
+            if not outboard and e > edge_eta:
+                continue
+            dist.append(vase.arc_length_mm(plan, min(e, edge_eta),
+                                           max(e, edge_eta), n=40))
+            rate.append(r)
+            valid.append(o)
+            rise_at.append(ri)
+    if not dist:
+        return float("inf"), 0.0
+    order = np.argsort(dist)
+    dist = np.array(dist)[order]
+    rate = np.array(rate)[order]
+    valid = np.array(valid)[order]
+    rise_at = np.array(rise_at)[order]
+    bad = np.where(~valid)[0]
+    if len(bad):
+        dist, rate, rise_at = dist[:bad[0]], rate[:bad[0]], rise_at[:bad[0]]
+    live = np.where(rate > 0.0)[0]
+    if len(live) == 0:
+        return float("inf"), 0.0
+    dead = float(dist[live[0]]) if live[0] > 0 else 0.0
+    dist, rate, rise_at = (dist[live[0]:] - dead, rate[live[0]:],
+                           rise_at[live[0]:])
+    return (vase.solve_ramp_from_rates(dist, rate, rise_at, depth_mm, margin),
+            dead)
+
+
 def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
               n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
     """Where every bay actually goes.
@@ -403,6 +480,12 @@ class Mission:
     servo_arm_mm: float = 11.0
     horn_below_mm: float = 8.0
     servo_travel_deg: float = 60.0
+    servo_stall_nmm: float = 176.0
+    """The servo's stall torque, in newton-millimetres. DECLARED
+    hardware, like the arm length beside it: a 9 g servo is about
+    1.8 kg.cm. It is the load case for the control horn, because a servo
+    that meets a jammed surface delivers its stall torque and something
+    has to be the thing that gives."""
     servo_shaft_offset_mm: float = 11.35
     """How far the servo's output shaft sits from the middle of its body
     along the span: half of a 9 g servo's 22.7 mm. The servo is mounted
@@ -673,6 +756,7 @@ class Mission:
                       holds=("servos x2",))),
             # sub-micro hardware to match the sub-micro servos
             servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
+            servo_stall_nmm=78.0,       # 5 g sub-micro, about 0.8 kg.cm
             battery_kg=0.028,
             cruise_band_ms=(8.0, 17.0),
             min_static_margin=0.10, max_static_margin=0.26,
@@ -1053,6 +1137,21 @@ class Evaluation:
     trim: perf.TrimState | None = None
     mass: perf.MassBudget | None = None
     panels: list = field(default_factory=list)
+    elevons: list = field(default_factory=list)
+    channels: tuple = ()
+    """The wiring runs, with the length of lead each one needs. A recess
+    is sealed from the cavity, so every wire is on the outside."""
+    bay_cuts: tuple = ()
+    """The openings as they were cut, in planform coordinates. The hatch
+    lid is built to them, so the lid and the ledge it sits in come from
+    one description rather than two."""
+    horn_eta: float = 0.0
+    """Span station of the control horn: the servo's shaft, or the
+    elevon's root when the shaft falls short of it."""
+    """The control surfaces as they were SCORED, sockets cut. They used
+    to be built once here for the mass and the gates and again in
+    `do_export` for the STLs, which is two places building one part --
+    the failure this project keeps finding. The export uses these."""
     spar_fits: list = field(default_factory=list)
     lateral: object | None = None
     fairness: object | None = None
@@ -1276,93 +1375,9 @@ def _evaluate_once(
         # budget of the panel that happens to hold the box. Solved by
         # walking outboard: each panel's budget says how much depth it can
         # close, and the ramp keeps going until the depth is spent.
-        def walk(panels_in_order, edge_eta, outboard):
-            """Span the ramp needs, crossing panels away from `edge_eta`.
-
-            Each panel's budget says how much depth it can fade; the
-            ramp keeps going until the depth is spent. Outboard for the
-            ramp-out from eta1; INBOARD for the ramp-in from eta0 -- the
-            two cross different panels and must be budgeted where they
-            live. Sizing the ramp-in from the outboard walk let the
-            trainer's servo pocket open at 1.04 mm/mm through a panel
-            whose budget there was 0.98."""
-            # ONE slope for the whole ramp, at the tightest budget it
-            # crosses. The profile `depth_frac` applies is linear, so a
-            # ramp walked piecewise -- each panel fading at its own rate,
-            # the lengths summed -- ends up with a slope that is the
-            # weighted AVERAGE of those rates, which overruns the tighter
-            # panel: the trainer's servo pocket opened at 1.04 mm/mm
-            # through a panel budgeted at 0.98, after three fixes that
-            # each made the walk more careful and none of which touched
-            # this. Slightly longer ramps, never over budget.
-            # A panel with NO budget cannot be faded through at all: the
-            # wing alone already spends the whole overhang there. The bay
-            # stays fully open across it and the ramp begins in the next
-            # panel that has room -- micro's centre body is exactly this,
-            # and fading through it anyway was its p0 overhang failure.
-            # The dead span is returned so the full-depth run is extended
-            # over it.
-            # The skin's drift at the cut's ABSOLUTE station, gathered
-            # along the span away from the bay's edge across every panel
-            # it may cross, and the ramp solved against that profile:
-            # the shortest L whose one linear rate, (limit - worst drift
-            # within L) * margin, fades the depth in L. A panel-wide
-            # worst case said the trainer's pack could never close,
-            # because its band runs into the nose 100 mm out while the
-            # ramp is over by 55.
-            #
-            # And the ramp has to finish while the band is still INSIDE
-            # the section: a root bay at an absolute station passes
-            # ahead of the local leading edge somewhere outboard on a
-            # swept body, and a ramp still fading there is a detour with
-            # nowhere to be. Samples beyond that station are dropped.
-            #
-            # Where the drift already exceeds the limit -- micro's centre
-            # body -- no ramp can live, so the bay stays fully open
-            # across that DEAD span and the ramp begins where it can.
-            half = 0.5 * cut_length(v)
-            dist, rate, valid, rise_at = [], [], [], []
-            for (a, b), pn in panels_in_order:
-                if outboard and b <= edge_eta:
-                    continue
-                if not outboard and a >= edge_eta:
-                    continue
-                zs, rt, ok, rs = vase.cut_budget_profile(
-                    pn, v.x_abs_mm - half, v.x_abs_mm + half,
-                    side=bay.open_from, margin_frac=bays_mod.BAND_MARGIN)
-                if len(zs) == 0:
-                    continue
-                e_of = a + zs / max(pn.height_mm, 1e-9) * (b - a)
-                for e, r, o, ri in zip(e_of, rt, ok, rs):
-                    if outboard and e < edge_eta:
-                        continue
-                    if not outboard and e > edge_eta:
-                        continue
-                    dist.append(vase.arc_length_mm(plan, min(e, edge_eta),
-                                                   max(e, edge_eta), n=40))
-                    rate.append(r)
-                    valid.append(o)
-                    rise_at.append(ri)
-            if not dist:
-                return float("inf"), 0.0
-            order = np.argsort(dist)
-            dist = np.array(dist)[order]
-            rate = np.array(rate)[order]
-            valid = np.array(valid)[order]
-            rise_at = np.array(rise_at)[order]
-            # the profile ends where the band leaves the section
-            bad = np.where(~valid)[0]
-            if len(bad):
-                dist, rate, rise_at = (dist[:bad[0]], rate[:bad[0]],
-                                       rise_at[:bad[0]])
-            live = np.where(rate > 0.0)[0]
-            if len(live) == 0:
-                return float("inf"), 0.0
-            dead = float(dist[live[0]]) if live[0] > 0 else 0.0
-            dist, rate, rise_at = (dist[live[0]:] - dead, rate[live[0]:],
-                                   rise_at[live[0]:])
-            return (vase.solve_ramp_from_rates(dist, rate, rise_at, depth,
-                                               RAMP_MARGIN), dead)
+        def walk(order_, edge_, outboard):
+            return ramp_walk(plan, order_, v.x_abs_mm, cut_length(v),
+                             bay.open_from, depth, edge_, outboard)
 
         bay_ramp[bay.name], bay_dead_out[bay.name] = walk(
             bare_by_eta, v.eta1, outboard=True)
@@ -1427,12 +1442,128 @@ def _evaluate_once(
         for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
                        for b in mission.bays)
         if v.fits(plan, wall)[0] and bay.name not in clashing)
+    # --- the wiring, in channels cut into the same skin ---
+    #
+    # A recess in vase mode is exterior space, sealed from the wing's
+    # cavity and from every other recess by one bead, so a lead cannot
+    # pass from the receiver's pocket to a servo's THROUGH the wing.
+    # There is no through. Every wire runs on the outside, in a channel,
+    # and a channel is a detour like any other: same ramps, same budget,
+    # same clearance rules.
+    cut_bands = {v.name: (v.x_abs_mm - 0.5 * cut_length(v),
+                          v.x_abs_mm + 0.5 * cut_length(v))
+                 for v in bay_vols}
+    te_of = pmod.te_station(plan)
+    half_span_mm = plan.half_span_m * 1000.0
+    channels, wire_reasons = wire.plan_channels(
+        plan, mission, bay_vols, bay_etas, cut_bands,
+        lambda e: te_of(e * half_span_mm), wall)
+    reasons.extend(wire_reasons)
+    penalty += 4.0 * len(wire_reasons)
+
+    chan_cuts = []
+    for ch in channels:
+        depth_ch = ch.depth_mm + wall
+        r_out, d_out = ramp_walk(plan, bare_by_eta, ch.x_abs_mm, ch.length_mm,
+                                 "upper", depth_ch, ch.eta1, True)
+        if ch.eta0 > 1e-9:
+            r_in, d_in = ramp_walk(plan, list(reversed(bare_by_eta)),
+                                   ch.x_abs_mm, ch.length_mm, "upper",
+                                   depth_ch, ch.eta0, False)
+        else:
+            r_in, d_in = 0.0, 0.0
+        if not (np.isfinite(r_out) and np.isfinite(r_in)):
+            reasons.append(
+                f"{ch.name} channel cannot be faded: no span either side of "
+                f"it closes {depth_ch:.1f} mm within the overhang limit")
+            penalty += 4.0
+            continue
+        cut = vase.BayCut(f"{ch.name} channel", 0.0, 0.0, ch.eta0, ch.eta1,
+                          depth_ch, r_out, r_in, "upper", 0.0, d_out, d_in,
+                          length_mm=ch.length_mm, x_abs_mm=ch.x_abs_mm)
+        # It has to be clear of every opening it does not serve, at every
+        # height both exist: the skin cannot carry two detours in one
+        # chord band. A channel that is not is dropped and named, never
+        # cut into the wall of the bay it was meant to reach.
+        v_ch = ch.volume(plan, wall)
+        rival = next((o for o in bay_vols
+                      if not (o.eta1 < v_ch.eta0 or o.eta0 > v_ch.eta1)
+                      and it.gap_mm(v_ch, o, plan) < wire.WALL_INSET_MM), None)
+        if rival is not None:
+            # A channel that SERVES this bay has to reach it, and it
+            # cannot: a groove a couple of millimetres deep meeting a
+            # pocket a centimetre deep leaves a step between their floors
+            # that the printer would have to build in mid-air, and one
+            # trapezoid per detour cannot express the two as a single
+            # continuous profile. Extending the pocket to the root face
+            # instead was tried: on a swept wing a trench at a fixed
+            # station crosses the whole chord as the leading edge runs
+            # aft, and it met every other opening on the way.
+            gap = it.gap_mm(v_ch, rival, plan)
+            reasons.append(
+                f"{ch.name} channel has no continuous run to {rival.name}: "
+                f"{gap:.1f} mm of skin between them where it needs "
+                f"{wire.WALL_INSET_MM:.1f}, and their floors differ by "
+                f"{abs(rival.height_mm - ch.depth_mm):.0f} mm")
+            penalty += 6.0
+            continue
+        chan_cuts.append(cut)
+
     panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm,
-                               bays=cut_list)
+                               bays=cut_list + tuple(chan_cuts))
+    # --- the mechanism, and the socket the horn drops into ---
+    #
+    # Solved HERE, before the elevons are built, because the socket is a
+    # CUT in the elevon and the part that gets scored has to be the part
+    # that gets printed. Nothing in the four-bar needs the trim, so there
+    # was never a reason for it to come later than this.
+    #
+    # The horn goes where the pushrod can reach it: at the servo's output
+    # shaft, or at the elevon's own root when the shaft falls short of
+    # it. The shortfall is gated below rather than papered over.
+    link = None
+    socket_map: dict = {}
+    horn_at = None
+    if elv.has_elevon(settings) and "servos" in bay_seats:
+        servo_bay = next(b for b in mission.bays if b.name == "servos")
+        half_mm = plan.half_span_m * 1000.0
+        e_servo = bay_etas.get("servos") or 0.5 * (p_vec["elevon_eta"] + 1.0)
+        e_shaft = e_servo + mission.servo_shaft_offset_mm / max(half_mm, 1e-9)
+        e_horn = max(e_shaft, float(settings.elevon_eta))
+        link = lkg.for_station(
+            plan, e_horn, elv.hinge_x(settings), bay_seats["servos"],
+            mission.servo_arm_mm, mission.horn_below_mm,
+            mission.servo_travel_deg, wall,
+            side=+1.0 if servo_bay.open_from == "upper" else -1.0)
+        x_mid, s_len, s_depth, _ = pmod.horn_geometry(plan, link, e_horn, wall)
+        j_sock, spec = elv.socket_for(
+            plan, settings, joint_etas, e_horn, x_mid, s_len, s_depth,
+            pmod.HORN_T_MM,
+            mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
+            RAMP_MARGIN, z_step_mm)
+        if spec is not None:
+            s_depth = elv.socket_depth_of(spec)
+        # Cut it only if it can HOLD the horn, exactly as only a bay that
+        # fits and is clear of everything is cut. A socket that fails its
+        # load gate is not a socket, it is a notch that weakens a thin
+        # part; the reason below says so and the design pays for it.
+        cap = pmod.socket_moment_capacity_nmm(pmod.HORN_TONGUE_MM, s_depth)
+        rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
+        applied = rod_n * link.horn_arm_mm
+        holds = cap >= pmod.HORN_SAFETY * applied
+        if j_sock is not None and spec is not None and holds:
+            socket_map[j_sock] = (spec,)
+        # The horn is a part only if its socket is one: micro's section
+        # at the horn's station leaves no depth at all, and building a
+        # horn with a zero-deep tongue hands the triangulator a
+        # degenerate outline.
+        horn_at = (e_horn if (holds and spec is not None) else 0.0,
+                   e_shaft, s_depth, j_sock, spec, cap, applied)
+
     elevon_parts = elv.build_elevons(
         plan, settings, joint_etas,
         mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
-        z_step_mm=z_step_mm)
+        z_step_mm=z_step_mm, sockets=socket_map)
     checks = [vase.check(p) for p in panels + elevon_parts]
     # The elevons are shell too. Splitting the trailing edge off into its
     # own part does not make it weightless, and it adds two walls at the
@@ -1770,24 +1901,13 @@ def _evaluate_once(
     # the two ways that matter -- it is linear, so it cannot show a
     # mechanism running out of travel, and it is symmetric, so it cannot
     # show the differential a real linkage has.
-    link = None
-    if elv.has_elevon(settings) and "servos" in bay_seats:
+    # `link` and the horn's socket were solved above, before the elevons
+    # were built, because the socket is a cut in one of them.
+    if link is not None and horn_at is not None:
+        _, e_shaft, s_depth, j_sock, spec, cap, applied = horn_at
+        e_horn = max(e_shaft, float(settings.elevon_eta))
         servo_bay = next(b for b in mission.bays if b.name == "servos")
-        # Where the SHAFT is, which is where the pushrod leaves and where
-        # the horn must therefore be. A servo whose shaft is inboard of
-        # the hinge station has no elevon beside it to drive: the four-bar
-        # is solved at the elevon's own root, the nearest station where
-        # the mechanism it models exists, and the shortfall is a gate
-        # below rather than something the geometry pretends away.
         half_mm = plan.half_span_m * 1000.0
-        e_servo = bay_etas.get("servos") or 0.5 * (e_start + 1.0)
-        e_shaft = e_servo + mission.servo_shaft_offset_mm / max(half_mm, 1e-9)
-        link = lkg.for_station(
-            plan, max(e_shaft, float(settings.elevon_eta)),
-            elv.hinge_x(settings), bay_seats["servos"],
-            mission.servo_arm_mm, mission.horn_below_mm,
-            mission.servo_travel_deg, wall,
-            side=+1.0 if servo_bay.open_from == "upper" else -1.0)
         if servo_bay.drives_elevon and e_shaft < settings.elevon_eta - 1e-9:
             short = (settings.elevon_eta - e_shaft) * half_mm
             reasons.append(
@@ -1795,6 +1915,25 @@ def _evaluate_once(
                 f"of the elevon it drives (starts at eta "
                 f"{settings.elevon_eta:.2f})")
             penalty += 0.25 * short
+        # Can the socket hold the horn down? The pushrod pulls the blade
+        # at a height above the surface, so the buried tongue is loaded as
+        # a couple and the socket's two faces have to carry it. The load
+        # is the servo's STALL torque over its arm: a servo that meets a
+        # jammed surface delivers it, and the horn is what gives.
+        if cap < pmod.HORN_SAFETY * applied:
+            reasons.append(
+                f"horn socket {s_depth:.1f} mm deep at eta {e_horn:.2f} holds "
+                f"{cap:.0f} N.mm, the servo can lever {applied:.0f} "
+                f"({cap / max(applied, 1e-9):.1f}x, needs "
+                f"{pmod.HORN_SAFETY:.1f})")
+
+            penalty += 6.0 * (pmod.HORN_SAFETY - cap / max(applied, 1e-9))
+        if j_sock is None or spec is None:
+            reasons.append(
+                f"the horn's socket cannot be cut at eta {e_horn:.2f}: no "
+                f"span either side of it fades {s_depth:.1f} mm within the "
+                f"overhang limit")
+            penalty += 10.0
         # A lock inside the servo's travel is geometry, not a fault, so
         # long as it comes well AFTER the deflection the score spends: a
         # 17 mm horn on an 11 mm arm always locks before 54 degrees of
@@ -1926,6 +2065,10 @@ def _evaluate_once(
         mass_kg=mass.total_kg, cl_trim=float(pt.CL), static_margin=float(sm),
         reasons=tuple(reasons), plan=plan, trim=trim_state, mass=mass,
         panels=panels if want_panels else [],
+        elevons=elevon_parts if want_panels else [],
+        bay_cuts=tuple(cut_list),
+        channels=tuple(channels),
+        horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
         fins=fins, dynamics=modes,

@@ -136,6 +136,29 @@ def export_companions(ev, settings: vase.PrintSettings, out: Path,
     from washout.printing import parts as _parts
 
     made = []
+    for cut in getattr(ev, "bay_cuts", ()):
+        try:
+            lid = _parts.hatch_lid(
+                ev.plan, settings, cut,
+                f"{ev.plan.name}_lid_"
+                + cut.name.replace(" ", "_").replace("+", ""))
+        except Exception as e:                       # noqa: BLE001
+            print(f"  lid for {cut.name} skipped ({type(e).__name__}: {e})")
+            continue
+        if lid is not None:
+            made.append((lid, []))
+    if ev.linkage is not None and ev.horn_eta > 0.0:
+        try:
+            applied = 0.0
+            if mission is not None:
+                rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
+                applied = rod_n * ev.linkage.horn_arm_mm
+            horn = _parts.horn_for(ev.plan, ev.linkage, ev.horn_eta,
+                                   settings.extrusion_width_mm,
+                                   f"{ev.plan.name}_horn", applied)
+            made.append((horn, []))
+        except Exception as e:                       # noqa: BLE001
+            print(f"  control horn skipped ({type(e).__name__}: {e})")
     if mission is not None and mission.powertrain is not None:
         try:
             part, gates = _parts.mount_for(ev.plan, settings,
@@ -169,9 +192,14 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
     # The control surfaces, as their own parts. The hinge line runs
     # spanwise and print Z is the span, so an elevon prints root-down in
     # exactly the same orientation as the wing panel it came off.
-    panels = panels + elevons.build_elevons(
-        ev.plan, settings, vase.panel_etas(ev.plan, settings),
-        ev.max_elevon_deflect_deg + settings.hinge_margin_deg)
+    # The control surfaces as they were SCORED, socket cut. Rebuilding
+    # them here is the same mistake rebuilding the panels was: the part
+    # that flies has to be the part that was judged.
+    panels = panels + (list(ev.elevons) if ev.elevons
+                       else elevons.build_elevons(
+                           ev.plan, settings,
+                           vase.panel_etas(ev.plan, settings),
+                           ev.max_elevon_deflect_deg + settings.hinge_margin_deg))
     total_g = total_min = 0.0
     print(f"\nprintable parts (one half wing; mirror for the other side):")
     for pan in panels:
@@ -199,12 +227,30 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
               f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
     companions = export_companions(ev, settings, out, mission)
     if companions:
-        print("\n  companion parts (normal mode, solid PLA -- NOT vase):")
+        print("")
+        print("  companion parts:")
     for part, gates in companions:
+        if isinstance(part, vase.LayerStack):
+            # a lid is a vase part like the panels: one contour per layer,
+            # printed on its edge with the span up, so it follows the
+            # wing's own curvature with no support and no second mode
+            chk = vase.check(part)
+            rep = stl.export(part, out / f"{part.name}.stl")
+            deg, bx, by = part.best_bed_rotation()
+            ok = chk.ok and rep["watertight"]
+            print(f"  {part.name:<24} x2  h {part.height_mm:6.1f} mm  "
+                  f"{part.mass_g():5.1f} g  {bx:.0f}x{by:.0f} mm @ {deg:.0f} deg"
+                  f"  vase  "
+                  f"{'OK' if ok else 'CHECK: ' + ','.join(chk.failures())}")
+            print("      one per half, printed from the centreline outward; "
+                  "tape the seam over the centre joint")
+            if not chk.ok:
+                print(chk.report())
+            continue
         rep = part.export_stl(out / f"{part.name}.stl")
         w, h, d = part.footprint_mm
-        print(f"  {part.name:<22} x{part.quantity}  {w:.0f}x{h:.0f}x{d:.0f} mm  "
-              f"{part.mass_g():5.1f} g  "
+        print(f"  {part.name:<24} x{part.quantity}  {w:.0f}x{h:.0f}x{d:.0f} mm  "
+              f"{part.mass_g():5.1f} g  normal mode, solid PLA  "
               f"{'OK' if rep['watertight'] else 'CHECK MESH'}")
         print(f"      {part.orientation}")
         for n in part.notes:

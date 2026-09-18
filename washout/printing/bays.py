@@ -546,8 +546,33 @@ def pack_detours(detours, near: np.ndarray, lo_lim: float, hi_lim: float,
         if (hi_lim - sep) - (cur + sep) >= w:
             gaps.append((cur + sep, hi_lim - sep))
         if not gaps:
-            raise ValueError(f"no chord left to park a closed bay's "
-                             f"{len(q)} vertices ({w:.4f} wide)")
+            # Nothing wide enough: park it SHRUNK in the widest gap there
+            # is. Its vertices lie on the skin, so the only thing its
+            # width buys is a comfortable spread; a narrow slot costs
+            # nothing but the spacing rule, which is checked below. The
+            # alternative was refusing the layer, and once the wiring
+            # channels joined the payload bays in competing for one
+            # skin's chord that happened on ordinary designs.
+            all_gaps, cur = [], lo_lim
+            for oa, ob, _ in sorted(placed, key=lambda d: d[0]):
+                if oa - cur > 0.0:
+                    all_gaps.append((cur, oa))
+                cur = max(cur, ob)
+            if hi_lim - cur > 0.0:
+                all_gaps.append((cur, hi_lim))
+            if not all_gaps:
+                raise ValueError(f"no chord left at all to park a closed "
+                                 f"bay's {len(q)} vertices")
+            g0, g1 = max(all_gaps, key=lambda g: g[1] - g[0])
+            gaps, w = [(g0 + sep, g1 - sep)], max(g1 - g0 - 2.0 * sep, 0.0)
+            if w <= 0.0:
+                raise ValueError(f"no chord left at all to park a closed "
+                                 f"bay's {len(q)} vertices")
+            q = np.asarray(q, dtype=float).copy()
+            span = float(q[-1, 0] - q[0, 0])
+            if span > 1e-12:
+                q[:, 0] = g0 + sep + (q[:, 0] - q[0, 0]) * (w / span)
+            a, b = g0 + sep, g0 + sep + w
         na = min((min(max(a, g0), g1 - w) for g0, g1 in gaps),
                  key=lambda x: abs(x - a))
         q = np.asarray(q, dtype=float).copy()

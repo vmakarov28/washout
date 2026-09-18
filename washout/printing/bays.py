@@ -308,6 +308,40 @@ def floor_limits(loop_unit: np.ndarray, x0: float, x1: float,
                               gap_mm, min_groove_mm, open_from)
 
 
+def _strictly_inside(pts: np.ndarray, x0: float, x1: float,
+                     step: float) -> np.ndarray:
+    """Nudge a detour's vertices so the contour stays a SIMPLE polygon.
+
+    Every vertex strictly inside (x0, x1) and at least `step` from the
+    one before it, so no edge of the detour can be zero-length and
+    neither end can coincide with the skin vertex the run beside it ends
+    on. Order and y are untouched; only x moves, by at most a few times
+    `step`.
+
+    This is the invariant `POINTS_PER_BAY` claims and the groove used to
+    provide: while the detour was always a bead below the skin its
+    vertices differed in y and nothing could coincide. Once a closed bay
+    kept its vertices -- which is what stops the skin being
+    reparametrised layer to layer -- the y differences went away, an
+    ear-clipper fell back to a fan, and six non-manifold edges came out
+    of `stl.export`, which is the only thing in the program that checks.
+    Guaranteeing it in x costs a few hundredths of a millimetre of
+    opening and cannot be defeated by any combination of fades.
+    """
+    x = np.asarray(pts[:, 0], dtype=float).copy()
+    lo, hi = x0 + step, x1 - step
+    x[0] = min(max(x[0], lo), hi)
+    for i in range(1, len(x)):
+        x[i] = min(max(x[i], x[i - 1] + step), hi)
+    # a band too narrow to hold them all (it never is: MIN_BAND_MM is
+    # hundreds of steps wide) would stack them on `hi`; spread back down
+    for i in range(len(x) - 2, -1, -1):
+        x[i] = min(x[i], x[i + 1] - step)
+    out = pts.copy()
+    out[:, 0] = x
+    return out
+
+
 def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
             chord_mm: float, z_mm: float, min_groove_mm: float,
             x_le_mm: float = 0.0) -> np.ndarray:
@@ -323,9 +357,10 @@ def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
     if lim is None:
         # not even a groove fits: six distinct vertices a groove inside
         # the skin, so the count holds and nothing is coincident
-        xs = np.linspace(x0, x1, 6)
+        xs = np.linspace(x0, x1, POINTS_PER_BAY)
         ys = np.interp(xs, sx, sy) - sign * groove
-        return np.stack([xs, ys], 1)
+        return _strictly_inside(np.stack([xs, ys], 1), x0, x1,
+                                min_groove_mm / 20.0 / chord_mm)
 
     y_closed, y_open = lim
     d = spec.depth_frac(z_mm)
@@ -340,11 +375,41 @@ def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
         hug = float(np.interp(x, sx, sy)) - sign * groove
         return (1.0 - d) * hug + d * y_open
 
+    # How far the six vertices pull INSIDE the band, and how far the
+    # ledge's two split apart. Zero while the bay is open, so the walls
+    # stand exactly at x0 and x1 and the ledge face is vertical; growing
+    # as the groove fades, because once the detour's y values have all
+    # reached the skin its vertices would otherwise be coincident with
+    # each other and with the skin vertex each neighbouring run ends on.
+    #
+    # `POINTS_PER_BAY` says this module never lets a zero-length edge
+    # reach the ear-clipper, and while there was always a groove the y
+    # difference guaranteed it. Once a closed bay learned to keep its
+    # vertices -- which is what stops the skin being reparametrised -- the
+    # guarantee had to move into x. Six non-manifold edges on the
+    # trainer's centre body, from an ear-clipper that fell back to a fan,
+    # found by `stl.export` and by nothing else: watertightness is not
+    # one of the printability gates.
+    g = spec.groove_frac(z_mm)
+    e = 0.5 * lip * (1.0 - g)
+    # The ledge face is a slope over `q` rather than a vertical segment
+    # between two vertices sharing an x. Unconditional, because the pair
+    # coincides whenever the floor is no deeper than the ledge -- which
+    # is a nearly-closed bay, DEPTH near zero, and its groove may still
+    # be full, so a separation keyed on the groove does not see it. A
+    # hundredth of the band's width: the trainer's 73 mm hatch gets a
+    # 0.7 mm slope, the 4 mm minimum band 0.04 mm.
+    q = 0.25 * lip
+    # Vertex separation: a twentieth of a bead, which is far below
+    # anything the printer resolves and far above float noise.
+    sep = min_groove_mm / 20.0 / chord_mm
+
     if spec.ledge_mm <= 0.0:
         # a pocket: the floor's corners, and two more spread along it
-        xs = np.array([x0, x0 + lip, x0 + 2 * lip,
-                       x1 - 2 * lip, x1 - lip, x1])
-        return np.stack([xs, [floor_at(x) for x in xs]], 1)
+        xs = np.array([x0 + e, x0 + lip, x0 + 2 * lip,
+                       x1 - 2 * lip, x1 - lip, x1 - e])
+        pts = np.stack([xs, [floor_at(x) for x in xs]], 1)
+        return _strictly_inside(pts, x0, x1, sep)
 
     # a ledge one lid-thickness inside the skin at each wall, but never
     # deeper than the floor itself -- on a nearly closed bay the ledge
@@ -371,12 +436,13 @@ def _detour(spec: BaySpec, near: np.ndarray, far: np.ndarray,
         f = floor_at(x)
         return max(y, f) if sign > 0 else min(y, f)
 
-    return np.array([[x0, ledge_at(x0)],
-                     [x0 + lip, ledge_at(x0 + lip)],
-                     [x0 + lip, floor_at(x0 + lip)],
-                     [x1 - lip, floor_at(x1 - lip)],
-                     [x1 - lip, ledge_at(x1 - lip)],
-                     [x1, ledge_at(x1)]])
+    pts = np.array([[x0 + e, ledge_at(x0 + e)],
+                    [x0 + lip, ledge_at(x0 + lip)],
+                    [x0 + lip + q, floor_at(x0 + lip + q)],
+                    [x1 - lip - q, floor_at(x1 - lip - q)],
+                    [x1 - lip, ledge_at(x1 - lip)],
+                    [x1 - e, ledge_at(x1 - e)]])
+    return _strictly_inside(pts, x0, x1, sep)
 
 
 def rebuild_skin(near: np.ndarray, detours) -> np.ndarray:
@@ -430,7 +496,8 @@ def rebuild_skin(near: np.ndarray, detours) -> np.ndarray:
     return np.concatenate(out, 0)
 
 
-def pack_detours(detours, near: np.ndarray, lo_lim: float, hi_lim: float):
+def pack_detours(detours, near: np.ndarray, lo_lim: float, hi_lim: float,
+                 sep: float = 0.0):
     """Slide CLOSED detours aside so no two slots overlap -> new list.
 
     Every bay keeps its six vertices for the whole panel, so a bay whose
@@ -467,13 +534,17 @@ def pack_detours(detours, near: np.ndarray, lo_lim: float, hi_lim: float):
     placed = list(fixed)
     for a, b, q in sorted(free, key=lambda d: d[0] - d[1]):   # widest first
         w = b - a
+        # every gap is shrunk by `sep` at each end, so a parked detour
+        # never abuts its neighbour exactly: touching slots put one
+        # detour's last vertex on the next one's first, and both lie on
+        # the skin, which is a zero-length edge again by another route
         gaps, cur = [], lo_lim
         for oa, ob, _ in sorted(placed, key=lambda d: d[0]):
-            if oa - cur >= w:
-                gaps.append((cur, oa))
+            if (oa - sep) - (cur + sep) >= w:
+                gaps.append((cur + sep, oa - sep))
             cur = max(cur, ob)
-        if hi_lim - cur >= w:
-            gaps.append((cur, hi_lim))
+        if (hi_lim - sep) - (cur + sep) >= w:
+            gaps.append((cur + sep, hi_lim - sep))
         if not gaps:
             raise ValueError(f"no chord left to park a closed bay's "
                              f"{len(q)} vertices ({w:.4f} wide)")
@@ -555,9 +626,10 @@ def insert_detours(loop_unit: np.ndarray, chord_mm: float, z_mm: float,
           for b in lo_b]
     up_lim = (float(upper[0, 0]) + BAND_MARGIN, float(upper[-1, 0]) - BAND_MARGIN)
     lo_lim = (float(lower[0, 0]) + BAND_MARGIN, float(lower[-1, 0]) - BAND_MARGIN)
-    new_up = (rebuild_skin(upper, pack_detours(up, upper, *up_lim))
+    sep = min_groove_mm / 20.0 / chord_mm
+    new_up = (rebuild_skin(upper, pack_detours(up, upper, *up_lim, sep=sep))
               if up else upper)
-    new_lo = (rebuild_skin(lower, pack_detours(lo, lower, *lo_lim))
+    new_lo = (rebuild_skin(lower, pack_detours(lo, lower, *lo_lim, sep=sep))
               if lo else lower)
     return np.concatenate([new_up[::-1], new_lo[1:]], 0)
 

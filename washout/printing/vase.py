@@ -1015,6 +1015,21 @@ def check(stack: LayerStack) -> Printability:
         gates.append(Gate("spar bore", spar >= s.spar_d_mm, spar, s.spar_d_mm,
                           "mm", f"pinch at z={spar_z:.0f} mm"))
 
+    # Consecutive vertices, which `min wall separation` cannot see: it
+    # skips neighbours within 8 indices, exactly so that a contour is not
+    # judged against its own next point. A coincident PAIR is invisible
+    # to it and fatal to the mesher -- a zero-length edge stalls the
+    # ear-clipper into an invalid fan, and six non-manifold edges came
+    # out of `stl.export`, which is the only thing in the program that
+    # was checking. One array op per layer.
+    step = max(len(stack.contours) // 40, 1)
+    gap = min(float(np.linalg.norm(
+        np.roll(c, -1, axis=0) - c, axis=1).min())
+        for c in stack.contours[::step])
+    floor_mm = 1e-4
+    gates.append(Gate("vertex spacing", gap >= floor_mm, gap, floor_mm, "mm",
+                      "no zero-length edge may reach the mesher"))
+
     area0 = 0.5 * abs(np.dot(stack.contours[0][:, 0],
                              np.roll(stack.contours[0][:, 1], -1))
                       - np.dot(stack.contours[0][:, 1],

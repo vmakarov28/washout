@@ -504,3 +504,38 @@ def test_the_ramp_is_budgeted_where_it_bites_not_where_it_started():
                 f"{name} {pan.name}: {ang:.2f} deg at z={z_at:.0f} mm, "
                 f"limit {lim:.0f} -- a cut panel's own ramp must fit the "
                 f"budget at every station it crosses")
+
+
+def test_every_cut_panel_skins_to_a_watertight_mesh():
+    """A slicer handed a mesh with a hole makes a part with a hole.
+
+    `vase.check` never tested it, and could not have: `min wall
+    separation` skips vertices within 8 indices of each other, exactly so
+    that a contour is not judged against its own next point, so a
+    COINCIDENT PAIR is invisible to it. Only `stl.export` noticed, at the
+    end of the pipeline, and what it reported was six non-manifold edges
+    on the trainer's centre body and on demon1's -- a zero-length edge
+    stalling the ear-clipper into an invalid fan.
+
+    Three ways a detour's vertices came to coincide once a closed bay
+    kept them (which is what stops the skin being reparametrised): with
+    the skin vertex the run beside it ends on, with each other where the
+    ledge met a floor no deeper than itself, and with the neighbouring
+    detour where `pack_detours` parked one exactly against another. The
+    invariant is a minimum spacing, held in x, and it is a gate now."""
+    from washout.printing import stl
+
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        for pan in ev.panels:
+            for k in range(len(pan.contours)):
+                loop = pan.contours[k]
+                seg = np.linalg.norm(np.roll(loop, -1, axis=0) - loop, axis=1)
+                assert seg.min() > 1e-4, (
+                    f"{name} {pan.name} layer {k}: two vertices "
+                    f"{seg.min():.2e} mm apart")
+            verts, tris = stl.skin(pan)
+            rep = stl.manifold_report(tris)
+            assert rep["watertight"], f"{name} {pan.name}: {rep}"
+            g = {x.name: x for x in vase.check(pan).gates}
+            assert g["vertex spacing"].passed, g["vertex spacing"].line()

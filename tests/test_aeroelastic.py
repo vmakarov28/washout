@@ -27,6 +27,15 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 RESULTS = Path(__file__).resolve().parent.parent / "results" / "fleet"
 
 
+def _plan(name):
+    index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
+    d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
+    base = cst.load_selig(ASSETS / "mh45.dat")
+    mission = getattr(Mission, name)()
+    u = np.array(d["u"])
+    return u, mission, base, build(u, mission, base)
+
+
 def _built(name):
     index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
     d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
@@ -182,7 +191,77 @@ def test_the_model_says_what_it_cannot_do():
     """Three caveats, and two of them point the opposite way from the
     third. A number whose error direction is unknown is not usable."""
     ev, _ = _built("trainer_v3")
-    notes = " ".join(ev.aeroelastic.notes).lower()
-    assert "static" in notes and "flutter" in notes
-    assert "lower bound" in notes
-    assert "elastic axis" in notes
+    r = ev.aeroelastic
+    notes = " ".join(r.notes).lower()
+    assert "static" in notes and "flutter" in notes, "flutter proper is absent"
+    assert "upper bound" in notes, "the rib-web idealisation must be named"
+    assert "elastic axis" in notes, "the shear-centre estimate must be named"
+    # and the error direction has to be a NUMBER, not just a word: the
+    # band is what tells a reader how much the idealisation is worth
+    assert r.margin_hi > r.margin, "a band with no width states nothing"
+
+
+# ------------------------------------------- counting the cells the ribs make
+
+def test_the_multicell_solve_collapses_to_bredt_batho():
+    """With no ribs there is one cell, and the general N-cell shear-flow
+    solve must reduce EXACTLY to 4 A^2 t / s. That collapse is the
+    reference check the multi-cell formulation is entitled to -- no
+    constant is tuned to reach it."""
+    _, _, _, plan = _plan("trainer_v3")
+    area, per, _ = ael.cell_properties(plan, 0.25, 0.45)
+    bb = ael.gj_closed_nmm2(area, per, 0.45)
+    gj, cells = ael.gj_multicell_nmm2(plan, 0.25, 0.45, 0)
+    assert cells == 1
+    assert gj == pytest.approx(bb, rel=1e-12)
+
+
+def test_ribs_add_cells_and_stiffness_but_not_an_order_of_magnitude():
+    """The question the model was improved to answer.
+
+    'Multi-cell' sounds like it should be worth a lot. It is worth about
+    22%: the rib webs are two beads thick against a skin that is one, and
+    the cells are shallow relative to their chordwise extent. Reversal
+    goes as sqrt(GJ), so 22% of stiffness is 11% of speed."""
+    _, _, _, plan = _plan("trainer_v3")
+    base, _ = ael.gj_multicell_nmm2(plan, 0.25, 0.45, 0)
+    got = []
+    for n in (1, 2, 3, 5):
+        gj, cells = ael.gj_multicell_nmm2(plan, 0.25, 0.45, n)
+        assert cells == n + 1, f"{n} ribs must make {n+1} cells, got {cells}"
+        got.append(gj / base)
+    assert all(g > 1.0 for g in got), got
+    assert max(got) < 1.5, (
+        f"if ribs are now worth more than 50% something changed: {got}")
+
+
+def test_the_margin_is_reported_as_a_band_and_gated_on_the_low_end():
+    """Ignoring the ribs is a lower bound; treating them as solid webs is
+    an upper one, because the truss is a diamond and a rib at a given
+    chord station exists only at some heights. Carry both rather than
+    pick one and call it the answer."""
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        r = ev.aeroelastic
+        assert r.margin <= r.margin_hi, f"{name}: {r.margin} > {r.margin_hi}"
+        assert r.gj_ribbed_nmm2 >= r.gj_nmm2
+        # the gate has to use the conservative end
+        assert r.ok == (r.margin >= mission.min_aeroelastic_margin)
+
+
+def test_demon1_fails_even_on_the_optimistic_bound():
+    """The decision this model change was made to settle.
+
+    The single-cell number is a known lower bound, so before redesigning
+    demon1 it was worth asking whether counting the rib cells rescued it.
+    It does not: 0.91x becomes 0.97x against a 1.5x requirement. The
+    aircraft needs a design change, and that is now known against the
+    OPTIMISTIC model rather than the pessimistic one -- which is the only
+    way the conclusion is worth acting on."""
+    ev, mission = _built("demon1")
+    r = ev.aeroelastic
+    assert r.margin_hi < mission.min_aeroelastic_margin, (
+        f"upper bound {r.margin_hi:.2f}x now clears "
+        f"{mission.min_aeroelastic_margin:.2f}x -- if a model change did "
+        f"that, say which one in the commit")
+    assert not ev.ok

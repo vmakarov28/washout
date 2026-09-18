@@ -136,26 +136,111 @@ class RibSpec:
         tri = 4.0 * np.abs(phase - 0.5) - 1.0          # -1 .. +1
         sign = np.where(np.arange(self.n_ribs) % 2 == 0, 1.0, -1.0)
         x = base + sign * tri * amp_mm / max(chord_mm, 1e-6)
-        return self._push_clear(x, chord_mm)
+        return self._push_clear(x, chord_mm, base)
 
-    def _push_clear(self, x: np.ndarray, chord_mm: float) -> np.ndarray:
-        """Shove any rib that has wandered into a spar corridor out to the
-        nearer edge of it. Nudged rather than dropped, because the layer's
-        vertex count must stay constant -- the STL skinner joins layer k
-        index i to layer k+1 index i, and a layer that lost a rib would
-        shear the whole mesh."""
+    def _push_clear(self, x: np.ndarray, chord_mm: float,
+                    base: np.ndarray | None = None) -> np.ndarray:
+        """Shove any rib that has wandered into an exclusion band out of
+        it. Nudged rather than dropped, because the layer's vertex count
+        must stay constant -- the STL skinner joins layer k index i to
+        layer k+1 index i, and a layer that lost a rib would shear the
+        whole mesh.
+
+        WHICH side it is pushed to is decided from the rib's UNSWEPT base
+        position, not from where the sweep has currently put it. Pushing
+        to the nearer edge is the obvious rule and it is discontinuous:
+        as a rib sweeps across the band's centre, "nearer" flips and the
+        rib jumps the band's whole width in one layer. That was harmless
+        while the only bands were 10 mm spar corridors and became a 72 mm
+        jump -- 64 degrees of overhang on a wall the printer builds in
+        mid-air -- as soon as a payload bay became an exclusion band. It
+        is the same quantisation failure `insert_ribs` documents, arriving
+        by a different route.
+
+        The base does not sweep, so the choice is stable in Z: a rib
+        seated below the band's centre stays at its low edge for the whole
+        panel and simply stops sweeping there.
+        """
         if not self.avoid:
             return x
         x = np.asarray(x, dtype=float).copy()
+        ref = x if base is None else np.asarray(base, dtype=float)
         for c, half_mm in self.avoid:
             half = half_mm / max(chord_mm, 1e-6)      # mm -> local chord
             lo, hi = c - half, c + half
             inside = (x > lo) & (x < hi)
             if inside.any():
-                nearer_lo = np.abs(x - lo) <= np.abs(x - hi)
-                x = np.where(inside & nearer_lo, lo, x)
-                x = np.where(inside & ~nearer_lo, hi, x)
+                to_lo = ref <= c                       # stable in Z
+                x = np.where(inside & to_lo, lo, x)
+                x = np.where(inside & ~to_lo, hi, x)
         return x
+
+
+def ribs_that_fit(spec: "RibSpec", chord_mm: float,
+                  slit_mm: float) -> int:
+    """How many ribs the chord still has room for, given the exclusions.
+
+    Pushing a rib out of an exclusion band works while the bands are
+    narrow. It stops working when they are not: micro's centre body
+    carries two payload bays that between them exclude 0.24c to 0.77c --
+    nearly the whole rib band -- so all three ribs were shoved against
+    the same few edges, and the result was 83 degrees of overhang against
+    a 50 degree limit.
+
+    A panel whose chord is mostly openings cannot carry a chordwise truss,
+    and the honest thing is to say so and let the buckling gate price it,
+    rather than to squeeze webs into a gap that is not there.
+
+    The room a rib needs is DERIVED from the amplitude it is allowed to
+    sweep, not declared: `amplitude_mm` is already `rate * pitch / 4`, the
+    largest diagonal the overhang limit permits, and a rib that cannot
+    travel that far chordwise is a parallel wall rather than part of a
+    truss. Two amplitudes of clear chord is therefore the requirement,
+    floored at three slit widths so a rib is at least wider than its own
+    slit. Three slit widths ALONE was the first version's rule and it let
+    three ribs into a 6.6 mm gap.
+    """
+    if not spec.enabled or spec.n_ribs <= 0:
+        return 0
+    lo, hi = spec.x_first, spec.x_last
+    free = [(lo, hi)]
+    for c, half_mm in spec.avoid:
+        half = half_mm / max(chord_mm, 1e-6)
+        a, b = c - half, c + half
+        nxt = []
+        for f0, f1 in free:
+            if b <= f0 or a >= f1:
+                nxt.append((f0, f1))
+                continue
+            if a > f0:
+                nxt.append((f0, min(a, f1)))
+            if b < f1:
+                nxt.append((max(b, f0), f1))
+        free = [(f0, f1) for f0, f1 in nxt if f1 > f0]
+    need_mm = max(2.0 * spec.amplitude_mm(), 3.0 * slit_mm)
+    need = need_mm / max(chord_mm, 1e-6)
+    room = sum(int((f1 - f0) / need) for f0, f1 in free)
+    return int(min(spec.n_ribs, max(room, 0)))
+
+
+def free_bands(spec: "RibSpec", chord_mm: float) -> list:
+    """The chord intervals a rib may occupy, exclusions removed."""
+    lo, hi = spec.x_first, spec.x_last
+    free = [(lo, hi)]
+    for c, half_mm in spec.avoid:
+        half = half_mm / max(chord_mm, 1e-6)
+        a, b = c - half, c + half
+        nxt = []
+        for f0, f1 in free:
+            if b <= f0 or a >= f1:
+                nxt.append((f0, f1))
+                continue
+            if a > f0:
+                nxt.append((f0, min(a, f1)))
+            if b < f1:
+                nxt.append((max(b, f0), f1))
+        free = [(f0, f1) for f0, f1 in nxt if f1 > f0]
+    return free
 
 
 def segment_counts(n_up: int, n_seg: int) -> list[int]:

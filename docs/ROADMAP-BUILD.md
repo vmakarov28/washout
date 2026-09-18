@@ -723,11 +723,65 @@ run through.
 linkage gate proves the deflection the speed objective has been assuming
 all along.
 
-## Phase 3 — the bay, the lid, and what they cost
+## Phase 3 — the bay, the lid, and what they cost — **the cut is in**
 
-8. Bay cut as real geometry with ramped closure. **(A2)**
+8. ~~Bay cut as real geometry with ramped closure.~~ **(A2)**
+   `printing/bays.py`. The opening is the rib detour widened from a slit
+   to a chord band, with a trapezoidal depth profile: full depth from the
+   root face, then a ramp at the rate `vase.ramp_budget` allows. Where it
+   has closed the detour becomes a one-bead groove, which keeps the point
+   count constant without coincident vertices and scribes the hatch rim
+   on the part.
+
+   **The bay has a FLOOR with closed section under it**, and that turned
+   out to matter more than it looks. Cutting to one bead above the lower
+   skin — the first version — opens the section over the whole band and
+   destroys the solution the spar seat solver had found: on the trainer
+   the TE spar clears the pack by taking the upper skin while the pack
+   sits on the lower one, and a full-depth cut removes the region the tube
+   was seated in. With a floor, the cell beneath it is where the spar
+   lives and most of the torsion box survives.
 9. Lid, rebate, retention; conduits. **(A3, A4, A5)**
-10. Free-edge buckling and open-section `GJ`. **(C3)**
+10. Free-edge buckling and open-section `GJ`. **(C3)** — the open-section
+    number is computed and reported; blending it over the bay's span, and
+    recomputing rib pitch at a free edge, is still to do.
+
+*Four bugs came out of building it, and three were bugs the rib code
+already documents arriving by a different route:*
+
+- **Reach was the spar solver's objective when it should be a
+  constraint.** Stations clear of the trainer's bay reach slightly less
+  far, so they lost on reach before clearance was considered, and the
+  solver reported an 8 mm clash on a design that had a clear seat. Reach
+  only has to satisfy `min_spar_reach_frac`; among stations that do, the
+  tube goes where it is clearest.
+- **`_push_clear` pushed a rib to the NEARER band edge**, which is
+  discontinuous: as a rib sweeps across the band's centre, "nearer" flips
+  and the rib jumps the band's whole width in one layer. Harmless for a
+  10 mm spar corridor, and **64° of overhang** once a payload bay became
+  a 72 mm-wide band. The side is now chosen from the rib's unswept base,
+  which does not move in Z.
+- **A panel that is mostly openings cannot carry a chordwise truss.**
+  micro's centre body has two bays excluding 0.24c–0.77c; squeezing three
+  webs into what was left gave **83°**. `ribs_that_fit` now caps the count
+  at what the free chord allows, with the room per rib *derived* from the
+  sweep amplitude the overhang limit already permits.
+- **The ramp budget cannot be measured on a panel that already has the
+  cut.** The ramp's own dive and climb walls move in Z, so the budget
+  comes back zero and the ramp infinite — the first version reported that
+  a 24 mm bay needed an infinite span to close. It is measured on bare
+  panels and passed in.
+
+*And one disagreement that is still OPEN, flagged rather than papered
+over:* on the trainer's centre body the reservation says the TE spar is
+clear of the electronics bay by about 0.1 mm while the **bore gate**,
+which measures the printed contour rather than the reservation, reports
+0.45 mm of corridor at that station. The clearance gate passes, so the
+geometry is valid; the two measurements of the same opening disagree.
+Rib stations at that layer are 0.188, 0.466 and 0.714, so it is not a rib.
+This is exactly the class of bug the project cares about most and it
+should be chased before the gen6 re-search, because a search would
+otherwise optimise against whichever of the two numbers is wrong.
 
 *Acceptance:* the pack loads without a knife, and the aircraft is
 *charged* for the hole in its torsion box. This is the phase that feeds

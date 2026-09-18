@@ -166,6 +166,94 @@ def gj_open_nmm2(per_mm: float, wall_mm: float,
     return float(g_mpa * per_mm * wall_mm ** 3 / 3.0)
 
 
+def gj_multicell_nmm2(plan, eta: float, wall_mm: float, n_ribs: int,
+                      x_first: float = 0.20, x_last: float = 0.72,
+                      g_mpa: float = G_SKIN_MPA) -> tuple[float, int]:
+    """GJ counting the cells the rib truss divides the box into.
+
+    -> (GJ in N.mm^2, number of cells)
+
+    N chordwise webs make N+1 closed cells, and a multi-cell section is
+    substantially stiffer in torsion than the single cell the skin makes
+    on its own. The standard formulation, for cells i = 1..N+1 under a
+    common twist rate psi:
+
+        (1 / 2 A_i) [ q_i * delta_ii - sum_j q_j * delta_ij ] = G psi
+        T = 2 * sum_i q_i A_i
+
+    where delta_ii is the closed line integral of ds/t around cell i and
+    delta_ij the same along the wall it shares with cell j. Setting
+    G psi = 1 turns it into one linear solve for the shear flows; GJ is
+    then G T. With a single cell it collapses to 4 A^2 t / s, which is
+    Bredt-Batho -- that collapse is the reference check, and it is exact.
+
+    **This is an UPPER bound and the single-cell result is a lower one.**
+    The ribs are not continuous webs: the truss is a diamond, adjacent
+    ribs sweeping in opposite directions as Z rises, so a rib at a given
+    chord station exists only at some heights. Treating it as a solid web
+    overstates the shear path; ignoring it entirely understates it. The
+    truth is between, and the honest thing is to carry both numbers
+    rather than pick one and call it the answer.
+    """
+    st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+    c_mm = st.chord_m * 1000.0
+    n = max(int(n_ribs), 0)
+    if n <= 0:
+        area, per, _ = cell_properties(plan, eta, wall_mm)
+        return gj_closed_nmm2(area, per, wall_mm, g_mpa), 1
+
+    xr = np.linspace(x_first, x_last, n) if n > 1 else np.array(
+        [0.5 * (x_first + x_last)])
+    edges = np.concatenate([[0.0], np.sort(xr), [1.0]])
+
+    t_rib = 2.0 * wall_mm        # two legs one bead apart, welded
+    xs = np.linspace(0.0, 1.0, 241)
+    y_up = st.airfoil.y_upper(xs) * c_mm
+    y_lo = st.airfoil.y_lower(xs) * c_mm
+    x_mm = xs * c_mm
+
+    areas, skin_len, rib_len = [], [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        sel = (xs >= a) & (xs <= b)
+        if sel.sum() < 2:
+            sel = np.zeros_like(xs, dtype=bool)
+            sel[np.argmin(np.abs(xs - a))] = True
+            sel[np.argmin(np.abs(xs - b))] = True
+        xx, yu, yl = x_mm[sel], y_up[sel], y_lo[sel]
+        areas.append(float(np.trapezoid(yu - yl, xx)))
+        skin_len.append(float(np.hypot(np.diff(xx), np.diff(yu)).sum()
+                              + np.hypot(np.diff(xx), np.diff(yl)).sum()))
+    # each interior edge is a rib; its length is the section depth there
+    for e in edges[1:-1]:
+        i = int(np.argmin(np.abs(xs - e)))
+        rib_len.append(float(y_up[i] - y_lo[i]))
+
+    m = len(areas)
+    A = np.zeros((m, m))
+    rhs = np.ones(m)
+    for i in range(m):
+        d_ii = skin_len[i] / max(wall_mm, 1e-9)
+        if i > 0:
+            d_ii += rib_len[i - 1] / t_rib
+        if i < m - 1:
+            d_ii += rib_len[i] / t_rib
+        A[i, i] = d_ii / (2.0 * max(areas[i], 1e-9))
+        if i > 0:
+            A[i, i - 1] = -(rib_len[i - 1] / t_rib) / (2.0 * max(areas[i], 1e-9))
+        if i < m - 1:
+            A[i, i + 1] = -(rib_len[i] / t_rib) / (2.0 * max(areas[i], 1e-9))
+    try:
+        q = np.linalg.solve(A, rhs)
+    except np.linalg.LinAlgError:
+        area, per, _ = cell_properties(plan, eta, wall_mm)
+        return gj_closed_nmm2(area, per, wall_mm, g_mpa), 1
+    if np.any(q <= 0.0):                     # unphysical: fall back, loudly
+        area, per, _ = cell_properties(plan, eta, wall_mm)
+        return gj_closed_nmm2(area, per, wall_mm, g_mpa), 1
+    torque = 2.0 * float(np.dot(q, areas))
+    return float(g_mpa * torque), m
+
+
 def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA) -> float:
     """The tubes' own contribution. J = pi (D^4 - d^4) / 32."""
     total = 0.0
@@ -189,6 +277,9 @@ class Aeroelastic:
     design_v_ms: float
     margin: float
     ok: bool
+    gj_ribbed_nmm2: float = 0.0
+    margin_hi: float = 0.0
+    v_rev_hi_ms: float = 0.0
     notes: tuple[str, ...] = ()
 
     def report(self) -> str:
@@ -201,7 +292,8 @@ class Aeroelastic:
             f"-> e = {self.e_frac:+.3f}c",
             f"  divergence    {self.v_div_ms:.0f} m/s  |  reversal "
             f"{self.v_rev_ms:.0f} m/s  |  design {self.design_v_ms:.0f} m/s",
-            f"  margin        {self.margin:.2f}x on the lower of the two",
+            f"  margin        {self.margin:.2f}x to {self.margin_hi:.2f}x "
+            f"(ribs ignored .. ribs as solid webs); the gate uses the lower",
         ]
         if self.v_div_open_ms > 0.0:
             lines.append(
@@ -214,7 +306,7 @@ class Aeroelastic:
 def analyse(plan, spar_fits, lift_slope_per_rad: float,
             elevon_chord_frac: float, elevon_eta: float,
             design_v_ms: float, wall_mm: float,
-            min_margin: float = 1.2) -> Aeroelastic:
+            min_margin: float = 1.2, n_ribs: int = 0) -> Aeroelastic:
     """Divergence and reversal speeds for this wing at this speed.
 
     `design_v_ms` is the speed the aircraft is SCORED at -- top speed for
@@ -243,6 +335,17 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
     spar_gj = gj_spars_nmm2(spar_fits)
     gj = _harmonic(np.array(gjs) + spar_gj)
     gj_open = _harmonic(np.array(gjs_open) + spar_gj)
+    # The rib truss divides the box into cells and a multi-cell section is
+    # stiffer. Treating the ribs as continuous webs OVERSTATES it -- the
+    # truss is a diamond, so a rib at a given chord station exists only at
+    # some heights -- so this is the upper bound to the single cell's
+    # lower one, and both are carried.
+    if n_ribs > 0:
+        gj_ribbed = _harmonic(np.array(
+            [gj_multicell_nmm2(plan, float(e_), wall_mm, n_ribs)[0]
+             for e_ in etas]) + spar_gj)
+    else:
+        gj_ribbed = gj
     # the elastic axis is weighted by local stiffness: the stiff inboard
     # cell is what the twist is reacting against
     w = np.array(gjs) + spar_gj
@@ -251,6 +354,7 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
     half_mm = plan.half_span_m * 1000.0
     k = gj * (np.pi / (2.0 * half_mm)) ** 2          # N.mm per rad
     k_open = gj_open * (np.pi / (2.0 * half_mm)) ** 2
+    k_ribbed = gj_ribbed * (np.pi / (2.0 * half_mm)) ** 2
 
     c_mm = plan.mac_m * 1000.0
     a = float(lift_slope_per_rad)
@@ -263,7 +367,7 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
 
     # --- divergence ---
     if e <= 1e-6:
-        v_div = np.inf
+        v_div = v_div_hi = np.inf
         notes.append("elastic axis is forward of the AC: divergence is not "
                      "possible, the wing twists nose-down under lift")
         v_div_open = np.inf
@@ -271,6 +375,7 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
         # K in N.mm, c in mm -> q in N/mm^2; x1e6 for N/m^2
         v_div = q_to_v(k / (c_mm * c_mm * e * a) * 1e6)
         v_div_open = q_to_v(k_open / (c_mm * c_mm * e * a) * 1e6)
+        v_div_hi = q_to_v(k_ribbed / (c_mm * c_mm * e * a) * 1e6)
 
     # --- reversal ---
     # cl_d and cm_d per RADIAN of elevon, for the wing as a whole: the
@@ -294,22 +399,34 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
     cm_d = -frac * a * tau * (arm / plan.mac_m)       # nose-down: negative
 
     if cm_d >= -1e-9 or cl_d <= 0.0:
-        v_rev = np.inf
+        v_rev = v_rev_hi = np.inf
         notes.append("elevon makes no nose-down moment: reversal is not "
                      "possible in this model")
     else:
         v_rev = q_to_v(-cl_d * k / (c_mm * c_mm * a * cm_d) * 1e6)
+        v_rev_hi = q_to_v(-cl_d * k_ribbed / (c_mm * c_mm * a * cm_d) * 1e6)
 
+    # The gate runs on the LOWER bound. Flutter is unforgiving and the
+    # band's width is reported, so nothing is hidden by the choice.
     worst = min(v_div, v_rev)
+    worst_hi = min(v_div_hi, v_rev_hi)
     margin = float(worst / max(design_v_ms, 1e-6)) if np.isfinite(worst) else 99.0
+    margin_hi = (float(worst_hi / max(design_v_ms, 1e-6))
+                 if np.isfinite(worst_hi) else 99.0)
     ok = margin >= min_margin
     if not ok:
         notes.append(f"the lower of the two is only {margin:.2f}x the speed "
                      f"this design is scored at")
     notes.append("STATIC only: classical flutter needs the mass "
                  "distribution and is not modelled")
-    notes.append("single closed cell: the rib truss makes it MULTI-cell and "
-                 "stiffer, so GJ is a lower bound and both speeds read low")
+    if n_ribs > 0:
+        notes.append(
+            f"ribs counted as continuous webs would give {gj_ribbed/1e6:.2f} "
+            f"N.m^2 and a {margin_hi:.2f}x margin -- an UPPER bound, because "
+            f"the truss is a diamond and a rib exists only at some heights")
+    else:
+        notes.append("no ribs in these settings: single closed cell, so GJ "
+                     "is a lower bound and both speeds read low")
     notes.append("reversal does not depend on the elastic axis (the e*cl_d "
                  "terms cancel), so it is the firmer of the two numbers")
 
@@ -320,4 +437,6 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
         v_rev_ms=float(v_rev if np.isfinite(v_rev) else 9999.0),
         v_div_open_ms=float(v_div_open if np.isfinite(v_div_open) else 0.0),
         design_v_ms=float(design_v_ms), margin=margin, ok=bool(ok),
+        gj_ribbed_nmm2=float(gj_ribbed), margin_hi=float(margin_hi),
+        v_rev_hi_ms=float(v_rev_hi if np.isfinite(v_rev_hi) else 9999.0),
         notes=tuple(notes))

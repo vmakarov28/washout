@@ -126,16 +126,26 @@ def reach_of(plan, x_frac: float, spec: SparSpec, wall_mm: float,
 
 
 def place(plan, spec: SparSpec, wall_mm: float, joints=(),
-          n_x: int = 25, reserved=()) -> SparFit:
+          n_x: int = 25, reserved=(), min_reach: float = 0.0) -> SparFit:
     """Choose the chordwise station and the vertical seat.
 
-    REACH stays the primary criterion -- it is what decides whether the
-    outer joint is carried -- and among the stations that reach equally
-    far, the tie now breaks on CLEARANCE from `reserved`: the payload
-    volumes the mission has already declared. Failing that it breaks
-    toward the middle of the allowed band, which keeps the tube away from
-    the leading-edge curvature and the trailing-edge thickening, both
-    places where a printed bore is least round.
+    Reach is a CONSTRAINT, not the objective, and that ordering was wrong
+    for one release. It used to pick the station that reached furthest and
+    break ties on clearance -- which is fine while nothing else is in the
+    wing, and wrong as soon as something is. Once the payload bay became a
+    real opening with a floor, the trainer's TE spar could not fit under
+    it at 0.54c, and the solver would not move: stations at 0.60c to 0.74c
+    are clear of the bay but reach slightly less far, so they lost on
+    reach before clearance was ever considered. It reported an 8 mm clash
+    on a design that had a clear seat available.
+
+    `min_reach` is what reach actually has to satisfy -- the mission's
+    `min_spar_reach_frac`, the station the outer JOINT has to be carried
+    to. Among stations that clear it, the tube goes where it is CLEAREST,
+    then furthest, then nearest the middle of the band, which keeps it
+    away from the leading-edge curvature and the trailing-edge
+    thickening. If nothing meets `min_reach`, reach leads again, because
+    then the binding problem is reach and the gate should say so.
 
     The seat is solved the same way: "lower", "upper" and "mid" are tried
     and the one with the most clearance wins. A tube seated hard against
@@ -152,29 +162,35 @@ def place(plan, spec: SparSpec, wall_mm: float, joints=(),
 
     xs = np.linspace(spec.x_lo, spec.x_hi, n_x)
     reaches = np.array([reach_of(plan, float(x), spec, wall_mm) for x in xs])
-    best = reaches.max()
-    cand = xs[reaches >= best - 1e-9]
     half_mm = plan.half_span_m * 1000.0
     reserved = tuple(reserved)
     mid_band = 0.5 * (spec.x_lo + spec.x_hi)
 
-    def trial(x: float, anchor: str) -> SparFit:
-        return SparFit(spec, float(x), float(best), float(best) * half_mm,
+    viable = reaches >= min_reach - 1e-9
+    if not viable.any():                 # reach is the binding problem
+        viable = reaches >= reaches.max() - 1e-9
+
+    def trial(x: float, reach: float, anchor: str) -> SparFit:
+        return SparFit(spec, float(x), float(reach), float(reach) * half_mm,
                        depth_at(plan, 0.0, float(x), wall_mm), (), (),
                        anchor=anchor)
 
     scored = []
-    for x in cand:
+    for x, reach, ok in zip(xs, reaches, viable):
+        if not ok:
+            continue
         for anchor in (it.LOWER, it.UPPER, it.MID):
-            vol = it.spar_volume(trial(x, anchor), wall_mm, plan)
+            vol = it.spar_volume(trial(x, reach, anchor), wall_mm, plan)
             clash = max((it.overlap_mm(vol, r, plan, wall_mm)
                          for r in reserved), default=0.0)
-            # clearest first, then nearest the middle of the band, then a
-            # seated tube ahead of a floating one
-            scored.append((clash, abs(float(x) - mid_band),
-                           1 if anchor == it.MID else 0, float(x), anchor))
+            # clearest, then furthest, then nearest the middle of the
+            # band, then a seated tube ahead of a floating one
+            scored.append((round(clash, 6), -float(reach),
+                           abs(float(x) - mid_band),
+                           1 if anchor == it.MID else 0,
+                           float(x), float(reach), anchor))
     scored.sort()
-    clash, _, _, x_best, anchor = scored[0]
+    clash, _, _, _, x_best, best, anchor = scored[0]
 
     need = spec.needed_mm(wall_mm)
     cleared, blocked = [], []
@@ -189,7 +205,7 @@ def place(plan, spec: SparSpec, wall_mm: float, joints=(),
 
 
 def fit_all(plan, specs, wall_mm: float, panel_etas=(),
-            reserved=()) -> list[SparFit]:
+            reserved=(), min_reach: float = 0.0) -> list[SparFit]:
     """Fit every spar. `panel_etas` are the joint stations the spar must
     cross -- the interior ones only, since the outermost end is the tip
     and nothing joins there.
@@ -204,7 +220,8 @@ def fit_all(plan, specs, wall_mm: float, panel_etas=(),
     taken = list(reserved)
     fits = []
     for s in specs:
-        f = place(plan, s, wall_mm, joints, reserved=tuple(taken))
+        f = place(plan, s, wall_mm, joints, reserved=tuple(taken),
+                  min_reach=min_reach)
         fits.append(f)
         taken.append(it.spar_volume(f, wall_mm, plan))
     return fits

@@ -62,7 +62,7 @@ the sized tube's mass, and that re-scoring
 `results/fleet/gen5_trainer_v3_v101/design.json` reports about 355 g,
 not 331.
 
-## 2. Size the aft spar against its own load case - P1
+## 2. Size the aft spar against its own load case - **CLOSED: keep 8 mm**
 
 `structure.select` sizes **one** tube against root bending. The trainer
 and demon1 each declare two corridors, so item 1 will charge both at the
@@ -74,8 +74,23 @@ This is the difference between the trainer passing and failing its wing
 loading gate, so it is worth doing properly rather than guessing
 downward.
 
-**Ask before changing it.** The 8 mm tube is declared hardware. Whether a
-6 mm or part-span aft tube is acceptable is a build decision.
+**Asked, and the answer is to keep 8 mm on both corridors.** Recorded here
+so it is not re-litigated.
+
+The question also changed shape once item 9 existed, because the aft tube
+is now measurable on both sides rather than only as mass. Measured on the
+fleet: the two tubes are **33-35% of total GJ**, and reversal goes as
+sqrt(GJ).
+
+| change | mass saved | GJ cost | what it does |
+|---|---|---|---|
+| aft tube 8 -> 6 mm | 6.7 g trainer, 7.8 g demon1 | -10% | trainer still fails wing loading at 27.2 vs 26; demon1's reversal margin falls 0.91x -> 0.86x |
+| drop the trainer's TE spar | 23 g | -17% | *would* pass wing loading at 25.9, reversal 29 -> 26.5 m/s (2.2x, still fine) |
+
+So the middle option is the worst of both, and dropping the tube entirely
+is the only version that rescues the trainer's wing loading -- at the cost
+of a declared structural member. The decision is to keep the hardware and
+let a re-search find the mass elsewhere.
 
 ## 3. A sweep that measures nothing must not write a file - P1
 
@@ -254,7 +269,42 @@ waiting for: cutting a bay in the upper skin takes demon1's divergence
 from 122 to 72 m/s. **The hatch and the flutter gate are the same
 question**, now with numbers on both sides of it.
 
-## 9b. What is left of item 9 - P2
+## 9b. Counting the cells the rib truss makes - **DONE, and it settles demon1**
+
+Asked before redesigning anything, because the single-cell number is a
+known lower bound and it would be foolish to redesign an aircraft against
+a model you know is wrong in a stated direction.
+
+`gj_multicell_nmm2` solves the general N-cell shear-flow problem: a common
+twist rate across cells, shear flows coupled through the shared rib webs,
+GJ from the resulting torque. With no ribs it collapses **exactly** to
+Bredt-Batho, which is the reference check it is entitled to.
+
+**The ribs are worth about 22%, not an order of magnitude.** The webs are
+two beads thick against a skin that is one, and the cells are shallow
+relative to their chordwise extent. Reversal goes as sqrt(GJ), so 22% of
+stiffness is 11% of speed:
+
+| | margin, ribs ignored | margin, ribs as solid webs |
+|---|---|---|
+| trainer | 2.43x | 2.59x |
+| demon1 | **0.91x** | **0.97x** |
+| micro | 7.92x | 8.53x |
+
+**demon1 fails even on the optimistic bound.** 0.97x against a 1.5x
+requirement, so improving the model does not rescue it and the aircraft
+genuinely needs a design change -- smaller elevon, stiffer box, or a lower
+top speed. That is now known against the generous model rather than the
+harsh one, which is the only way the conclusion is worth acting on.
+
+Both numbers are carried and the gate uses the lower, because the truss is
+a diamond -- adjacent ribs sweep in opposite directions, so a rib at a
+given chord station exists only at some heights -- and a continuous web
+overstates the shear path. A truss-equivalent shear stiffness would
+narrow the band further and is worth doing only if something lands inside
+it; nothing on this fleet does.
+
+## 9c. What is left of item 9 - P2
 
 Not modelled anywhere: `grep -rn "flutter|divergence|torsion|GJ"` returns
 only the spiral-mode docstring. demon1 is scored at **44.3 m/s** on a

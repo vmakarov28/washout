@@ -33,7 +33,9 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 from ..geom.planform import Planform
-from .ribs import POINTS_PER_RIB, RibSpec, insert_ribs, min_clearance_mm
+from .bays import BaySpec, bay_point_budget, insert_bay
+from .ribs import (POINTS_PER_RIB, RibSpec, insert_ribs,
+                   min_clearance_mm, ribs_that_fit)
 
 
 def _hull_indices(points: np.ndarray) -> np.ndarray:
@@ -296,6 +298,7 @@ def build_stack(
     eta1: float = 1.0,
     name: str = "panel",
     z_step_mm: float | None = None,
+    bay_cuts=(),
 ) -> LayerStack:
     """Slice a spanwise panel of the planform into printable layers.
 
@@ -326,7 +329,18 @@ def build_stack(
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs,
-                       avoid=tuple(settings.spar_avoid))
+                       avoid=tuple(settings.spar_avoid) + tuple(
+                           # A bay is an exclusion band like a spar
+                           # corridor, and for the same reason: the bay's
+                           # floor IS where a rib's floor would be, so a
+                           # rib inside the band would land on it. Given
+                           # for the whole panel rather than only where
+                           # the bay is open, because the rib count per
+                           # layer has to stay constant.
+                           (0.5 * (c.x0 + c.x1),
+                            0.5 * (c.x1 - c.x0)
+                            * plan.stations[0].chord_m * 1000.0)
+                           for c in bay_cuts))
     if truncated:
         # The loop now spans [0, x_hinge], so the truss has to fit the box
         # that exists. Scaled rather than clipped: the ribs keep the same
@@ -364,8 +378,17 @@ def build_stack(
         # cost is a shallower truss, which is the right way to be wrong.
         rib_spec = replace(rib_spec,
                            rate_mm_per_mm=max(allowed - 2.0 * used, 0.02))
+    cuts = tuple(bay_cuts)
+    # How many ribs this panel can actually take, after the bay bands are
+    # removed from the chord. Per panel, because the exclusions are per
+    # panel -- and the point budget follows it, so the invariant holds
+    # within a stack without pretending every panel has the same truss.
+    n_rib_eff = ribs_that_fit(
+        rib_spec, plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0,
+        settings.extrusion_width_mm * settings.rib_clearance_factor)
+    rib_spec = replace(rib_spec, n_ribs=n_rib_eff)
     n_pts = 2 * settings.contour_points - 1 + (
-        POINTS_PER_RIB * settings.rib_count if settings.ribs else 0)
+        POINTS_PER_RIB * n_rib_eff) + bay_point_budget(len(cuts))
     contours = np.empty((len(z), n_pts, 2))
     for k, e in enumerate(eta):
         st = plan.at(float(e))
@@ -375,7 +398,10 @@ def build_stack(
         if truncated:
             from .elevons import hinge_x, truncate_loop
             loop = truncate_loop(loop, hinge_x(settings))
-        if settings.ribs:
+        for c in cuts:
+            loop = insert_bay(loop, chord_mm, float(z[k]), c,
+                              settings.extrusion_width_mm)
+        if n_rib_eff > 0:
             clr = settings.extrusion_width_mm * settings.rib_clearance_factor
             loop = insert_ribs(loop, chord_mm, float(z[k]), rib_spec, clr, clr)
         # twist about the quarter chord, then scale to mm and sweep
@@ -400,7 +426,7 @@ def build_stack(
     contours -= 0.5 * (flat.min(0) + flat.max(0))
     return LayerStack(z_mm=z, eta=eta, contours=contours,
                       settings=settings, name=name, z_step_mm=step,
-                      has_ribs=settings.ribs, spar_x_local=local)
+                      has_ribs=n_rib_eff > 0, spar_x_local=local)
 
 
 # ------------------------------------------------------------------- gates
@@ -766,9 +792,35 @@ def _split_to_envelope(plan: Planform, breaks, limit: float) -> list:
 
 def build_panels(plan: Planform, settings: PrintSettings,
                  z_margin_mm: float = 8.0,
-                 z_step_mm: float | None = None) -> list[LayerStack]:
-    """Every printable part of the right half wing, root outboard."""
+                 z_step_mm: float | None = None,
+                 bays=()) -> list[LayerStack]:
+    """Every printable part of the right half wing, root outboard.
+
+    `bays` are (name, x0, x1, eta1, depth_mm, ramp_mm) for the openings
+    to cut, with the ramp length ALREADY measured by the caller on a bare
+    panel. Measuring it here would be circular: the ramp's own dive and
+    climb walls move in Z, so a budget measured on a panel that already
+    has the cut comes back as zero and the ramp as infinite. That is
+    exactly what the first version did. A
+    bay is cut only into the panel that CONTAINS it -- a bay straddling a
+    joint is already an infeasible design and the gate reports it -- and
+    its span is converted into that panel's own z, because the depth
+    profile is a function of print height.
+    """
     spans = panel_etas(plan, settings, z_margin_mm)
-    return [build_stack(plan, settings, a, b, name=f"{plan.name}_p{i}",
-                        z_step_mm=z_step_mm)
-            for i, (a, b) in enumerate(spans)]
+    out = []
+    for i, (a, b) in enumerate(spans):
+        cuts = []
+        for name, x0, x1, eta1, depth_mm, ramp_mm in bays:
+            if not (a <= eta1 <= b + 1e-9):
+                continue
+            if not np.isfinite(ramp_mm):
+                continue                       # cannot be closed: no cut
+            cuts.append(BaySpec(name, x0, x1,
+                                arc_length_mm(plan, a, min(eta1, b)),
+                                ramp_mm, depth_mm,
+                                settings.extrusion_width_mm))
+        out.append(build_stack(plan, settings, a, b,
+                               name=f"{plan.name}_p{i}",
+                               z_step_mm=z_step_mm, bay_cuts=tuple(cuts)))
+    return out

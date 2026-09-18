@@ -1037,17 +1037,75 @@ def _evaluate_once(
     bay_vols, bay_seats, bay_etas = seat_bays(
         plan, mission, p_vec, wall, joint_etas)
 
+    # What the spars must avoid is the CUT, not the box. The cut runs from
+    # the upper skin down to the bay's floor, so it is anchored upper and
+    # is deeper than the box by the floor's own thickness -- and a tube
+    # seated in the region the cut removes is a tube in mid-air. On the
+    # trainer this is what moves the TE spar off the upper skin, where the
+    # seat solver had put it to clear the pack.
+    # The reserved height must be the depth the GEOMETRY actually cuts:
+    # `bays.floor_limits` drops a groove below the upper skin first and
+    # then the box's depth below that, so the opening reaches
+    # box + floor + groove under the surface. Reserving only box + floor
+    # left the trainer's LE spar nominally clear of the electronics bay
+    # while the printed floor sat on top of it, and the bore gate --
+    # which measures the contour rather than the reservation -- was the
+    # one that noticed. Two places disagreeing about the same opening.
+    cut_vols = tuple(
+        it.Volume(f"{v.name} opening", v.x0, v.x1, v.eta0, v.eta1,
+                  height_mm=v.height_mm + 2.0 * wall, anchor=it.UPPER,
+                  offset_mm=0.0)
+        for v in bay_vols)
+
     spar_fits = []
     if mission.spars:
         spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
-                               reserved=tuple(bay_vols))
+                               reserved=tuple(bay_vols) + cut_vols,
+                               min_reach=mission.min_spar_reach_frac)
         avoid = sp.exclusion_bands(spar_fits, wall)
         settings = replace(
             settings, spar_avoid=avoid,
             spar_corridors=tuple((f.x_frac, f.reach_eta) for f in spar_fits))
 
     # --- printable? the shell mass comes out of this, so it runs early ---
-    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
+    # The bays are CUT now, not merely reserved: the battery goes in
+    # through an opening the program made, not one someone made with a
+    # knife. Only bays that fit and clear everything are cut -- an
+    # infeasible bay is already reported by the gates below, and cutting
+    # one would produce geometry that self-intersects.
+    # The ramp length is measured on BARE panels -- the only non-circular
+    # place to measure it. A budget taken on a panel that already has the
+    # cut counts the ramp's own dive and climb walls as the wing's motion,
+    # comes back zero, and reports that a 24 mm bay needs an infinite span
+    # to close. Which is what the first version of this did.
+    bare = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
+    bare_by_eta = tuple(zip(joint_etas, bare))
+    bay_ramp: dict = {}
+    for bay in mission.bays:
+        v = next(x for x in bay_vols if x.name == bay.name)
+        pan = next((pn for (a, b), pn in bare_by_eta
+                    if a <= v.eta1 <= b + 1e-9), None)
+        depth = bay.box_mm[2] + wall
+        bay_ramp[bay.name] = (
+            vase.ramp_span_mm(pan, depth, v.x0, v.x1) if pan is not None
+            else float("inf"))
+
+    # Only bays that FIT and are CLEAR of each other are cut. Two bays
+    # that overlap in chord would put two floors within a fraction of a
+    # millimetre of each other -- on micro the two openings overlap by
+    # 0.004c and the contour came back with 0.14 mm of clearance against a
+    # 0.45 mm limit. The clash gate already reports the overlap; the
+    # geometry must not also become invalid because of it.
+    clashing = {n for a, b, _ in it.clashes(bay_vols, plan, wall)
+                for n in (a, b)}
+    cut_list = tuple(
+        (bay.name, v.x0, v.x1, v.eta1, bay.box_mm[2] + wall,
+         bay_ramp[bay.name])
+        for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
+                       for b in mission.bays)
+        if v.fits(plan, wall)[0] and bay.name not in clashing)
+    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm,
+                               bays=cut_list)
     elevon_parts = elv.build_elevons(
         plan, settings, joint_etas,
         mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
@@ -1124,8 +1182,7 @@ def _evaluate_once(
         # halves join there -- so a bay starting at the centreline pays
         # for a single closure at its outboard end.
         if 0 <= first < len(panels):
-            pan = panels[first]
-            need = vase.ramp_span_mm(pan, bay.box_mm[2], vol.x0, vol.x1)
+            need = bay_ramp.get(bay.name, float("inf"))
             # What is LEFT of the panel outboard of the bay, as arc length
             # along the span -- the same quantity print height is measured
             # in, because dihedral makes a panel taller than its projected
@@ -1450,7 +1507,8 @@ def _evaluate_once(
         aero_e = ael.analyse(
             plan, spar_fits, cl_a, p_vec["elevon_chord"], p_vec["elevon_eta"],
             v_design, settings.extrusion_width_mm,
-            min_margin=mission.min_aeroelastic_margin)
+            min_margin=mission.min_aeroelastic_margin,
+            n_ribs=settings.rib_count if settings.ribs else 0)
         if not aero_e.ok:
             worst = min(aero_e.v_div_ms, aero_e.v_rev_ms)
             which = ("reversal" if aero_e.v_rev_ms <= aero_e.v_div_ms

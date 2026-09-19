@@ -214,20 +214,6 @@ def _box_outside_mm(plan, v, margin: float = bays_mod.BAND_MARGIN,
         worst = max(worst, (margin - x0) * c_mm, (x1 - (1.0 - margin)) * c_mm)
     return float(worst)
 
-
-def _band_leaves(plan, v, edge_eta: float, outboard: bool,
-                 margin: float = 0.02, n: int = 80) -> float:
-    """The station at which a volume's band would leave the section --
-    forward of `margin` chord or aft of 1 - margin -- walking away from
-    `edge_eta`. The tip or root if it never does."""
-    end = 1.0 if outboard else 0.0
-    for e in np.linspace(edge_eta, end, n):
-        x0, x1 = v.band(plan, float(e))
-        if x0 < margin or x1 > 1.0 - margin:
-            return float(e)
-    return end
-
-
 def ramp_walk(plan, bare_by_eta, x_abs_mm, length_mm, side, depth_mm,
               edge_eta, outboard, margin=None):
     """Span a ramp needs to fade `depth_mm`, walking away from `edge_eta`.
@@ -1573,6 +1559,26 @@ def _evaluate_once(
                   for p, c in zip(panels + elevon_parts, checks) if not c.ok]
     if mission.require_printable and print_fail:
         reasons.extend(print_fail)
+
+    # --- is the truss the buckling gate sized actually there? ---
+    #
+    # `structure.max_rib_pitch_mm` sizes the rib pitch from plate
+    # buckling of the compression skin, and `ribs_that_fit` will return
+    # ZERO for a panel whose chord is mostly openings -- correctly, since
+    # webs squeezed into what is left print at 83 degrees. Nothing then
+    # noticed that the pitch the structure had asked for was not
+    # delivered: the trainer's centre body carried no truss at all while
+    # the report went on quoting 26 mm, and the only symptom was 12 g of
+    # mass that quietly went away.
+    if settings.ribs:
+        bare_of_ribs = [p_.name for p_ in panels if not p_.has_ribs]
+        if bare_of_ribs:
+            reasons.append(
+                f"{', '.join(bare_of_ribs)} carr"
+                f"{'ies' if len(bare_of_ribs) == 1 else 'y'} no rib truss: "
+                f"the openings leave no chord for one, and the skin needs "
+                f"support every {settings.rib_pitch_mm:.0f} mm")
+            penalty += 6.0 * len(bare_of_ribs)
 
     root_c = plan.stations[0].chord_m
     # An item inside a bay sits where the bay sits. The trainer's

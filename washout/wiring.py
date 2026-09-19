@@ -118,8 +118,8 @@ def plan_channels(plan, mission, bay_vols, bay_etas, cut_bands,
     `cut_bands` maps bay name -> (x0, x1) of its CUT in absolute mm;
     `x_te_at(eta)` gives the trailing edge's absolute station. Ramps are
     not decided here: the caller measures them on bare panels with the
-    same walk a bay gets, and trims the spanwise runs to the bays' ramps
-    once those are known (see `trim_to_ramps`)."""
+    same walk a bay gets (`search.design.ramp_walk`), and gates each run
+    against every opening it is not meant to reach."""
     half_mm = plan.half_span_m * 1000.0
     channels: list[Channel] = []
     reasons: list[str] = []
@@ -169,40 +169,6 @@ def plan_channels(plan, mission, bay_vols, bay_etas, cut_bands,
                                 SERVO_LEAD_MM[1], "servo lead",
                                 length_mm_wire=(v_s.eta0 - v_rx.eta1) * half_mm + 100.0))
     return channels, reasons
-
-
-def trim_to_ramps(ch: Channel, plan, ramp_end_mm: dict, ramp_start_mm: dict,
-                  rx_name: str, tail_mm: float) -> Channel | None:
-    """A spanwise channel begins where the receiver bay's ramp has
-    faded out and ends where the servo pocket's ramp-in begins. None if
-    that leaves nothing to cut."""
-    if ch.lead != "servo lead":
-        return ch
-    z0 = ramp_end_mm[rx_name] + tail_mm
-    z1 = ramp_start_mm["servos"] - tail_mm
-    if z1 - z0 < 10.0:
-        return None
-    e_tab = np.linspace(0.0, 1.0, 300)
-    s_tab = np.array([0.0] + [vase.arc_length_mm(plan, 0.0, e, n=40)
-                              for e in e_tab[1:]])
-    e0 = float(np.interp(z0, s_tab, e_tab))
-    e1 = float(np.interp(z1, s_tab, e_tab))
-    return Channel(ch.name, ch.x0_abs_mm, ch.x1_abs_mm, e0, e1, ch.depth_mm,
-                   ch.lead, length_mm_wire=(z1 - z0) + 100.0)
-
-
-def clear_of(ch: Channel, others, plan, gap_mm: float = WALL_INSET_MM) -> bool:
-    """Whether a channel's band keeps `gap_mm` of skin from every other
-    cut it shares span with. Two detours in the same chord band on the
-    same layer cannot both exist."""
-    v = ch.volume(plan, 0.0)
-    for o in others:
-        if o.eta1 < v.eta0 or o.eta0 > v.eta1:
-            continue
-        if it.gap_mm(v, o, plan) < gap_mm:
-            return False
-    return True
-
 
 def report(channels, reasons) -> str:
     lines = ["wiring:"]

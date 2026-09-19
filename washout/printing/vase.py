@@ -672,70 +672,6 @@ def ramp_budget(stack: LayerStack, x0: float, x1: float,
         worst = min(worst, float(avail.min()))
     return float(max(worst, 0.0))
 
-
-def skin_drift_abs(stack: LayerStack, x_abs0: float, x_abs1: float,
-                   stride: int = 4, side: str = "upper",
-                   n_x: int = 9) -> tuple[np.ndarray, np.ndarray]:
-    """The skin's vertical motion per mm of Z at FIXED absolute stations.
-
-    -> (z_mm, drift) sampled along the part, drift NaN wherever the band
-    [x_abs0, x_abs1] (mm aft of the root leading edge) is not inside the
-    section on both layers of a pair.
-
-    `ramp_budget` asks how fast the bare skin moves at a chord fraction,
-    which is right for a feature that follows the chord -- a rib. A
-    box's walls stand at one absolute x, so in the print they have no
-    chordwise motion at all; what their corners inherit from the wing is
-    the skin's VERTICAL drift at that x, the section rising or falling
-    under a fixed station as the wing sweeps and thins. That drift is in
-    the same direction as a ramp's own dy, so it subtracts linearly:
-
-        dy_ramp / dz <= tan(theta_max) - |dy_skin / dz|
-
-    A profile rather than one number, because at a fixed station the
-    drift grows as the swept leading edge approaches -- the trainer's
-    pack band is quiet for 60 mm of its centre body and then runs into
-    the nose -- and a ramp only has to live where it is. Measured on a
-    bare, RIB-FREE stack: a rib slit's floor vertices, read as skin, put
-    a 35 mm step into the interpolated surface wherever the slit swept
-    across a sample station."""
-    c = stack.contours
-    ox = stack.origin_mm[0]
-    xs = np.linspace(x_abs0, x_abs1, n_x) - ox
-
-    def skin_y(layer):
-        i_le = int(np.argmin(layer[:, 0]))
-        pts = layer[:i_le + 1][::-1] if side == "upper" else layer[i_le:]
-        x, y = pts[:, 0], pts[:, 1]
-        order = np.argsort(x)
-        x, y = x[order], y[order]
-        if xs.min() < x.min() or xs.max() > x.max():
-            return None
-        return np.interp(xs, x, y)
-
-    zs, drift = [], []
-    for k in range(0, len(c) - stride, stride):
-        rise = float(stack.z_mm[k + stride] - stack.z_mm[k])
-        if rise <= 0.0:
-            continue
-        ya, yb = skin_y(c[k]), skin_y(c[k + stride])
-        zs.append(0.5 * float(stack.z_mm[k] + stack.z_mm[k + stride]))
-        drift.append(np.nan if ya is None or yb is None
-                     else float(np.abs(yb - ya).max()) / rise)
-    return np.array(zs), np.array(drift)
-
-
-def ramp_budget_abs(stack: LayerStack, x_abs0: float, x_abs1: float,
-                    stride: int = 4, side: str = "upper",
-                    n_x: int = 9) -> float:
-    """The worst-case single number from `skin_drift_abs`: depth a cut at
-    an absolute station may fade per mm of Z anywhere on this part."""
-    lim = np.tan(np.radians(stack.settings.max_overhang_deg))
-    _, d = skin_drift_abs(stack, x_abs0, x_abs1, stride, side, n_x)
-    d = d[np.isfinite(d)]
-    return float(max(lim - (d.max() if len(d) else 0.0), 0.0))
-
-
 def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
                        stride: int = 4, side: str = "upper", n_x: int = 9,
                        margin_frac: float = 0.02
@@ -823,27 +759,6 @@ def solve_ramp_from_rates(dist_mm: np.ndarray, rate: np.ndarray,
     if len(ok) == 0:
         return float("inf")
     return float(worst[int(ok[0])])
-
-
-def solve_ramp_mm(dist_mm: np.ndarray, drift: np.ndarray, depth_mm: float,
-                  limit: float, margin: float) -> float:
-    """Shortest ramp that fades `depth_mm` against a drift profile.
-
-    `dist_mm` is distance from the bay's edge along the span, ascending;
-    `drift` the skin's vertical drift there. A ramp of length L runs at
-    one linear rate, so it may use (limit - worst drift within L) times
-    the margin, and the first L for which that rate times L reaches the
-    depth is the answer. inf if none does within the profile."""
-    if len(dist_mm) == 0:
-        return float("inf")
-    worst = np.maximum.accumulate(np.nan_to_num(drift, nan=np.inf))
-    rate = np.maximum(limit - worst, 0.0) * margin
-    ok = np.where(dist_mm * rate >= depth_mm)[0]
-    if len(ok) == 0:
-        return float("inf")
-    i = int(ok[0])
-    return float(depth_mm / rate[i])
-
 
 def ramp_span_mm(stack: LayerStack, depth_mm: float,
                  x0: float, x1: float, side: str = "upper") -> float:

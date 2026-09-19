@@ -103,8 +103,10 @@ def test_the_horn_is_built_to_the_surface_it_sits_on():
                        servo_z_mm=5.0, servo_arm_mm=11.0, horn_arm_mm=8.0,
                        side=+1.0, horn_dx_mm=15.5)
     eta = max(0.55, ev.print_settings.elevon_eta + 0.02)
-    x_mid, length, depth, above = parts.horn_geometry(ev.plan, link, eta, WALL)
-    assert length > parts.HORN_TONGUE_MM, "the socket holds the tongue plus a fit"
+    x_mid, length, depth, above, tongue = parts.horn_geometry(
+        ev.plan, link, eta, WALL, applied_nmm=100.0)
+    assert length > tongue, "the socket holds the tongue plus a fit"
+    assert parts.HORN_TONGUE_MIN_MM <= tongue <= parts.HORN_TONGUE_MAX_MM
     assert above == pytest.approx(link.horn_arm_mm)
 
     # a station with real depth: the blade follows the skin, and the

@@ -232,7 +232,7 @@ along the span."""
 def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
                x_abs_mm: float, length_mm: float, depth_mm: float,
                tongue_t_mm: float, chamfer_deg: float, margin: float,
-               z_step_mm: float | None = None):
+               z_step_mm: float | None = None, applied_nmm: float = 0.0):
     """The horn's socket as a `BaySpec` in the z of the elevon panel that
     holds station `eta_h`. -> (panel index among the elevons, spec) or
     (None, None) if no elevon holds that station or the socket cannot
@@ -243,7 +243,7 @@ def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
     solve a bay gets. A socket whose ramp would run off the panel's end
     is reported as unmakeable rather than cut short."""
     if not has_elevon(settings):
-        return None, None
+        return None, None, 0.0
     j = 0
     for a, b in panel_etas:
         if a < settings.elevon_eta - 1e-9:
@@ -256,29 +256,49 @@ def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
             zs, rate, ok, rise = cut_budget_profile(
                 bare, x_abs_mm - 0.5 * length_mm, x_abs_mm + 0.5 * length_mm,
                 side="upper", margin_frac=BAND_MARGIN)
-            # How deep the socket can ACTUALLY be, measured on the
-            # elevon's own contour rather than on the aerofoil it came
-            # from. The nose is chamfered for deflection and the trailing
-            # edge carries `min_te_mm`, so the part is thinner than the
-            # section at the same station -- taking the aerofoil's
-            # thickness put the trainer's socket floor within a bead of
-            # its own lower skin and the clearance gate failed the part.
+            # How deep the socket can ACTUALLY be, and how long the
+            # tongue should be, measured on the elevon's own contour
+            # rather than on the aerofoil it came from. The nose is
+            # CHAMFERED for deflection and the trailing edge carries
+            # `min_te_mm`, so the part is thinnest at both ends and the
+            # best socket is somewhere in the middle -- which is a small
+            # search, not a guess, and one that has to be done here
+            # because only here is the real section known. Sizing it
+            # against the aerofoil instead put the tongue in the chamfer
+            # and lost a third of the capacity.
             k_h = int(np.argmin(np.abs(bare.z_mm - z_h)))
             loop = bare.contours[k_h]
             i_le = int(np.argmin(loop[:, 0]))
             up, lo = loop[:i_le + 1][::-1], loop[i_le:]
-            xs_b = np.linspace(x_abs_mm - 0.5 * length_mm,
-                               x_abs_mm + 0.5 * length_mm, 9) - bare.origin_mm[0]
-            inside = ((xs_b >= max(up[0, 0], lo[0, 0]))
-                      & (xs_b <= min(up[-1, 0], lo[-1, 0])))
-            if not inside.any():
-                return j, None            # the socket is off the part
-            gap = (np.interp(xs_b[inside], up[:, 0], up[:, 1])
-                   - np.interp(xs_b[inside], lo[:, 0], lo[:, 1]))
             w = settings.extrusion_width_mm
-            depth_mm = min(depth_mm, float(gap.min()) - 3.0 * w)
+            x_fwd = x_abs_mm - 0.5 * length_mm      # the tongue's forward end
+
+            def depth_of(L):
+                xs_b = np.linspace(x_fwd, x_fwd + L, 9) - bare.origin_mm[0]
+                if (xs_b.min() < max(up[0, 0], lo[0, 0])
+                        or xs_b.max() > min(up[-1, 0], lo[-1, 0])):
+                    return -1.0           # runs off the part
+                g = (np.interp(xs_b, up[:, 0], up[:, 1])
+                     - np.interp(xs_b, lo[:, 0], lo[:, 1]))
+                return min(depth_mm, float(g.min()) - 3.0 * w)
+
+            from . import parts as _parts
+            best = (0.0, -1.0, 0.0)       # length, depth, capacity
+            for L in np.arange(_parts.HORN_TONGUE_MIN_MM,
+                               _parts.HORN_TONGUE_MAX_MM + 1e-9, 1.0):
+                d = depth_of(float(L))
+                if d <= 0.0:
+                    continue
+                cap = _parts.socket_moment_capacity_nmm(float(L), d)
+                if cap > best[2]:
+                    best = (float(L), d, cap)
+                if applied_nmm > 0.0 and cap >= _parts.HORN_SAFETY * applied_nmm:
+                    best = (float(L), d, cap)
+                    break
+            tongue, depth_mm, _ = best
             if depth_mm <= 0.0:
-                return j, None            # no section left to cut into
+                return j, None, 0.0       # no section left to cut into
+            length_mm = tongue + 2.0 * _parts.SOCKET_CLEAR_MM
             # A socket at the panel's ROOT FACE needs no ramp in: that
             # face is open, exactly as a bay at the centreline is. The
             # horn sits at the elevon's inboard end on every aircraft in
@@ -299,15 +319,15 @@ def socket_for(plan, settings: PrintSettings, panel_etas, eta_h: float,
             if at_root:
                 ramp_in, start = 0.0, 0.0
             if not (np.isfinite(ramp_out) and np.isfinite(ramp_in)):
-                return j, None
+                return j, None, tongue
             spec = BaySpec("horn socket", 0.0, 0.0,
                            start, z_h + 0.5 * run, ramp_out, depth_mm,
                            settings.extrusion_width_mm, open_from="upper",
                            ledge_mm=0.0, ramp_in_mm=ramp_in,
                            length_mm=length_mm, x_abs_mm=x_abs_mm)
-            return j, spec
+            return j, spec, tongue
         j += 1
-    return None, None
+    return None, None, 0.0
 
 
 def socket_depth_of(spec) -> float:

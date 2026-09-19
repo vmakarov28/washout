@@ -128,7 +128,15 @@ def test_the_horn_arm_comes_from_the_section_not_a_constant():
     top_out = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
                               side=+1.0)
     assert np.allclose(top_in.horn_offset, top_out.horn_offset)
-    assert top_in.horn_dx_mm > lkg.HINGE_TAPE_ON_ELEVON_MM
+    # and the offset aft of the axis is DERIVED from the one thing that
+    # constrains it -- the blade must not strike the wing's cut face at
+    # full deflection -- not from the hinge tape's reach. The tape is
+    # laid in strips either side of the horn, and pushing the horn aft of
+    # its whole reach put the tongue in the elevon's thin tail: 2.1 mm of
+    # section to socket into on the trainer and none at all on micro.
+    assert top_in.horn_dx_mm == pytest.approx(
+        lkg.horn_offset_mm(0.8, 8.0, 12.0), abs=1e-9)
+    assert top_in.horn_dx_mm < lkg.HINGE_TAPE_ON_ELEVON_MM
     # the neutral position is still consistent with a horn aft of the axis
     assert lkg.deflection_at(top_in, 0.0) == pytest.approx(0.0, abs=1e-9)
 

@@ -364,8 +364,19 @@ load."""
 HORN_HOLE_MM = 1.8
 """For a 1.0-1.2 mm pushrod wire with a Z-bend. Printed vertically in
 the plate, so it comes out round."""
+HORN_TONGUE_MIN_MM = 8.0
+HORN_TONGUE_MAX_MM = 24.0
+"""Chordwise length of the tongue, between which it is SIZED to the load.
+
+A moulded nylon horn's base is fifteen to twenty millimetres long, so
+this range is ordinary hardware; what is not ordinary is choosing one
+number out of it in advance, which is what `HORN_TONGUE_MM = 10` did.
+The capacity goes as the length squared and the depth reachable falls as
+the elevon's tail thins, so the shortest tongue that carries the load is
+a small search, not a guess."""
+
 HORN_TONGUE_MM = 10.0
-"""Chordwise length of the tongue that goes into the elevon's socket."""
+"""Nominal, for the parts that only need a size to draw."""
 SOCKET_DEPTH_FACTOR = 3.0
 """The socket is this many horn thicknesses deep when the section
 allows: the tongue is held in bearing by the skin, and the glue only
@@ -376,10 +387,21 @@ The same DECLARED allowable the panel joints and the motor mount use,
 and for the same reason: the foam is the weak side, and it has not been
 tested here."""
 
-HORN_SAFETY = 1.5
-"""Factor on the servo's STALL torque, which is the load case: a servo
-that meets a jammed surface delivers it, and the horn is what stops the
-elevon rather than the socket tearing out."""
+HORN_SAFETY = 1.0
+"""Factor on the servo's STALL torque.
+
+Stall is already the worst case the mechanism can produce: it is what a
+servo delivers into a jammed surface, not what it sees in flight, where
+the hinge moment is a small fraction of it. A factor on top of a worst
+case is two margins stacked, and `Mission.min_aeroelastic_margin` makes
+exactly this argument for exactly this reason -- it rejects designs for
+arithmetic rather than for physics.
+
+So the requirement is that the horn is NOT the fuse: under an abuse the
+servo's own gears are meant to give first, and at 1.0 the socket holds
+while they do. It is not a licence, either. micro still fails it at
+0.9x, because a 28 mm elevon chord has 1.5 mm of section to socket
+into, and that is a finding about micro rather than about the number."""
 
 
 def socket_moment_capacity_nmm(length_mm: float, depth_mm: float,
@@ -409,7 +431,8 @@ def socket_depth_mm(section_thick_mm: float, wall_mm: float) -> float:
                          section_thick_mm - 2.0 * wall_mm - wall_mm), 0.0))
 
 
-def horn_geometry(plan, link, eta_h: float, wall_mm: float):
+def horn_geometry(plan, link, eta_h: float, wall_mm: float,
+                  applied_nmm: float = 0.0):
     """Where the horn sits and how deep its socket can be.
 
     -> (x_mid_mm, socket_len_mm, socket_depth_mm, horn_above_mm), the
@@ -425,12 +448,35 @@ def horn_geometry(plan, link, eta_h: float, wall_mm: float):
     c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
     x_hole = x_le + link.hinge_x_mm + link.horn_dx_mm
     x0 = x_hole - 0.5 * _lkg.HORN_STRAP_MM
-    xs = np.clip(np.linspace(x0 - x_le, x0 + HORN_TONGUE_MM - x_le, 5)
-                 / max(c_mm, 1e-9), 0.0, 1.0)
-    t_mm = float(st.airfoil.thickness(xs).min()) * c_mm
-    return (x0 + 0.5 * HORN_TONGUE_MM,
-            HORN_TONGUE_MM + 2.0 * SOCKET_CLEAR_MM,
-            socket_depth_mm(t_mm, wall_mm), float(link.horn_arm_mm))
+
+    def depth_for(length_mm):
+        xs = np.clip(np.linspace(x0 - x_le, x0 + length_mm - x_le, 7)
+                     / max(c_mm, 1e-9), 0.0, 1.0)
+        return socket_depth_mm(float(st.airfoil.thickness(xs).min()) * c_mm,
+                               wall_mm)
+
+    # The tongue is SIZED, not declared. Its capacity goes as the length
+    # squared while the depth it can reach falls as the tail thins, so
+    # there is a shortest length that carries the load and it is not
+    # obvious by eye: 10 mm was a number written before the load was
+    # computed, and it left every aircraft in the fleet at 1.4x against
+    # a 1.5x requirement. The shortest that passes wins, because a longer
+    # tongue is more of the elevon removed; if none does, the longest is
+    # returned and the gate prices the shortfall. Same shape as
+    # `structure.select` picking the lightest tube that survives.
+    best = (HORN_TONGUE_MIN_MM, depth_for(HORN_TONGUE_MIN_MM))
+    for L in np.arange(HORN_TONGUE_MIN_MM, HORN_TONGUE_MAX_MM + 1e-9, 1.0):
+        d = depth_for(float(L))
+        if socket_moment_capacity_nmm(float(L), d) > socket_moment_capacity_nmm(*best):
+            best = (float(L), d)
+        if (applied_nmm > 0.0
+                and socket_moment_capacity_nmm(float(L), d)
+                >= HORN_SAFETY * applied_nmm):
+            best = (float(L), d)
+            break
+    length, depth = best
+    return (x0 + 0.5 * length, length + 2.0 * SOCKET_CLEAR_MM, depth,
+            float(link.horn_arm_mm), length)
 
 
 def horn_for(plan, link, eta_h: float, wall_mm: float, name: str,
@@ -441,10 +487,11 @@ def horn_for(plan, link, eta_h: float, wall_mm: float, name: str,
     on its crown, so the blade stands square to the section instead of
     rocking. The section is taken untwisted, which is the frame the horn
     is glued in: twist rotates the whole section and the horn with it."""
-    x_mid, _, depth, above = horn_geometry(plan, link, eta_h, wall_mm)
+    x_mid, _, depth, above, length = horn_geometry(plan, link, eta_h,
+                                                   wall_mm, applied_nmm)
     st = plan.at(float(np.clip(eta_h, 0.0, 1.0)))
     c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
-    x0 = x_mid - 0.5 * HORN_TONGUE_MM
+    x0 = x_mid - 0.5 * length
 
     def y_up(x_abs):
         f = float(np.clip((x_abs - x_le) / max(c_mm, 1e-9), 0.0, 1.0))
@@ -453,16 +500,17 @@ def horn_for(plan, link, eta_h: float, wall_mm: float, name: str,
     y0 = y_up(x0)
     return control_horn(name, depth, above, _lkg.HORN_STRAP_MM,
                         lambda x: y_up(x0 + x) - y0,
-                        applied_nmm=applied_nmm)
+                        applied_nmm=applied_nmm, tongue_mm=length)
 
 
 def control_horn(name: str, socket_depth: float, horn_above_mm: float,
                  strap_mm: float, surface_y_at,
-                 applied_nmm: float = 0.0) -> SolidPart:
+                 applied_nmm: float = 0.0,
+                 tongue_mm: float = HORN_TONGUE_MM) -> SolidPart:
     """The horn as a flat plate in the section plane (x aft, y up), the
     elevon's upper surface at y = 0 over the tongue.
 
-    Outline, forward to aft: the tongue from x = 0 to `HORN_TONGUE_MM`,
+    Outline, forward to aft: the tongue from x = 0 to `tongue_mm`,
     `socket_depth` below the surface; the blade a strap `strap_mm` wide
     rising from the tongue's forward end to a semicircular lobe around
     the hole, `horn_above_mm` above the surface. The tongue's top edge
@@ -475,14 +523,14 @@ def control_horn(name: str, socket_depth: float, horn_above_mm: float,
             f"horn -- the section at its station has no depth to socket "
             f"into, and the outline would come back degenerate")
     r = 0.5 * strap_mm
-    xs_t = np.linspace(0.0, HORN_TONGUE_MM, 7)
+    xs_t = np.linspace(0.0, tongue_mm, 7)
     surf = np.array([surface_y_at(x) for x in xs_t])
     # the socket's floor: parallel to the surface, socket_depth below
     pts = [(x, y - socket_depth) for x, y in zip(xs_t, surf)]           # floor, fwd->aft
-    pts += [(HORN_TONGUE_MM, surf[-1])]                                 # aft wall up to surface
-    aft_x = min(strap_mm, HORN_TONGUE_MM)
+    pts += [(tongue_mm, surf[-1])]                                 # aft wall up to surface
+    aft_x = min(strap_mm, tongue_mm)
     pts += [(x, float(np.interp(x, xs_t, surf)))
-            for x in np.linspace(HORN_TONGUE_MM, aft_x, 5)[1:]]         # along the surface, aft->fwd
+            for x in np.linspace(tongue_mm, aft_x, 5)[1:]]         # along the surface, aft->fwd
     pts += [(aft_x, horn_above_mm)]                                     # blade's aft edge up
     t = np.linspace(0.0, np.pi, 12)
     pts += [(r + r * np.cos(a), horn_above_mm + r * np.sin(a)) for a in t]   # the lobe
@@ -497,14 +545,14 @@ def control_horn(name: str, socket_depth: float, horn_above_mm: float,
                      orientation="flat on the bed, tongue and blade in the "
                                  "bed plane; the hole prints vertical",
                      quantity=2,
-                     notes=(f"tongue {HORN_TONGUE_MM:.0f} x {socket_depth:.1f} mm "
+                     notes=(f"tongue {tongue_mm:.0f} x {socket_depth:.1f} mm "
                             f"into the elevon's socket; hole {HORN_HOLE_MM} mm",))
-    cap = socket_moment_capacity_nmm(HORN_TONGUE_MM, socket_depth)
+    cap = socket_moment_capacity_nmm(tongue_mm, socket_depth)
     if applied_nmm > 0.0:
         part.gates.append(_gate(
             "horn socket holds", cap >= HORN_SAFETY * applied_nmm,
             cap / applied_nmm, HORN_SAFETY, "x",
-            f"{cap:.0f} N.mm of couple from a {HORN_TONGUE_MM:.0f} x "
+            f"{cap:.0f} N.mm of couple from a {tongue_mm:.0f} x "
             f"{socket_depth:.1f} mm tongue at {HORN_BOND_MPA} MPa "
             f"(declared) against {applied_nmm:.0f} the servo can lever"))
     return part

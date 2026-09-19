@@ -192,8 +192,37 @@ def sweep(link: Linkage, use_frac: float = 0.9,
 
 HINGE_TAPE_ON_ELEVON_MM = 12.0
 """How far the hinge tape reaches onto the elevon from the hinge line:
-half of a 24 mm tape. A declared allowance; the horn's socket starts
-aft of it so the tape lies flat."""
+half of a 24 mm tape. A declared allowance.
+
+It is NOT what sets where the horn goes. The tape is laid in two strips
+either side of the horn, which is how anyone hinges a surface that has a
+horn on it, so the horn does not have to stand aft of the tape's whole
+reach -- and requiring it to put the tongue 15.5 mm aft of the axis, in
+the elevon's thin tail, where the trainer had 2.1 mm of section to
+socket into and micro had none at all. See `horn_offset_mm`."""
+
+
+def horn_offset_mm(gap_mm: float, horn_above_mm: float,
+                   deflect_deg: float) -> float:
+    """How far aft of the hinge axis the horn's hole sits.
+
+    Set by the one thing that actually constrains it: the blade must not
+    strike the wing's cut face at full deflection. The blade's forward
+    edge is half a strap ahead of the hole, and deflecting the surface
+    trailing-edge UP swings that edge forward by its height above the
+    axis times the sine of the angle. So
+
+        dx >= strap/2 + gap + horn_above * sin(delta)
+
+    which on the trainer is 3.5 + 0.8 + 8*sin(12) = 6.0 mm, against the
+    15.5 mm the tape allowance was imposing. Every millimetre forward is
+    section to socket into: the trainer goes from 2.1 mm of depth to
+    4.4 mm, demon1 from 3.1 to 4.5, and micro from nothing at all to
+    1.9 -- which is the difference between a horn that holds the servo's
+    stall torque and one that pulls out.
+    """
+    return float(0.5 * HORN_STRAP_MM + gap_mm
+                 + horn_above_mm * np.sin(np.radians(abs(deflect_deg))))
 
 HORN_STRAP_MM = 7.0
 """Width of the horn's blade, which is twice the radius of the rounded
@@ -246,7 +275,9 @@ def for_station(plan, eta: float, hinge_x_frac: float,
                 servo_x_frac: float, servo_arm_mm: float,
                 horn_below_mm: float, travel_deg: float,
                 wall_mm: float = 0.45, side: float = -1.0,
-                horn_dx_mm: float | None = None) -> Linkage:
+                horn_dx_mm: float | None = None,
+                hinge_gap_mm: float = 0.8,
+                deflect_deg: float = 12.0) -> Linkage:
     """Build the linkage from the geometry at one spanwise station.
 
     Only two lengths are declared here and the rest is measured off the
@@ -272,10 +303,8 @@ def for_station(plan, eta: float, hinge_x_frac: float,
     `servo_arm - wall` outside the aeroplane and can reach the rod.
 
     With `side = +1` the servo sits in the TOP of the wing and the horn
-    stands on the elevon's upper surface -- the same surface as the
-    hinge tape, so the horn's hole is `HINGE_TAPE_ON_ELEVON_MM` plus half
-    a strap AFT of the axis and `horn_below_mm` (the protrusion, the name
-    kept) above it. The arm is then independent of the section: it is
+    stands on the elevon's upper surface, `horn_offset_mm` aft of the
+    axis and `horn_below_mm` (the protrusion, the name kept) above it. The arm is then independent of the section: it is
     the hinge-to-hole vector, and it is the same at every station.
     """
     st = plan.at(float(np.clip(eta, 0.0, 1.0)))
@@ -294,7 +323,7 @@ def for_station(plan, eta: float, hinge_x_frac: float,
                        travel_deg=travel_deg, side=-1.0,
                        horn_dx_mm=0.0 if horn_dx_mm is None else horn_dx_mm)
     z_upper_s = float(st.airfoil.y_upper(np.array([xs]))[0]) * c_mm
-    dx = (HINGE_TAPE_ON_ELEVON_MM + 0.5 * HORN_STRAP_MM
+    dx = (horn_offset_mm(hinge_gap_mm, horn_below_mm, deflect_deg)
           if horn_dx_mm is None else horn_dx_mm)
     return Linkage(hinge_x_mm=xh * c_mm, hinge_z_mm=z_upper,
                    servo_x_mm=xs * c_mm,

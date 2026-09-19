@@ -373,6 +373,16 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
                 # it. Millimetres of box outside the section count as
                 # interference.
                 room = _box_outside_mm(plan, vol)
+                # NOT a term for how far the servo's shaft falls short of
+                # the elevon. That was tried, in the key and as a clamp,
+                # and both are the same mistake: the seat that satisfies
+                # it is 20% of the span outboard, in thinner section and
+                # through the TE spar's corridor, and the CG, the trim,
+                # the spar seats, the rib corridors and one panel's wall
+                # clearance all move with it -- sixteen tests failed and
+                # none of them was about servos. The shortfall is a GATE,
+                # reported in millimetres. What satisfies it is the
+                # elevon's own station, which the search owns.
                 # And two openings side by side must leave a WALL between
                 # them, not a fin. The rendered root section showed the
                 # electronics bay seated 5 mm from the pack: a 5 mm wide,
@@ -930,13 +940,25 @@ station -- on the trainer's servo pocket 1.048 mm/mm was allowed and
 sides of the p0/p1 joint. 0.85 keeps every measured case under the limit
 with margin; a larger factor is a longer ramp, which is the right way to
 be wrong."""
-MIN_BAY_WALL_MM = 10.0
-"""Narrowest wall two openings may leave between them.
+MIN_BAY_WALL_STRUCTURAL_MM = 10.0
+"""Narrowest wall two openings may leave between them, for its own sake.
 
 A declared print-process minimum, in the same category as the overhang
 limit: a two-bead skin 5 mm wide and 30 mm tall between two holes is a
 fin, and one that is 10 mm wide is a wall. Not derived -- there is no
 buckling model for a free-standing sliver here -- and stated as such."""
+
+MIN_BAY_WALL_MM = max(MIN_BAY_WALL_STRUCTURAL_MM,
+                      wire.PACK_LEAD_MM[0] + 2.0 * wire.WALL_INSET_MM)
+"""...and what has to CROSS it, which is the binding one.
+
+The pack's lead goes over the wall between the two root bays with an
+XT30 on the end of it, and `wiring` wants the connector's width plus an
+inset either side. That came to 11 mm while the seat solver was aiming
+for 10, so the solver hit its own target and missed the wire's by a
+millimetre on every design it would ever produce -- two constants
+describing one wall, which is the shape of mistake this repository keeps
+finding. One number now, and it is the larger of the two reasons."""
 
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
@@ -1520,22 +1542,26 @@ def _evaluate_once(
             plan, e_horn, elv.hinge_x(settings), bay_seats["servos"],
             mission.servo_arm_mm, mission.horn_below_mm,
             mission.servo_travel_deg, wall,
-            side=+1.0 if servo_bay.open_from == "upper" else -1.0)
-        x_mid, s_len, s_depth, _ = pmod.horn_geometry(plan, link, e_horn, wall)
-        j_sock, spec = elv.socket_for(
+            side=+1.0 if servo_bay.open_from == "upper" else -1.0,
+            hinge_gap_mm=settings.hinge_gap_mm,
+            deflect_deg=mission.max_elevon_deflect_deg)
+        rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
+        applied = rod_n * link.horn_arm_mm
+        x_mid, s_len, s_depth, _, s_tongue = pmod.horn_geometry(
+            plan, link, e_horn, wall, applied)
+        j_sock, spec, s_tongue_fit = elv.socket_for(
             plan, settings, joint_etas, e_horn, x_mid, s_len, s_depth,
             pmod.HORN_T_MM,
             mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
-            RAMP_MARGIN, z_step_mm)
+            RAMP_MARGIN, z_step_mm, applied_nmm=applied)
         if spec is not None:
             s_depth = elv.socket_depth_of(spec)
+            s_tongue = float(s_tongue_fit)
         # Cut it only if it can HOLD the horn, exactly as only a bay that
         # fits and is clear of everything is cut. A socket that fails its
         # load gate is not a socket, it is a notch that weakens a thin
         # part; the reason below says so and the design pays for it.
-        cap = pmod.socket_moment_capacity_nmm(pmod.HORN_TONGUE_MM, s_depth)
-        rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
-        applied = rod_n * link.horn_arm_mm
+        cap = pmod.socket_moment_capacity_nmm(s_tongue, s_depth)
         holds = cap >= pmod.HORN_SAFETY * applied
         if j_sock is not None and spec is not None and holds:
             socket_map[j_sock] = (spec,)
@@ -1550,6 +1576,27 @@ def _evaluate_once(
         plan, settings, joint_etas,
         mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
         z_step_mm=z_step_mm, sockets=socket_map)
+    # And only if the part that comes out is still legal. The socket is
+    # sized to hold the horn and clamped to keep a bead off the far skin,
+    # and on a thin elevon it can still bring the contour within an
+    # extrusion width of itself somewhere else along the cut. A socket
+    # that breaks the part it is cut into is not a socket: the elevons are
+    # rebuilt without it and the design is told why, which is the same
+    # rule a bay that does not fit already gets.
+    if socket_map:
+        bad = [p_.name for p_ in elevon_parts
+               if not all(g.passed for g in vase.check(p_).gates
+                          if g.name in ("min wall separation", "vertex spacing"))]
+        if bad:
+            socket_map = {}
+            elevon_parts = elv.build_elevons(
+                plan, settings, joint_etas,
+                mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
+                z_step_mm=z_step_mm)
+            reasons.append(
+                f"the horn's socket cannot be cut: it brings "
+                f"{', '.join(bad)} within a bead of itself")
+            penalty += 8.0
     checks = [vase.check(p) for p in panels + elevon_parts]
     # The elevons are shell too. Splitting the trailing edge off into its
     # own part does not make it weightless, and it adds two walls at the
@@ -1928,8 +1975,9 @@ def _evaluate_once(
         # jammed surface delivers it, and the horn is what gives.
         if cap < pmod.HORN_SAFETY * applied:
             reasons.append(
-                f"horn socket {s_depth:.1f} mm deep at eta {e_horn:.2f} holds "
-                f"{cap:.0f} N.mm, the servo can lever {applied:.0f} "
+                f"horn socket {s_tongue:.0f} x {s_depth:.1f} mm at eta "
+                f"{e_horn:.2f} holds {cap:.0f} N.mm, the servo can lever "
+                f"{applied:.0f} "
                 f"({cap / max(applied, 1e-9):.1f}x, needs "
                 f"{pmod.HORN_SAFETY:.1f})")
 

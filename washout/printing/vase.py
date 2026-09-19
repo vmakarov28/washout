@@ -1048,6 +1048,17 @@ class BayCut:
     length_mm: float | None = None
     x_abs_mm: float | None = None
 
+    def band_at(self, chord_mm: float, x_le_mm: float = 0.0
+                ) -> tuple[float, float]:
+        """(x0, x1) in that station's own chord fractions, by the same
+        rule the cutter uses."""
+        if self.length_mm is None:
+            return (self.x0, self.x1)
+        h = 0.5 * self.length_mm / max(chord_mm, 1e-9)
+        mid = ((self.x_abs_mm - x_le_mm) / max(chord_mm, 1e-9)
+               if self.x_abs_mm is not None else 0.5 * (self.x0 + self.x1))
+        return _bay_clamp_band(mid, h, chord_mm)
+
 
 def build_panels(plan: Planform, settings: PrintSettings,
                  z_margin_mm: float = 8.0,

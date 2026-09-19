@@ -42,6 +42,10 @@ TRAINER_SEED: dict = {}
 
 @dataclass
 class SearchLog:
+    geometry_failures: int = 0
+    """Designs whose geometry could not be built at all. Not the same as
+    infeasible: these never reached a gate, and a run with many of them
+    is a run whose geometry has a hole in it."""
     best_score: float = -np.inf
     best_u: list | None = None
     # A high-scoring INFEASIBLE design is still infeasible. The penalised
@@ -80,8 +84,23 @@ def run_search(
     t0 = time.perf_counter()
 
     def objective(u: np.ndarray) -> float:
-        ev = evaluate(u, mission, base, settings, ns=ns, nc=nc,
-                      z_step_mm=search_z_step_mm, drag=drag)
+        try:
+            ev = evaluate(u, mission, base, settings, ns=ns, nc=nc,
+                          z_step_mm=search_z_step_mm, drag=drag)
+        except Exception as e:                       # noqa: BLE001
+            # A design whose GEOMETRY cannot be built is infeasible, not
+            # fatal. Four of gen6's nine searches died on one candidate
+            # each, hours in, because two openings wanted the same chord
+            # and the skin builder refused the layer -- scipy then saw a
+            # non-number and stopped. The gates that should have caught
+            # it are fixed, and this is the net under them: the cause is
+            # logged, the design is rejected, and the run continues.
+            log.evaluations += 1
+            log.geometry_failures += 1
+            if verbose and log.geometry_failures <= 5:
+                print(f" !![{log.evaluations:6d}] geometry refused: "
+                      f"{type(e).__name__}: {e}")
+            return 1e7
         log.evaluations += 1
         log.feasible += int(ev.ok)
         if ev.ok and ev.score > log.best_feasible_score:

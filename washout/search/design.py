@@ -214,6 +214,53 @@ def _box_outside_mm(plan, v, margin: float = bays_mod.BAND_MARGIN,
         worst = max(worst, (margin - x0) * c_mm, (x1 - (1.0 - margin)) * c_mm)
     return float(worst)
 
+def cut_span(plan, cut) -> tuple[float, float]:
+    """(eta0, eta1) a cut occupies INCLUDING its ramps and dead spans.
+
+    A cut exists over more span than its box: the ramps that fade it in
+    and out are geometry too, and two cuts whose ramps overlap in one
+    chord band are two detours the skin cannot carry at that height."""
+    total = vase.arc_length_mm(plan, 0.0, 1.0)
+    z0 = (0.0 if cut.eta0 <= 1e-9 else
+          vase.arc_length_mm(plan, 0.0, cut.eta0) - cut.dead_in_mm
+          - (cut.ramp_in_mm if np.isfinite(cut.ramp_in_mm) else 0.0))
+    z1 = (vase.arc_length_mm(plan, 0.0, cut.eta1) + cut.dead_out_mm
+          + (cut.ramp_out_mm if np.isfinite(cut.ramp_out_mm) else 0.0))
+    e = np.linspace(0.0, 1.0, 200)
+    s = np.array([0.0] + [vase.arc_length_mm(plan, 0.0, v, n=40) for v in e[1:]])
+    return (float(np.interp(max(z0, 0.0), s, e)),
+            float(np.interp(min(z1, total), s, e)))
+
+
+def cuts_clash_mm(plan, a, b, n: int = 15) -> float:
+    """How far two cuts' bands overlap, in mm, at their worst shared
+    station; negative or zero means they are clear.
+
+    Checked over the whole span they SHARE rather than at one midpoint,
+    because a band at an absolute station slides across the chord as the
+    wing sweeps and tapers under it: two openings a centimetre apart at
+    one station can be on top of each other at the next. Checking one
+    station let four of gen6's nine searches die on
+    `rebuild_skin`'s refusal -- a crash in the geometry instead of a gate
+    with a number, which is the one thing a search must never meet."""
+    if a.open_from != b.open_from:
+        return 0.0
+    a0, a1 = cut_span(plan, a)
+    b0, b1 = cut_span(plan, b)
+    lo, hi = max(a0, b0), min(a1, b1)
+    if hi <= lo:
+        return 0.0
+    worst = 0.0
+    for e in np.linspace(lo, hi, n):
+        st = plan.at(float(e))
+        c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
+        ba = a.band_at(c_mm, x_le)
+        bb = b.band_at(c_mm, x_le)
+        gap = max(ba[0] - bb[1], bb[0] - ba[1]) * c_mm
+        worst = max(worst, -gap)
+    return float(worst)
+
+
 def ramp_walk(plan, bare_by_eta, x_abs_mm, length_mm, side, depth_mm,
               edge_eta, outboard, margin=None):
     """Span a ramp needs to fade `depth_mm`, walking away from `edge_eta`.
@@ -1517,8 +1564,30 @@ def _evaluate_once(
             continue
         chan_cuts.append(cut)
 
+    # Nothing in the final list may share a chord band with anything
+    # else in it, anywhere either of them exists. The earlier checks
+    # looked at one station and only compared channels against bays;
+    # this compares everything against everything, over the span they
+    # share, and drops the later of any pair that clash. A cut that is
+    # dropped is named and priced -- the geometry never sees a conflict
+    # it would have to raise on.
+    keep, dropped = [], []
+    for cut in list(cut_list) + list(chan_cuts):
+        rival = next((k for k in keep if cuts_clash_mm(plan, k, cut) > 0.0),
+                     None)
+        if rival is None:
+            keep.append(cut)
+            continue
+        dropped.append((cut.name, rival.name,
+                        cuts_clash_mm(plan, rival, cut)))
+    for name, rival, mm in dropped:
+        reasons.append(f"{name} shares {mm:.1f} mm of chord with {rival} "
+                       f"somewhere along the span they both run, so only "
+                       f"one of them is cut")
+        penalty += 6.0 + mm
+
     panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm,
-                               bays=cut_list + tuple(chan_cuts))
+                               bays=tuple(keep))
     # --- the mechanism, and the socket the horn drops into ---
     #
     # Solved HERE, before the elevons are built, because the socket is a

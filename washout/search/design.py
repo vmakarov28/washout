@@ -34,7 +34,6 @@ from ..geom import interior as it
 from ..printing import vase
 from ..printing import bays as bays_mod
 from ..printing import parts as pmod
-from .. import wiring as wire
 from ..printing import elevons as elv
 from ..aero import performance as perf
 from ..aero import lateral
@@ -290,8 +289,8 @@ def ramp_walk(plan, bare_by_eta, x_abs_mm, length_mm, side, depth_mm,
     live -- sizing the ramp-in from the outboard walk was another way the
     same pocket ran over.
 
-    Used by every detour that fades: the payload bays, the servo pockets,
-    and the wiring channels.
+    Used by every detour that fades: the payload bays and the servo
+    pockets.
     """
     margin = RAMP_MARGIN if margin is None else margin
     half = 0.5 * length_mm
@@ -995,17 +994,15 @@ limit: a two-bead skin 5 mm wide and 30 mm tall between two holes is a
 fin, and one that is 10 mm wide is a wall. Not derived -- there is no
 buckling model for a free-standing sliver here -- and stated as such."""
 
-MIN_BAY_WALL_MM = max(MIN_BAY_WALL_STRUCTURAL_MM,
-                      wire.PACK_LEAD_MM[0] + 2.0 * wire.WALL_INSET_MM)
-"""...and what has to CROSS it, which is the binding one.
+MIN_BAY_WALL_MM = MIN_BAY_WALL_STRUCTURAL_MM
+"""...and nothing has to CROSS it any more.
 
-The pack's lead goes over the wall between the two root bays with an
-XT30 on the end of it, and `wiring` wants the connector's width plus an
-inset either side. That came to 11 mm while the seat solver was aiming
-for 10, so the solver hit its own target and missed the wire's by a
-millimetre on every design it would ever produce -- two constants
-describing one wall, which is the shape of mistake this repository keeps
-finding. One number now, and it is the larger of the two reasons."""
+This was the larger of two reasons: the structural 10 mm, and 11 mm for
+the pack's XT30 to cross the wall between the root bays in a channel.
+The channels are gone -- a wire cannot be routed on a surface that is
+one continuous bead -- so only the structural reason is left. The alias
+is kept rather than folded away because the gate reads better naming
+the wall than naming the sliver."""
 
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
@@ -1193,9 +1190,6 @@ class Evaluation:
     mass: perf.MassBudget | None = None
     panels: list = field(default_factory=list)
     elevons: list = field(default_factory=list)
-    channels: tuple = ()
-    """The wiring runs, with the length of lead each one needs. A recess
-    is sealed from the cavity, so every wire is on the outside."""
     bay_cuts: tuple = ()
     """The openings as they were cut, in planform coordinates. The hatch
     lid is built to them, so the lid and the ledge it sits in come from
@@ -1497,72 +1491,6 @@ def _evaluate_once(
         for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
                        for b in mission.bays)
         if v.fits(plan, wall)[0] and bay.name not in clashing)
-    # --- the wiring, in channels cut into the same skin ---
-    #
-    # A recess in vase mode is exterior space, sealed from the wing's
-    # cavity and from every other recess by one bead, so a lead cannot
-    # pass from the receiver's pocket to a servo's THROUGH the wing.
-    # There is no through. Every wire runs on the outside, in a channel,
-    # and a channel is a detour like any other: same ramps, same budget,
-    # same clearance rules.
-    cut_bands = {v.name: (v.x_abs_mm - 0.5 * cut_length(v),
-                          v.x_abs_mm + 0.5 * cut_length(v))
-                 for v in bay_vols}
-    te_of = pmod.te_station(plan)
-    half_span_mm = plan.half_span_m * 1000.0
-    channels, wire_reasons = wire.plan_channels(
-        plan, mission, bay_vols, bay_etas, cut_bands,
-        lambda e: te_of(e * half_span_mm), wall)
-    reasons.extend(wire_reasons)
-    penalty += 4.0 * len(wire_reasons)
-
-    chan_cuts = []
-    for ch in channels:
-        depth_ch = ch.depth_mm + wall
-        r_out, d_out = ramp_walk(plan, bare_by_eta, ch.x_abs_mm, ch.length_mm,
-                                 "upper", depth_ch, ch.eta1, True)
-        if ch.eta0 > 1e-9:
-            r_in, d_in = ramp_walk(plan, list(reversed(bare_by_eta)),
-                                   ch.x_abs_mm, ch.length_mm, "upper",
-                                   depth_ch, ch.eta0, False)
-        else:
-            r_in, d_in = 0.0, 0.0
-        if not (np.isfinite(r_out) and np.isfinite(r_in)):
-            reasons.append(
-                f"{ch.name} channel cannot be faded: no span either side of "
-                f"it closes {depth_ch:.1f} mm within the overhang limit")
-            penalty += 4.0
-            continue
-        cut = vase.BayCut(f"{ch.name} channel", 0.0, 0.0, ch.eta0, ch.eta1,
-                          depth_ch, r_out, r_in, "upper", 0.0, d_out, d_in,
-                          length_mm=ch.length_mm, x_abs_mm=ch.x_abs_mm)
-        # It has to be clear of every opening it does not serve, at every
-        # height both exist: the skin cannot carry two detours in one
-        # chord band. A channel that is not is dropped and named, never
-        # cut into the wall of the bay it was meant to reach.
-        v_ch = ch.volume(plan, wall)
-        rival = next((o for o in bay_vols
-                      if not (o.eta1 < v_ch.eta0 or o.eta0 > v_ch.eta1)
-                      and it.gap_mm(v_ch, o, plan) < wire.WALL_INSET_MM), None)
-        if rival is not None:
-            # A channel that SERVES this bay has to reach it, and it
-            # cannot: a groove a couple of millimetres deep meeting a
-            # pocket a centimetre deep leaves a step between their floors
-            # that the printer would have to build in mid-air, and one
-            # trapezoid per detour cannot express the two as a single
-            # continuous profile. Extending the pocket to the root face
-            # instead was tried: on a swept wing a trench at a fixed
-            # station crosses the whole chord as the leading edge runs
-            # aft, and it met every other opening on the way.
-            gap = it.gap_mm(v_ch, rival, plan)
-            reasons.append(
-                f"{ch.name} channel has no continuous run to {rival.name}: "
-                f"{gap:.1f} mm of skin between them where it needs "
-                f"{wire.WALL_INSET_MM:.1f}, and their floors differ by "
-                f"{abs(rival.height_mm - ch.depth_mm):.0f} mm")
-            penalty += 6.0
-            continue
-        chan_cuts.append(cut)
 
     # Nothing in the final list may share a chord band with anything
     # else in it, anywhere either of them exists. The earlier checks
@@ -1572,7 +1500,7 @@ def _evaluate_once(
     # dropped is named and priced -- the geometry never sees a conflict
     # it would have to raise on.
     keep, dropped = [], []
-    for cut in list(cut_list) + list(chan_cuts):
+    for cut in list(cut_list):
         rival = next((k for k in keep if cuts_clash_mm(plan, k, cut) > 0.0),
                      None)
         if rival is None:
@@ -2190,7 +2118,6 @@ def _evaluate_once(
         panels=panels if want_panels else [],
         elevons=elevon_parts if want_panels else [],
         bay_cuts=tuple(cut_list),
-        channels=tuple(channels),
         horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,

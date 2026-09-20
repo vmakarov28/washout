@@ -74,8 +74,8 @@ class Linkage:
     side: float = -1.0
     """Which way the horn stands and the arm hangs: -1 below the wing,
     +1 above it. The fleet's servos sit in the TOP of the wing now, with
-    the horn on the elevon's upper surface, because every opening has to
-    be on the skin the wiring channels are on."""
+    the horn on the elevon's upper surface, so the belly stays clean for
+    the landing and the CG mark."""
     horn_dx_mm: float = 0.0
     """The horn's hole aft of the hinge axis, mm. A horn on the same
     surface as the hinge tape has to stand clear of the tape, so its

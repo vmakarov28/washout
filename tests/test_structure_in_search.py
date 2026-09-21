@@ -194,9 +194,13 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
 
     gen5's trainer was logged at 331 g and 25.7 g/dm2, inside its
     26 g/dm2 wing-loading gate. Weighing the two 8 mm tubes it actually
-    carries puts it at ~355 g and ~27.5 g/dm2, outside it. This test
-    exists so that the mass can never quietly drift back down: the number
-    it pins is the one a builder would put on a scale."""
+    carries put it at ~355 g, outside it. It is ~361 g now: the skin is
+    no longer cut open for the payload bays, so the six grams those
+    openings used to remove are back. The aircraft got heavier; the
+    estimate did not drift.
+
+    This test exists so the mass can never quietly drift back down. The
+    number it pins is the one a builder would put on a scale."""
     root = Path(__file__).resolve().parent.parent
     d = json.loads((root / "results" / "fleet" / "gen5_trainer_v3_v101"
                     / "design.json").read_text())
@@ -206,8 +210,8 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
                                   bed_z_mm=250.0)
     ev = evaluate(np.array(d["u"]), m, base, settings)
 
-    assert ev.mass_kg * 1000 == pytest.approx(355.0, abs=4.0), (
-        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~355")
+    assert ev.mass_kg * 1000 == pytest.approx(361.0, abs=4.0), (
+        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~361")
     loading = ev.mass_kg * 1000.0 / (ev.plan.area_m2 * 100.0)
     assert loading > m.max_wing_loading_gdm2, (
         f"wing loading {loading:.1f} should now miss "

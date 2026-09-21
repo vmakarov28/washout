@@ -11,6 +11,13 @@ dev = ["pytest", "matplotlib"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# `faker` is not used here -- it arrives as a transitive dependency and
+# auto-registers a pytest plugin whose session fixture walks every
+# installed module with `pkgutil.iter_modules`. With the OCC bindings
+# installed (cadquery-ocp pulls vtk, which has an unusual module layout)
+# that walk dies with a Windows access violation during fixture setup,
+# taking the run with it. Nothing in this repo needs the plugin.
+addopts = "-p no:faker"
 
 # Say which package this is, explicitly. `data/` and `results/` are
 # evidence, not importable code, but setuptools' flat-layout autodiscovery

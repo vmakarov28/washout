@@ -136,17 +136,6 @@ def export_companions(ev, settings: vase.PrintSettings, out: Path,
     from washout.printing import parts as _parts
 
     made = []
-    for cut in getattr(ev, "bay_cuts", ()):
-        try:
-            lid = _parts.hatch_lid(
-                ev.plan, settings, cut,
-                f"{ev.plan.name}_lid_"
-                + cut.name.replace(" ", "_").replace("+", ""))
-        except Exception as e:                       # noqa: BLE001
-            print(f"  lid for {cut.name} skipped ({type(e).__name__}: {e})")
-            continue
-        if lid is not None:
-            made.append((lid, []))
     if ev.linkage is not None and ev.horn_eta > 0.0:
         try:
             applied = 0.0
@@ -230,23 +219,6 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
         print("")
         print("  companion parts:")
     for part, gates in companions:
-        if isinstance(part, vase.LayerStack):
-            # a lid is a vase part like the panels: one contour per layer,
-            # printed on its edge with the span up, so it follows the
-            # wing's own curvature with no support and no second mode
-            chk = vase.check(part)
-            rep = stl.export(part, out / f"{part.name}.stl")
-            deg, bx, by = part.best_bed_rotation()
-            ok = chk.ok and rep["watertight"]
-            print(f"  {part.name:<24} x2  h {part.height_mm:6.1f} mm  "
-                  f"{part.mass_g():5.1f} g  {bx:.0f}x{by:.0f} mm @ {deg:.0f} deg"
-                  f"  vase  "
-                  f"{'OK' if ok else 'CHECK: ' + ','.join(chk.failures())}")
-            print("      one per half, printed from the centreline outward; "
-                  "tape the seam over the centre joint")
-            if not chk.ok:
-                print(chk.report())
-            continue
         rep = part.export_stl(out / f"{part.name}.stl")
         w, h, d = part.footprint_mm
         print(f"  {part.name:<24} x{part.quantity}  {w:.0f}x{h:.0f}x{d:.0f} mm  "

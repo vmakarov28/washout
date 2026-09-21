@@ -376,10 +376,12 @@ def test_a_bay_may_close_across_a_print_joint():
     assert not closes, f"micro must be allowed to close across p0/p1: {closes}"
 
 
-def test_a_bay_with_no_span_outboard_still_cannot_close():
-    """The gate survives the relaxation. A bay whose ramp needs more span
-    than exists outboard of it is still rejected -- the ramp may cross
-    joints, not the tip."""
+def test_a_bay_parked_at_the_tip_is_still_rejected():
+    """This used to be about the closure ramp: a bay whose fade needed
+    more span than existed outboard of it. Nothing is cut any more, so
+    there is no ramp -- but the reason the tip is a bad place to put a
+    pack never was the ramp. The section out there is thinner than the
+    box, and that gate is untouched."""
     from dataclasses import replace as _replace
     u, mission, base, plan = _fleet("trainer_v3")
     # a pack parked at the very tip: nothing left outboard to close in
@@ -389,18 +391,20 @@ def test_a_bay_with_no_span_outboard_still_cannot_close():
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     ev = evaluate(u, m2, base, settings)
-    assert any("cannot be closed" in r for r in ev.reasons), ev.reasons
+    assert not ev.ok
+    assert any(far.name in r for r in ev.reasons), ev.reasons
 
 
-def test_the_trainer_can_close_its_bays():
-    """The gate must not reject an aircraft that has the room: the
-    trainer's 111 mm centre body carries a 24 mm pack with ramps at both
-    ends and 16 mm to spare."""
+def test_the_trainer_can_seat_its_bays():
+    """The gates must not reject an aircraft that has the room: every one
+    of the trainer's boxes fits the section it is seated in, clear of the
+    spars and of each other."""
     u, mission, base, plan = _fleet("trainer_v3")
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
-    assert not [r for r in ev.reasons if "cannot be closed" in r], ev.reasons
+    for bay in mission.bays:
+        assert not [r for r in ev.reasons if bay.name in r], ev.reasons
 
 
 # ---------------------------------------------- penalties reach the score
@@ -427,7 +431,30 @@ def test_interior_penalties_reach_the_score():
                     size_structure=False)
     assert not tall.ok
     assert any("needs 60" in r for r in tall.reasons), tall.reasons
-    # 20 per unit of shortfall over need: a 60 mm box in a ~35 mm section
-    # is short by ~25 mm, so the gap is at least 20 * 25 / 60 = 8 points
-    assert tall.score < base_ev.score - 8.0, (
-        f"{tall.score:.1f} is not below {base_ev.score:.1f} by the depth penalty")
+    # GRADED, and compared WITHIN ONE SEAT. The gap used to be pinned at
+    # 8 points because a 60 mm bay also failed the closure ramp and
+    # collected that penalty too; with nothing cut the depth shortfall is
+    # the only thing left, and it is worth about 4.
+    #
+    # The comparison cannot simply deepen the box, because past about
+    # 50 mm the seat solver MOVES this bay from 0.21c to 0.33c to find a
+    # thicker section -- and that is a different aeroplane, with its own
+    # L/D and static margin, not a differently penalised one. Measured:
+    # 40 mm and 45 mm seat at 0.21c and score -1026.9 and -1029.5, then
+    # 50 mm jumps to 0.33c and scores -1020.4. Monotone within each seat,
+    # not across the jump. So the grading is checked on three depths that
+    # share a seat, which is the only comparison that isolates it.
+    def _at(depth):
+        return evaluate(u, _replace(mission, bays=tuple(
+            _replace(b, box_mm=(b.box_mm[0], b.box_mm[1], float(depth)))
+            if b.name == "AR630 + esc" else b for b in mission.bays)),
+            base, s, size_structure=False)
+
+    deeper, deepest = _at(70.0), _at(80.0)
+    seats = {r.split(" bay at ")[1].split(" ")[0]
+             for ev in (tall, deeper, deepest)
+             for r in ev.reasons if " bay at " in r}
+    assert len(seats) == 1, f"the three depths must share a seat: {seats}"
+    assert deepest.score < deeper.score < tall.score < base_ev.score, (
+        f"not graded: 80 mm {deepest.score:.1f}, 70 mm {deeper.score:.1f}, "
+        f"60 mm {tall.score:.1f}, declared {base_ev.score:.1f}")

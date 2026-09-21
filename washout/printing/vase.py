@@ -33,8 +33,7 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 from ..geom.planform import Planform
-from .bays import (BaySpec, bay_point_budget, insert_detours,
-                   clamp_band as _bay_clamp_band)
+from .detours import insert_detours
 from .ribs import (POINTS_PER_RIB, RibSpec, insert_ribs,
                    min_clearance_mm, ribs_that_fit)
 
@@ -126,16 +125,6 @@ class PrintSettings:
         return self.extrusion_width_mm
 
     @property
-    def lid_mm(self) -> float:
-        """Hatch lid thickness, and therefore the depth of the ledge the
-        lid rests on. DERIVED: the lid is a vase part, a lens of two
-        beads one `rib_clearance_factor` apart so they weld into one
-        curved plate -- the rule the rib slits already use -- and the
-        ledge is cut to that. A declared 1.35 mm ledge under a printed
-        0.95 mm lid left the lid 0.4 mm below the skin."""
-        return self.extrusion_width_mm * (1.0 + self.rib_clearance_factor)
-
-    @property
     def bed_diagonal_mm(self) -> float:
         return float(np.hypot(self.bed_x_mm, self.bed_y_mm))
 
@@ -151,24 +140,10 @@ class LayerStack:
     name: str = "panel"
     z_step_mm: float | None = None   # sampling pitch; None = the real layer
     has_ribs: bool = False
-    has_cuts: bool = False
     origin_mm: tuple = (0.0, 0.0)
     """The planform point (mm aft of the root LE, mm above the chord
     line) that sits at the part's printer-frame origin. Parts are
-    centred on the bed, and a cut at an absolute station has to be found
-    again in the centred frame."""
-    bay_specs: tuple = ()
-    """The `BaySpec`s cut into this stack, in its own z. Carried so a
-    companion part -- a lid -- can be built to the opening as cut, and
-    so a failing layer can be inspected against the spec that shaped it."""
-    """Whether any bay, pocket or groove detour is in the loop.
-
-    Like `has_ribs`, this decides how wall separation is measured. A
-    cut inserts six vertices into ONE skin, so the upper/lower index
-    pairing the plain-section test relies on is off by six from the cut
-    aft, and the gate then measures a vertex against the wrong mirror
-    point. The search's first pass -- bare shell, bays cut, no ribs yet --
-    was being judged that way."""
+    centred on the bed."""
     n_upper: int | None = None
     """How many of the loop's points are the upper surface.
 
@@ -320,55 +295,6 @@ def thicken_for_nozzle(
     return np.concatenate([up[::-1], lo[1:]], 0)
 
 
-def _avoid_band(cut: BaySpec, z: np.ndarray, chord_mm: np.ndarray,
-                x_le_mm: np.ndarray, layout_chord_mm: float,
-                pad_mm: float) -> tuple[float, float] | None:
-    """(centre chord fraction, half-width mm) of a cut, for the ribs.
-
-    The ENVELOPE of the cut's band over the layers this panel will
-    actually BUILD, in each layer's own chord, because the rib layout is
-    solved once per panel while a cut at an absolute station slides
-    across the chord fractions as the wing sweeps under it: on the
-    trainer's centre body the pack's band runs from 0.29c-0.59c at the
-    root to 0.15c-0.48c where its ramp ends, and a rib clear of the band
-    at the panel's mid station sat inside it at the root.
-
-    Over the layers BUILT, and every one of them, which makes the
-    envelope exact rather than an estimate. Sampling nine stations of a
-    thousand left the trainer's servo cut reaching 0.7175c while the
-    envelope said 0.7089c, and `with_layout` duly placed a rib at 0.7117c
-    -- in the sliver between the estimate's edge and the rib band's aft
-    limit, and inside the real opening. `rebuild_skin` then refused the
-    layer, which is a crash in the geometry rather than a gate with a
-    number. A detour is only ever cut at one of these z values, so an
-    envelope taken over exactly them cannot be exceeded by anything that
-    prints.
-
-    Over the layers where the bay is OPEN or still scribing its groove,
-    which is where its walls are geometry that may not move. A bay keeps
-    its six vertices for the whole panel, but once it has closed they lie
-    on the skin and `pack_detours` is free to park them in whatever chord
-    the openings and the truss have left. Excluding the closed run as
-    well cost the trainer's centre body its entire rib truss -- the two
-    bays and two spar corridors between them covered all of 0.20c to
-    0.72c -- and the buckling pitch the structure had sized was then
-    silently not delivered.
-
-    `pad_mm` is the clearance a rib's slit keeps from the opening's wall.
-    Returns None when the bay is open nowhere on this panel.
-    """
-    lo, hi = np.inf, -np.inf
-    for k in range(len(z)):
-        zk = float(z[k])
-        if cut.depth_frac(zk) <= 0.0 and cut.groove_frac(zk) <= 0.0:
-            continue                     # closed: its vertices may move
-        band = cut.band(float(chord_mm[k]), float(x_le_mm[k]))
-        lo, hi = min(lo, band[0]), max(hi, band[1])
-    if not np.isfinite(lo):
-        return None
-    return (0.5 * (lo + hi), 0.5 * (hi - lo) * layout_chord_mm + pad_mm)
-
-
 def build_stack(
     plan: Planform,
     settings: PrintSettings,
@@ -376,7 +302,6 @@ def build_stack(
     eta1: float = 1.0,
     name: str = "panel",
     z_step_mm: float | None = None,
-    bay_cuts=(),
 ) -> LayerStack:
     """Slice a spanwise panel of the planform into printable layers.
 
@@ -414,21 +339,7 @@ def build_stack(
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs,
-                       avoid=tuple(settings.spar_avoid) + tuple(
-                           # A bay is an exclusion band like a spar
-                           # corridor, and for the same reason: the bay's
-                           # floor IS where a rib's floor would be, so a
-                           # rib inside the band would land on it. Given
-                           # for the whole panel rather than only where
-                           # the bay is open, because the rib count per
-                           # layer has to stay constant.
-                           band for band in (
-                               _avoid_band(c, z, chord_of, x_le_of,
-                                           layout_chord,
-                                           settings.extrusion_width_mm
-                                           * settings.rib_clearance_factor)
-                               for c in bay_cuts)
-                           if band is not None))
+                       avoid=tuple(settings.spar_avoid))
     if truncated:
         # The loop now spans [0, x_hinge], so the truss has to fit the box
         # that exists. Scaled rather than clipped: the ribs keep the same
@@ -466,11 +377,10 @@ def build_stack(
         # cost is a shallower truss, which is the right way to be wrong.
         rib_spec = replace(rib_spec,
                            rate_mm_per_mm=max(allowed - 2.0 * used, 0.02))
-    cuts = tuple(bay_cuts)
-    # How many ribs this panel can actually take, after the bay bands are
-    # removed from the chord. Per panel, because the exclusions are per
-    # panel -- and the point budget follows it, so the invariant holds
-    # within a stack without pretending every panel has the same truss.
+    # How many ribs this panel can actually take. Per panel, because the
+    # spar corridors it must dodge are per panel -- and the point budget
+    # follows it, so the invariant holds within a stack without
+    # pretending every panel has the same truss.
     n_rib_eff = ribs_that_fit(
         rib_spec, plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0,
         settings.extrusion_width_mm * settings.rib_clearance_factor)
@@ -480,8 +390,7 @@ def build_stack(
     # the next.
     rib_spec = replace(rib_spec, n_ribs=n_rib_eff).with_layout(
         plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0)
-    n_pts = 2 * settings.contour_points - 1 + (
-        POINTS_PER_RIB * n_rib_eff) + bay_point_budget(len(cuts))
+    n_pts = 2 * settings.contour_points - 1 + POINTS_PER_RIB * n_rib_eff
     contours = np.empty((len(z), n_pts, 2))
     for k, st in enumerate(stations):
         chord_mm = float(chord_of[k])
@@ -490,19 +399,15 @@ def build_stack(
         if truncated:
             from .elevons import hinge_x, truncate_loop
             loop = truncate_loop(loop, hinge_x(settings))
-        if cuts or n_rib_eff > 0:
-            # ONE pass for every detour on the section -- bays and ribs
-            # together. Cutting bays one at a time handed the second call
-            # a loop whose leading edge was no longer at index n-1; and
-            # inserting the ribs after the bays re-interpolated a skin
-            # that already had vertical walls in it, which put a ledge
-            # vertex 7.2 mm down its wall between two adjacent layers.
+        if n_rib_eff > 0:
+            # ONE pass for every slit on the section. Inserting them one
+            # at a time re-interpolated a skin that already had vertical
+            # walls in it, which put a vertex 7.2 mm down a wall between
+            # two adjacent layers.
             clr = settings.extrusion_width_mm * settings.rib_clearance_factor
-            loop = insert_detours(loop, chord_mm, float(z[k]), cuts,
-                                  rib_spec if n_rib_eff > 0 else None,
+            loop = insert_detours(loop, chord_mm, float(z[k]), rib_spec,
                                   slit_mm=clr, gap_mm=clr,
-                                  min_groove_mm=settings.extrusion_width_mm,
-                                  x_le_mm=st.x_le_m * 1000.0)
+                                  min_groove_mm=settings.extrusion_width_mm)
         # twist about the quarter chord, then scale to mm and sweep
         p = loop - np.array([0.25, 0.0])
         a = np.radians(-st.twist_deg)
@@ -526,9 +431,9 @@ def build_stack(
     contours -= origin
     return LayerStack(z_mm=z, eta=eta, contours=contours,
                       settings=settings, name=name, z_step_mm=step,
-                      has_ribs=n_rib_eff > 0, has_cuts=bool(cuts),
+                      has_ribs=n_rib_eff > 0,
                       origin_mm=(float(origin[0]), float(origin[1])),
-                      bay_specs=tuple(cuts), spar_x_local=local)
+                      spar_x_local=local)
 
 
 # ------------------------------------------------------------------- gates
@@ -671,94 +576,6 @@ def ramp_budget(stack: LayerStack, x0: float, x1: float,
         avail = np.sqrt(np.maximum(lim * lim - dx * dx, 0.0))
         worst = min(worst, float(avail.min()))
     return float(max(worst, 0.0))
-
-def cut_budget_profile(stack: LayerStack, x_abs0: float, x_abs1: float,
-                       stride: int = 4, side: str = "upper", n_x: int = 9,
-                       margin_frac: float = 0.02
-                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Depth a cut may fade per mm of Z, station by station, with the
-    band CLIPPED to the section as `BaySpec.band` clips it.
-
-    -> (z_mm, rate, valid, rise). `valid` is False where nothing of the
-    band is inside the section, so no cut can exist; `rate` is 0 where
-    the wing alone spends the whole budget; `rise` is the skin's own rise
-    across the opening there, which the floor's deepest corner travels on
-    top of the box depth. Inside the band the cost is the
-    skin's vertical drift at fixed absolute stations (`skin_drift_abs`),
-    subtracted linearly. At an edge the clipping has moved onto the
-    skin, the wall's corner rides the skin itself, so its cost is the
-    skin's own motion there -- the distance from the edge point to the
-    bead below, which the overhang gate will measure the same way --
-    also subtracted linearly, which is conservative against the true
-    quadrature and is the honest side to err on."""
-    lim = np.tan(np.radians(stack.settings.max_overhang_deg))
-    c = stack.contours
-    ox = stack.origin_mm[0]
-    xa0, xa1 = x_abs0 - ox, x_abs1 - ox
-
-    def skin(layer):
-        i_le = int(np.argmin(layer[:, 0]))
-        pts = layer[:i_le + 1][::-1] if side == "upper" else layer[i_le:]
-        o = np.argsort(pts[:, 0])
-        return pts[o]
-
-    zs, rate, valid, rise_mm = [], [], [], []
-    for k in range(0, len(c) - stride, stride):
-        rise = float(stack.z_mm[k + stride] - stack.z_mm[k])
-        if rise <= 0.0:
-            continue
-        sa, sb = skin(c[k]), skin(c[k + stride])
-        x_le, x_te = float(sb[0, 0]), float(sb[-1, 0])
-        chord = x_te - x_le
-        # the SAME rule the cutter uses, so the budget never calls a
-        # station unusable that `insert_detours` will happily cut
-        f0, f1 = _bay_clamp_band(0.5 * (xa0 + xa1 - 2.0 * x_le) / max(chord, 1e-9),
-                                 0.5 * (xa1 - xa0) / max(chord, 1e-9), chord)
-        lo, hi = x_le + f0 * chord, x_le + f1 * chord
-        zs.append(0.5 * float(stack.z_mm[k] + stack.z_mm[k + stride]))
-        if hi - lo < 1e-6:
-            rate.append(0.0)
-            valid.append(False)
-            rise_mm.append(0.0)
-            continue
-        xs = np.linspace(lo, hi, n_x)
-        ya = np.interp(xs, sa[:, 0], sa[:, 1])
-        yb = np.interp(xs, sb[:, 0], sb[:, 1])
-        cost = float(np.abs(yb - ya).max()) / rise
-        for x_edge, clipped in ((lo, lo > xa0 + 1e-9), (hi, hi < xa1 - 1e-9)):
-            if clipped:
-                p = np.array([[x_edge, float(np.interp(x_edge, sb[:, 0], sb[:, 1]))]])
-                d = float(_dist_to_segments(p, c[k])[0])
-                cost = max(cost, d / rise)
-        rate.append(float(max(lim - cost, 0.0)))
-        valid.append(True)
-        # how far the floor's deepest corner travels BEYOND the box depth
-        # at this station: the skin's own rise across the opening
-        rise_mm.append(float(yb.max() - yb.min()))
-    return (np.array(zs), np.array(rate), np.array(valid, dtype=bool),
-            np.array(rise_mm))
-
-
-def solve_ramp_from_rates(dist_mm: np.ndarray, rate: np.ndarray,
-                          rise_mm: np.ndarray, depth_mm: float,
-                          margin: float) -> float:
-    """Shortest ramp that fades a bay of `depth_mm` against a profile.
-
-    A ramp of length L runs at ONE linear rate, because `depth_frac` is
-    linear, so every station it crosses must afford it. At station k the
-    floor's deepest corner travels `depth_mm + rise_mm[k]`, so the ramp
-    must be at least `(depth + rise[k]) / (rate[k] * margin)` long for
-    each k it covers, and the answer is the running maximum of that. inf
-    if no L in the profile satisfies its own stations."""
-    if len(dist_mm) == 0:
-        return float("inf")
-    with np.errstate(divide="ignore", invalid="ignore"):
-        need = (depth_mm + rise_mm) / np.maximum(rate * margin, 1e-12)
-    worst = np.maximum.accumulate(need)
-    ok = np.where(dist_mm >= worst)[0]
-    if len(ok) == 0:
-        return float("inf")
-    return float(worst[int(ok[0])])
 
 def ramp_span_mm(stack: LayerStack, depth_mm: float,
                  x0: float, x1: float, side: str = "upper") -> float:
@@ -907,8 +724,8 @@ def check(stack: LayerStack) -> Printability:
     # RIGIDLY rotated, so it cannot self-intersect unless the thickness
     # floor was violated. Checking that floor proves the premise, and
     # costs one array op instead of 40M segment-pair tests.
-    if stack.has_ribs or stack.has_cuts:
-        # With ribs or cuts the upper/lower index pairing no longer
+    if stack.has_ribs:
+        # With ribs the upper/lower index pairing no longer
         # describes the section, so clearance is measured the general
         # way: every vertex against every non-adjacent segment. Sampled,
         # because it is O(n^2) per layer and the geometry varies smoothly
@@ -916,9 +733,7 @@ def check(stack: LayerStack) -> Printability:
         step = max(len(stack.contours) // 40, 1)
         t_min = min(min_clearance_mm(c, skip=8)
                     for c in stack.contours[::step])
-        detail = ("general contour clearance"
-                  + (f", {stack.settings.rib_count} ribs" if stack.has_ribs else "")
-                  + (", cut" if stack.has_cuts else ""))
+        detail = f"general contour clearance, {stack.settings.rib_count} ribs"
     else:
         t_min = float(stack.wall_separation_mm().min())
         detail = "=> single simple loop per layer"
@@ -1021,107 +836,16 @@ def _split_to_envelope(plan: Planform, breaks, limit: float) -> list:
     return out
 
 
-@dataclass(frozen=True)
-class BayCut:
-    """One opening to cut, in planform coordinates.
-
-    `x0`/`x1` are root-chord fractions and give the CENTRE; `length_mm`,
-    when set, is the opening's true chordwise extent and is applied at
-    every layer's own chord. Both ramp lengths are ALREADY measured by
-    the caller on bare panels -- the ramp-in against the panels it
-    crosses inboard of eta0, the ramp-out against those outboard of eta1
-    -- and the dead spans are panels with no overhang budget, which the
-    bay crosses fully open before its ramp begins."""
-
-    name: str
-    x0: float
-    x1: float
-    eta0: float
-    eta1: float
-    depth_mm: float
-    ramp_out_mm: float
-    ramp_in_mm: float
-    open_from: str = "upper"
-    ledge_mm: float = 0.0
-    dead_out_mm: float = 0.0
-    dead_in_mm: float = 0.0
-    length_mm: float | None = None
-    x_abs_mm: float | None = None
-
-    def band_at(self, chord_mm: float, x_le_mm: float = 0.0
-                ) -> tuple[float, float]:
-        """(x0, x1) in that station's own chord fractions, by the same
-        rule the cutter uses."""
-        if self.length_mm is None:
-            return (self.x0, self.x1)
-        h = 0.5 * self.length_mm / max(chord_mm, 1e-9)
-        mid = ((self.x_abs_mm - x_le_mm) / max(chord_mm, 1e-9)
-               if self.x_abs_mm is not None else 0.5 * (self.x0 + self.x1))
-        return _bay_clamp_band(mid, h, chord_mm)
-
-
 def build_panels(plan: Planform, settings: PrintSettings,
                  z_margin_mm: float = 8.0,
-                 z_step_mm: float | None = None,
-                 bays=()) -> list[LayerStack]:
+                 z_step_mm: float | None = None) -> list[LayerStack]:
     """Every printable part of the right half wing, root outboard.
 
-    `bays` are `BayCut`s (a plain tuple in the same field order is
-    accepted) for the openings to cut. Their ramps are measured by the
-    caller: measuring here would be circular, because the ramp's own dive
-    and climb walls move in Z, so a budget measured on a panel that
-    already has the cut comes back as zero and the ramp as infinite.
-
-    **The ramp may run on past a print joint.** What must not straddle a
-    joint is the BOX -- half a battery in each shell is not a thing --
-    and that is gated separately. The taper that closes the opening is
-    just geometry, and both panels are lofted from the same planform, so
-    the contours match across the joint by construction. Requiring the
-    ramp to finish inside the panel holding the box is a constraint
-    nothing physical asks for, and it is what made micro's centre body
-    impossible: 24.5 mm of panel, a pack reaching 15 mm up it, 10 mm left
-    and 22 mm needed. Given the whole span outboard to close in, it has
-    room.
-
-    Each panel therefore receives the cut if the bay's influence -- its
-    ramp in, its full-depth run and its ramp out -- reaches into that
-    panel, with both stations rebased into the panel's own z. A panel the
-    bay is already tapering through gets stations below z = 0, which
-    `depth_frac` reads as "part way along the profile at z = 0".
-
-    A bay at the centreline starts at the root face and ramps once. A bay
-    out in the wing -- a servo pocket -- starts at its own eta0 and ramps
-    IN as well as out; treating it as a root bay cut it into the centre
-    body at full depth.
-    """
+    Each panel is an open-ended tube: one contour per layer, ribs welded
+    across it, and nothing cut through the skin. The wing is loaded
+    through those open ends before the panels are bonded, which is why
+    there is no opening to place and no ramp to budget."""
     spans = panel_etas(plan, settings, z_margin_mm)
-    bays = [b if isinstance(b, BayCut) else BayCut(*b) for b in bays]
-    out = []
-    for i, (a, b) in enumerate(spans):
-        cuts = []
-        base_mm = arc_length_mm(plan, 0.0, a)      # this panel's z origin
-        top_mm = arc_length_mm(plan, 0.0, b)
-        for c in bays:
-            if not (np.isfinite(c.ramp_out_mm) and np.isfinite(c.ramp_in_mm)):
-                continue                       # cannot be opened/closed: no cut
-            root = c.eta0 <= 1e-9
-            # the full-depth run extends across any budget-less panels
-            start_mm = (0.0 if root
-                        else arc_length_mm(plan, 0.0, c.eta0) - c.dead_in_mm)
-            full_mm = arc_length_mm(plan, 0.0, c.eta1) + c.dead_out_mm
-            first_mm = 0.0 if root else start_mm - c.ramp_in_mm
-            if base_mm >= full_mm + c.ramp_out_mm - 1e-9:
-                continue                       # closed before this panel
-            if top_mm <= first_mm + 1e-9:
-                continue                       # not yet begun in this panel
-            cuts.append(BaySpec(c.name, c.x0, c.x1,
-                                start_mm - base_mm, full_mm - base_mm,
-                                c.ramp_out_mm, c.depth_mm,
-                                settings.extrusion_width_mm,
-                                open_from=c.open_from, ledge_mm=c.ledge_mm,
-                                ramp_in_mm=0.0 if root else c.ramp_in_mm,
-                                length_mm=c.length_mm, x_abs_mm=c.x_abs_mm))
-        out.append(build_stack(plan, settings, a, b,
-                               name=f"{plan.name}_p{i}",
-                               z_step_mm=z_step_mm, bay_cuts=tuple(cuts)))
-    return out
+    return [build_stack(plan, settings, a, b, name=f"{plan.name}_p{i}",
+                        z_step_mm=z_step_mm)
+            for i, (a, b) in enumerate(spans)]

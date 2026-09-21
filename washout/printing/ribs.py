@@ -340,13 +340,12 @@ def insert_ribs(
     """
     if not spec.enabled or spec.n_ribs <= 0:
         return loop_unit
-    # One pass with the bay code, so a skin that already carries a bay's
-    # vertical walls is never re-interpolated by the rib inserter: that
-    # put a ledge vertex 7.2 mm down a wall between two layers a
+    # One pass, so a skin is never re-interpolated by a second inserter:
+    # doing it twice put a vertex 7.2 mm down a wall between two layers a
     # millimetre apart on the trainer's centre body.
-    from .bays import insert_detours
+    from .detours import insert_detours
 
-    return insert_detours(loop_unit, chord_mm, z_mm, (), spec,
+    return insert_detours(loop_unit, chord_mm, z_mm, spec,
                           slit_mm=slit_mm, gap_mm=gap_mm)
 
 

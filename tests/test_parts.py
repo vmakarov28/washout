@@ -146,39 +146,3 @@ def test_a_socket_is_gated_on_the_load_not_on_a_ratio():
 
 
 # -------------------------------------------------------------- the lid
-
-def test_the_hatch_lid_starts_at_the_centreline():
-    """A lid mirrored across both halves begins at an OUTBOARD end.
-
-    That is where the bay has narrowed to almost nothing, so the first
-    layer was 32 mm2 against the 40 mm2 a small part needs to stay on the
-    bed -- and the part was 259 mm tall against a 250 mm envelope. One
-    per half, begun at the centreline, starts on the widest and thickest
-    section the lid has and is half as tall."""
-    ev, mission = _built("trainer_v3")
-    s = ev.print_settings
-    lids = [parts.hatch_lid(ev.plan, s, c, f"lid_{i}")
-            for i, c in enumerate(ev.bay_cuts)]
-    lids = [l for l in lids if l is not None]
-    assert lids, "the trainer's root bays are lidded and must produce lids"
-    for lid in lids:
-        assert lid.height_mm <= s.bed_z_mm, (
-            f"{lid.name}: {lid.height_mm:.0f} mm will not fit the envelope")
-        assert stl.manifold_report(stl.skin(lid)[1])["watertight"]
-        # it starts at the CENTRELINE and runs outboard, so its first
-        # layer is on the widest, thickest section it has
-        assert lid.eta[0] < 0.02, (
-            f"{lid.name}: begins at eta {lid.eta[0]:.3f}, not the centreline")
-        assert lid.eta[-1] > lid.eta[0]
-        assert lid.role == "lid"
-
-
-def test_the_lid_is_as_thick_as_the_ledge_it_sits_in():
-    """A declared 1.35 mm ledge under a printed 0.95 mm lid leaves the lid
-    0.4 mm below the skin, which is a step the airflow trips on. The
-    thickness is DERIVED -- two beads a clearance apart, so they weld into
-    one curved plate, the rule the rib slits already use -- and the ledge
-    is cut to whatever that comes to."""
-    s = vase.PrintSettings()
-    assert parts.lid_thickness_mm(s) == pytest.approx(s.lid_mm)
-    assert s.lid_mm > s.extrusion_width_mm, "one bead is not a plate"

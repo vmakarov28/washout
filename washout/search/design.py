@@ -32,7 +32,7 @@ from ..geom.planform import Planform, Segment, bwb, faired, lofted
 from ..geom import fairness as fz
 from ..geom import interior as it
 from ..printing import vase
-from ..printing import bays as bays_mod
+from ..printing import detours as det
 from ..printing import parts as pmod
 from ..printing import elevons as elv
 from ..aero import performance as perf
@@ -201,7 +201,7 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
     return bool(worst >= height), float(worst), float(height)
 
 
-def _box_outside_mm(plan, v, margin: float = bays_mod.BAND_MARGIN,
+def _box_outside_mm(plan, v, margin: float = det.BAND_MARGIN,
                     n: int = 5) -> float:
     """How far, in mm, a volume's band pokes out of the section anywhere
     over its OWN span. 0.0 when the box is inside everywhere."""
@@ -212,129 +212,6 @@ def _box_outside_mm(plan, v, margin: float = bays_mod.BAND_MARGIN,
         x0, x1 = v.band(plan, float(e))
         worst = max(worst, (margin - x0) * c_mm, (x1 - (1.0 - margin)) * c_mm)
     return float(worst)
-
-def cut_span(plan, cut) -> tuple[float, float]:
-    """(eta0, eta1) a cut occupies INCLUDING its ramps and dead spans.
-
-    A cut exists over more span than its box: the ramps that fade it in
-    and out are geometry too, and two cuts whose ramps overlap in one
-    chord band are two detours the skin cannot carry at that height."""
-    total = vase.arc_length_mm(plan, 0.0, 1.0)
-    z0 = (0.0 if cut.eta0 <= 1e-9 else
-          vase.arc_length_mm(plan, 0.0, cut.eta0) - cut.dead_in_mm
-          - (cut.ramp_in_mm if np.isfinite(cut.ramp_in_mm) else 0.0))
-    z1 = (vase.arc_length_mm(plan, 0.0, cut.eta1) + cut.dead_out_mm
-          + (cut.ramp_out_mm if np.isfinite(cut.ramp_out_mm) else 0.0))
-    e = np.linspace(0.0, 1.0, 200)
-    s = np.array([0.0] + [vase.arc_length_mm(plan, 0.0, v, n=40) for v in e[1:]])
-    return (float(np.interp(max(z0, 0.0), s, e)),
-            float(np.interp(min(z1, total), s, e)))
-
-
-def cuts_clash_mm(plan, a, b, n: int = 15) -> float:
-    """How far two cuts' bands overlap, in mm, at their worst shared
-    station; negative or zero means they are clear.
-
-    Checked over the whole span they SHARE rather than at one midpoint,
-    because a band at an absolute station slides across the chord as the
-    wing sweeps and tapers under it: two openings a centimetre apart at
-    one station can be on top of each other at the next. Checking one
-    station let four of gen6's nine searches die on
-    `rebuild_skin`'s refusal -- a crash in the geometry instead of a gate
-    with a number, which is the one thing a search must never meet."""
-    if a.open_from != b.open_from:
-        return 0.0
-    a0, a1 = cut_span(plan, a)
-    b0, b1 = cut_span(plan, b)
-    lo, hi = max(a0, b0), min(a1, b1)
-    if hi <= lo:
-        return 0.0
-    worst = 0.0
-    for e in np.linspace(lo, hi, n):
-        st = plan.at(float(e))
-        c_mm, x_le = st.chord_m * 1000.0, st.x_le_m * 1000.0
-        ba = a.band_at(c_mm, x_le)
-        bb = b.band_at(c_mm, x_le)
-        gap = max(ba[0] - bb[1], bb[0] - ba[1]) * c_mm
-        worst = max(worst, -gap)
-    return float(worst)
-
-
-def ramp_walk(plan, bare_by_eta, x_abs_mm, length_mm, side, depth_mm,
-              edge_eta, outboard, margin=None):
-    """Span a ramp needs to fade `depth_mm`, walking away from `edge_eta`.
-
-    -> (ramp_mm, dead_mm). `inf` when no run of span either side affords
-    it; `dead_mm` is the span crossed at FULL depth first, where the wing
-    alone already spends the whole overhang budget and no ramp can live.
-
-    One slope for the whole ramp, because `BaySpec.depth_frac` is linear:
-    a ramp walked piecewise, each panel fading at its own rate and the
-    lengths summed, ends up at the weighted AVERAGE of those rates, which
-    overruns the tighter panel. The trainer's servo pocket opened at
-    1.04 mm/mm through a panel budgeted at 0.98 that way, after three
-    fixes that each made the walk more careful and none of which touched
-    it.
-
-    The profile comes from `vase.cut_budget_profile` at the cut's own
-    ABSOLUTE station, so it carries both the skin's drift there and the
-    rise the floor's deepest corner travels on top of the depth, station
-    by station. It ends where the band leaves the section: a root bay at
-    a fixed station passes ahead of the local leading edge somewhere
-    outboard on a swept body, and a ramp still fading there is a detour
-    with nowhere to be.
-
-    Outboard for the ramp OUT from eta1, inboard for the ramp IN from
-    eta0. The two cross different panels and must be budgeted where they
-    live -- sizing the ramp-in from the outboard walk was another way the
-    same pocket ran over.
-
-    Used by every detour that fades: the payload bays and the servo
-    pockets.
-    """
-    margin = RAMP_MARGIN if margin is None else margin
-    half = 0.5 * length_mm
-    dist, rate, valid, rise_at = [], [], [], []
-    for (a, b), pn in bare_by_eta:
-        if outboard and b <= edge_eta:
-            continue
-        if not outboard and a >= edge_eta:
-            continue
-        zs, rt, ok, rs = vase.cut_budget_profile(
-            pn, x_abs_mm - half, x_abs_mm + half,
-            side=side, margin_frac=bays_mod.BAND_MARGIN)
-        if len(zs) == 0:
-            continue
-        e_of = a + zs / max(pn.height_mm, 1e-9) * (b - a)
-        for e, r, o, ri in zip(e_of, rt, ok, rs):
-            if outboard and e < edge_eta:
-                continue
-            if not outboard and e > edge_eta:
-                continue
-            dist.append(vase.arc_length_mm(plan, min(e, edge_eta),
-                                           max(e, edge_eta), n=40))
-            rate.append(r)
-            valid.append(o)
-            rise_at.append(ri)
-    if not dist:
-        return float("inf"), 0.0
-    order = np.argsort(dist)
-    dist = np.array(dist)[order]
-    rate = np.array(rate)[order]
-    valid = np.array(valid)[order]
-    rise_at = np.array(rise_at)[order]
-    bad = np.where(~valid)[0]
-    if len(bad):
-        dist, rate, rise_at = dist[:bad[0]], rate[:bad[0]], rise_at[:bad[0]]
-    live = np.where(rate > 0.0)[0]
-    if len(live) == 0:
-        return float("inf"), 0.0
-    dead = float(dist[live[0]]) if live[0] > 0 else 0.0
-    dist, rate, rise_at = (dist[live[0]:] - dead, rate[live[0]:],
-                           rise_at[live[0]:])
-    return (vase.solve_ramp_from_rates(dist, rate, rise_at, depth_mm, margin),
-            dead)
-
 
 def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
               n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
@@ -1190,10 +1067,6 @@ class Evaluation:
     mass: perf.MassBudget | None = None
     panels: list = field(default_factory=list)
     elevons: list = field(default_factory=list)
-    bay_cuts: tuple = ()
-    """The openings as they were cut, in planform coordinates. The hatch
-    lid is built to them, so the lid and the ledge it sits in come from
-    one description rather than two."""
     horn_eta: float = 0.0
     """Span station of the control horn: the servo's shaft, or the
     elevon's root when the shaft falls short of it."""
@@ -1327,52 +1200,14 @@ def _evaluate_once(
     bay_vols, bay_seats, bay_etas = seat_bays(
         plan, mission, p_vec, wall, joint_etas)
 
-    # What the spars must avoid is the CUT, not the box. The cut runs from
-    # the upper skin down to the bay's floor, so it is anchored upper and
-    # is deeper than the box by the floor's own thickness -- and a tube
-    # seated in the region the cut removes is a tube in mid-air. On the
-    # trainer this is what moves the TE spar off the upper skin, where the
-    # seat solver had put it to clear the pack.
-    # The reserved height must be the depth the GEOMETRY actually cuts:
-    # `bays.floor_limits` drops a groove below the upper skin first and
-    # then the box's depth below that, so the opening reaches
-    # box + floor + groove under the surface. Reserving only box + floor
-    # left the trainer's LE spar nominally clear of the electronics bay
-    # while the printed floor sat on top of it, and the bore gate --
-    # which measures the contour rather than the reservation -- was the
-    # one that noticed. Two places disagreeing about the same opening.
-    open_side = {b.name: b.open_from for b in mission.bays}
-    root_c_mm = plan.stations[0].chord_m * 1000.0
-
-    def cut_length(v):
-        """The opening is the box plus a bead each side plus the fit."""
-        return v.length_mm + 2.0 * wall + bays_mod.FIT_MM
-
-    def ledge(bay):
-        return settings.lid_mm if (bay.lidded and bay.open_from == "upper") else 0.0
-
-    def cut_depth(bay):
-        """Box, a bead of floor, and the lid's thickness over a lidded
-        bay -- the lid rests on a ledge that deep, so the box has to
-        stop below it."""
-        return bay.box_mm[2] + wall + ledge(bay)
-
-    cut_vols = tuple(
-        it.Volume(f"{v.name} opening",
-                  v.x_mid - 0.5 * cut_length(v) / root_c_mm,
-                  v.x_mid + 0.5 * cut_length(v) / root_c_mm,
-                  v.eta0, v.eta1,
-                  height_mm=v.height_mm + 2.0 * wall,
-                  anchor=(it.LOWER if open_side.get(v.name) == "lower"
-                          else it.UPPER),
-                  offset_mm=0.0, length_mm=cut_length(v),
-                  x_abs_mm=v.x_abs_mm)
-        for v in bay_vols)
-
+    # The spars must avoid the payload boxes: a tube seated where the
+    # pack sits is a tube through the pack. Nothing else reserves space
+    # any more -- the openings that used to reach deeper than their own
+    # boxes are gone, so the box IS the reservation.
     spar_fits = []
     if mission.spars:
         spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
-                               reserved=tuple(bay_vols) + cut_vols,
+                               reserved=tuple(bay_vols),
                                min_reach=mission.min_spar_reach_frac)
         avoid = sp.exclusion_bands(spar_fits, wall)
         settings = replace(
@@ -1380,154 +1215,18 @@ def _evaluate_once(
             spar_corridors=tuple((f.x_frac, f.reach_eta) for f in spar_fits))
 
     # --- printable? the shell mass comes out of this, so it runs early ---
-    # The bays are CUT now, not merely reserved: the battery goes in
-    # through an opening the program made, not one someone made with a
-    # knife. Only bays that fit and clear everything are cut -- an
-    # infeasible bay is already reported by the gates below, and cutting
-    # one would produce geometry that self-intersects.
-    # The ramp length is measured on BARE panels -- the only non-circular
-    # place to measure it. A budget taken on a panel that already has the
-    # cut counts the ramp's own dive and climb walls as the wing's motion,
-    # comes back zero, and reports that a 24 mm bay needs an infinite span
-    # to close. Which is what the first version of this did.
-    # Bare AND rib-free: the budget is about the skin's own motion, and a
-    # rib slit's two floor vertices, read as part of the skin, put a 35 mm
-    # step into the interpolated surface wherever the slit swept across
-    # a sample station -- which zeroed the trainer's centre-body budget.
-    bare = vase.build_panels(plan, replace(settings, ribs=False),
-                             z_step_mm=z_step_mm)
-    bare_by_eta = tuple(zip(joint_etas, bare))
-    bay_ramp: dict = {}
-    bay_ramp_in: dict = {}
-    bay_dead_out: dict = {}
-    bay_dead_in: dict = {}
-    for bay in mission.bays:
-        v = next(x for x in bay_vols if x.name == bay.name)
-        # The floor's TRAVEL, not the box's depth. The closed groove hugs
-        # the skin, so at any x the floor moves from (skin - groove) down
-        # to the flat open floor, which sits box-deep below the band's
-        # LOWEST skin point: the corner under the crown of the section
-        # travels the box depth plus the skin's rise above that low
-        # point. Sized from the box alone, the ramp let that corner move
-        # faster than the overhang budget and the trainer's centre body
-        # failed max overhang the moment the groove learned to hug.
-        # The floor's travel is depth + the skin's rise over the opening,
-        # and the rise is a property of the STATION, not of the bay: it is
-        # gathered per sample by `cut_budget_profile` and applied there.
-        # Measured once at the bay's mid station it was 7.1 mm where the
-        # ramp needed 10.6, and the trainer's servo pocket ran 0.4% over
-        # the overhang limit.
-        depth = cut_depth(bay)
-        # The ramp may run on past a print joint -- what must not straddle
-        # one is the BOX, which is gated separately -- so the rate it can
-        # use is the TIGHTEST budget over every panel it crosses, not the
-        # budget of the panel that happens to hold the box. Solved by
-        # walking outboard: each panel's budget says how much depth it can
-        # close, and the ramp keeps going until the depth is spent.
-        def walk(order_, edge_, outboard):
-            return ramp_walk(plan, order_, v.x_abs_mm, cut_length(v),
-                             bay.open_from, depth, edge_, outboard)
-
-        bay_ramp[bay.name], bay_dead_out[bay.name] = walk(
-            bare_by_eta, v.eta1, outboard=True)
-        if v.eta0 > 1e-9:
-            bay_ramp_in[bay.name], bay_dead_in[bay.name] = walk(
-                list(reversed(bare_by_eta)), v.eta0, outboard=False)
-        else:
-            bay_ramp_in[bay.name], bay_dead_in[bay.name] = 0.0, 0.0
-
-    # Only bays that FIT and are CLEAR of each other are cut. Two bays
-    # that overlap in chord would put two floors within a fraction of a
-    # millimetre of each other -- on micro the two openings overlap by
-    # 0.004c and the contour came back with 0.14 mm of clearance against a
-    # 0.45 mm limit. The clash gate already reports the overlap; the
-    # geometry must not also become invalid because of it.
-    clashing = {n for a, b, _ in it.clashes(bay_vols, plan, wall)
-                for n in (a, b)}
-    # ... nor may two openings coexist on a layer in the same chord: a
-    # skin cannot carry two detours in one band. The box volumes are
-    # kept apart above; the CUTS reach further, by their ramps, so a
-    # pocket out in the wing can meet a root bay's tail. The later one
-    # in declaration order gives way, and the design pays for it.
-    for a_bay, b_bay in ((x, y) for i, x in enumerate(mission.bays)
-                         for y in mission.bays[i + 1:]):
-        if a_bay.open_from != b_bay.open_from:
-            continue
-        va = next(x for x in bay_vols if x.name == a_bay.name)
-        vb = next(x for x in bay_vols if x.name == b_bay.name)
-        za = (vase.arc_length_mm(plan, 0.0, va.eta0) - bay_ramp_in[a_bay.name]
-              - bay_dead_in[a_bay.name],
-              vase.arc_length_mm(plan, 0.0, va.eta1) + bay_ramp[a_bay.name]
-              + bay_dead_out[a_bay.name])
-        zb = (vase.arc_length_mm(plan, 0.0, vb.eta0) - bay_ramp_in[b_bay.name]
-              - bay_dead_in[b_bay.name],
-              vase.arc_length_mm(plan, 0.0, vb.eta1) + bay_ramp[b_bay.name]
-              + bay_dead_out[b_bay.name])
-        if not (np.isfinite(za[1]) and np.isfinite(zb[1])):
-            continue
-        lo, hi = max(za[0], zb[0]), min(za[1], zb[1])
-        if hi <= lo:
-            continue
-        # chord gap at the shared span, both cuts at full width
-        e_mid = float(np.interp(0.5 * (lo + hi),
-                                [0.0, vase.arc_length_mm(plan, 0.0, 1.0)],
-                                [0.0, 1.0]))
-        ca = it.Volume("a", va.x0, va.x1, e_mid, e_mid, 1.0,
-                       length_mm=cut_length(va), x_abs_mm=va.x_abs_mm)
-        cb = it.Volume("b", vb.x0, vb.x1, e_mid, e_mid, 1.0,
-                       length_mm=cut_length(vb), x_abs_mm=vb.x_abs_mm)
-        gap = it.gap_mm(ca, cb, plan)
-        if gap < 1.5:
-            reasons.append(f"{b_bay.name} opening meets {a_bay.name}'s over "
-                           f"{hi - lo:.0f} mm of span ({gap:.1f} mm apart)")
-            penalty += 10.0 + max(1.5 - gap, 0.0)
-            clashing.add(b_bay.name)
-    cut_list = tuple(
-        vase.BayCut(bay.name, v.x0, v.x1, v.eta0, v.eta1, cut_depth(bay),
-                    bay_ramp[bay.name], bay_ramp_in[bay.name], bay.open_from,
-                    ledge(bay),
-                    bay_dead_out[bay.name], bay_dead_in[bay.name],
-                    length_mm=cut_length(v), x_abs_mm=v.x_abs_mm)
-        for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
-                       for b in mission.bays)
-        if v.fits(plan, wall)[0] and bay.name not in clashing)
-
-    # Nothing in the final list may share a chord band with anything
-    # else in it, anywhere either of them exists. The earlier checks
-    # looked at one station and only compared channels against bays;
-    # this compares everything against everything, over the span they
-    # share, and drops the later of any pair that clash. A cut that is
-    # dropped is named and priced -- the geometry never sees a conflict
-    # it would have to raise on.
-    keep, dropped = [], []
-    for cut in list(cut_list):
-        rival = next((k for k in keep if cuts_clash_mm(plan, k, cut) > 0.0),
-                     None)
-        if rival is None:
-            keep.append(cut)
-            continue
-        dropped.append((cut.name, rival.name,
-                        cuts_clash_mm(plan, rival, cut)))
-    for name, rival, mm in dropped:
-        reasons.append(f"{name} shares {mm:.1f} mm of chord with {rival} "
-                       f"somewhere along the span they both run, so only "
-                       f"one of them is cut")
-        penalty += 6.0 + mm
-
-    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm,
-                               bays=tuple(keep))
-    # --- the mechanism, and the socket the horn drops into ---
-    #
-    # Solved HERE, before the elevons are built, because the socket is a
-    # CUT in the elevon and the part that gets scored has to be the part
-    # that gets printed. Nothing in the four-bar needs the trim, so there
-    # was never a reason for it to come later than this.
+    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
+    # --- the mechanism ---
     #
     # The horn goes where the pushrod can reach it: at the servo's output
     # shaft, or at the elevon's own root when the shaft falls short of
     # it. The shortfall is gated below rather than papered over.
+    #
+    # It used to be socketed into the elevon, in a pocket cut by the same
+    # machinery as a bay. That pocket landed in the thin tail -- micro
+    # had no section to take it at all -- and it is gone with the rest of
+    # the cutting.
     link = None
-    socket_map: dict = {}
     horn_at = None
     if elv.has_elevon(settings) and "servos" in bay_seats:
         servo_bay = next(b for b in mission.bays if b.name == "servos")
@@ -1544,56 +1243,12 @@ def _evaluate_once(
             deflect_deg=mission.max_elevon_deflect_deg)
         rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
         applied = rod_n * link.horn_arm_mm
-        x_mid, s_len, s_depth, _, s_tongue = pmod.horn_geometry(
-            plan, link, e_horn, wall, applied)
-        j_sock, spec, s_tongue_fit = elv.socket_for(
-            plan, settings, joint_etas, e_horn, x_mid, s_len, s_depth,
-            pmod.HORN_T_MM,
-            mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
-            RAMP_MARGIN, z_step_mm, applied_nmm=applied)
-        if spec is not None:
-            s_depth = elv.socket_depth_of(spec)
-            s_tongue = float(s_tongue_fit)
-        # Cut it only if it can HOLD the horn, exactly as only a bay that
-        # fits and is clear of everything is cut. A socket that fails its
-        # load gate is not a socket, it is a notch that weakens a thin
-        # part; the reason below says so and the design pays for it.
-        cap = pmod.socket_moment_capacity_nmm(s_tongue, s_depth)
-        holds = cap >= pmod.HORN_SAFETY * applied
-        if j_sock is not None and spec is not None and holds:
-            socket_map[j_sock] = (spec,)
-        # The horn is a part only if its socket is one: micro's section
-        # at the horn's station leaves no depth at all, and building a
-        # horn with a zero-deep tongue hands the triangulator a
-        # degenerate outline.
-        horn_at = (e_horn if (holds and spec is not None) else 0.0,
-                   e_shaft, s_depth, j_sock, spec, cap, applied)
+        horn_at = (e_horn, e_shaft, applied)
 
     elevon_parts = elv.build_elevons(
         plan, settings, joint_etas,
         mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
-        z_step_mm=z_step_mm, sockets=socket_map)
-    # And only if the part that comes out is still legal. The socket is
-    # sized to hold the horn and clamped to keep a bead off the far skin,
-    # and on a thin elevon it can still bring the contour within an
-    # extrusion width of itself somewhere else along the cut. A socket
-    # that breaks the part it is cut into is not a socket: the elevons are
-    # rebuilt without it and the design is told why, which is the same
-    # rule a bay that does not fit already gets.
-    if socket_map:
-        bad = [p_.name for p_ in elevon_parts
-               if not all(g.passed for g in vase.check(p_).gates
-                          if g.name in ("min wall separation", "vertex spacing"))]
-        if bad:
-            socket_map = {}
-            elevon_parts = elv.build_elevons(
-                plan, settings, joint_etas,
-                mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
-                z_step_mm=z_step_mm)
-            reasons.append(
-                f"the horn's socket cannot be cut: it brings "
-                f"{', '.join(bad)} within a bead of itself")
-            penalty += 8.0
+        z_step_mm=z_step_mm)
     checks = [vase.check(p) for p in panels + elevon_parts]
     # The elevons are shell too. Splitting the trailing edge off into its
     # own part does not make it weightless, and it adds two walls at the
@@ -1684,37 +1339,6 @@ def _evaluate_once(
                            f"(reaches eta {vol.eta1:.3f})")
             penalty += 25.0
 
-        # Can the bay's outboard end actually be CLOSED? A wall normal to
-        # the span is a roof in this print orientation, so the bay has to
-        # fade out, and the fade is an overhang. One ramp, not two: the
-        # root face is open anyway -- the spar has to get in and the two
-        # halves join there -- so a bay starting at the centreline pays
-        # for a single closure at its outboard end.
-        if 0 <= first < len(panels):
-            need = bay_ramp.get(bay.name, float("inf"))
-            need_in = bay_ramp_in.get(bay.name, 0.0)
-            if not np.isfinite(need_in):
-                reasons.append(
-                    f"{bay.name} cannot be opened: no span inboard of it "
-                    f"fades {bay.box_mm[2]:.0f} mm within the overhang limit")
-                penalty += 15.0
-            # Everything outboard of the bay, as arc length along the span
-            # -- the same quantity print height is measured in, because
-            # dihedral makes a panel taller than its projected span and
-            # the ramp is built in printed layers. The whole remaining
-            # half-span, not just the rest of one panel: the ramp is
-            # allowed to cross joints, and the per-panel budgets are
-            # already accounted for in `need`.
-            have = vase.arc_length_mm(plan, vol.eta1, 1.0)
-            if need > have:
-                reasons.append(
-                    f"{bay.name} cannot be closed: needs "
-                    f"{'inf' if not np.isfinite(need) else f'{need:.0f}'} mm "
-                    f"of span to ramp {bay.box_mm[2]:.0f} mm deep, has "
-                    f"{have:.0f} mm of span outboard of it")
-                # inf / inf is NaN, and a NaN score ranks nowhere
-                penalty += 15.0 * (1.0 if not np.isfinite(need)
-                                   else min((need - have) / need, 1.0))
 
     for a_name, b_name, mm in it.clashes(
             bay_vols + [it.spar_volume(f, wall, plan) for f in spar_fits],
@@ -1951,10 +1575,9 @@ def _evaluate_once(
     # the two ways that matter -- it is linear, so it cannot show a
     # mechanism running out of travel, and it is symmetric, so it cannot
     # show the differential a real linkage has.
-    # `link` and the horn's socket were solved above, before the elevons
-    # were built, because the socket is a cut in one of them.
+    # `link` was solved above, with the mechanism.
     if link is not None and horn_at is not None:
-        _, e_shaft, s_depth, j_sock, spec, cap, applied = horn_at
+        _, e_shaft, applied = horn_at
         e_horn = max(e_shaft, float(settings.elevon_eta))
         servo_bay = next(b for b in mission.bays if b.name == "servos")
         half_mm = plan.half_span_m * 1000.0
@@ -1965,26 +1588,6 @@ def _evaluate_once(
                 f"of the elevon it drives (starts at eta "
                 f"{settings.elevon_eta:.2f})")
             penalty += 0.25 * short
-        # Can the socket hold the horn down? The pushrod pulls the blade
-        # at a height above the surface, so the buried tongue is loaded as
-        # a couple and the socket's two faces have to carry it. The load
-        # is the servo's STALL torque over its arm: a servo that meets a
-        # jammed surface delivers it, and the horn is what gives.
-        if cap < pmod.HORN_SAFETY * applied:
-            reasons.append(
-                f"horn socket {s_tongue:.0f} x {s_depth:.1f} mm at eta "
-                f"{e_horn:.2f} holds {cap:.0f} N.mm, the servo can lever "
-                f"{applied:.0f} "
-                f"({cap / max(applied, 1e-9):.1f}x, needs "
-                f"{pmod.HORN_SAFETY:.1f})")
-
-            penalty += 6.0 * (pmod.HORN_SAFETY - cap / max(applied, 1e-9))
-        if j_sock is None or spec is None:
-            reasons.append(
-                f"the horn's socket cannot be cut at eta {e_horn:.2f}: no "
-                f"span either side of it fades {s_depth:.1f} mm within the "
-                f"overhang limit")
-            penalty += 10.0
         # A lock inside the servo's travel is geometry, not a fault, so
         # long as it comes well AFTER the deflection the score spends: a
         # 17 mm horn on an 11 mm arm always locks before 54 degrees of
@@ -2117,7 +1720,6 @@ def _evaluate_once(
         reasons=tuple(reasons), plan=plan, trim=trim_state, mass=mass,
         panels=panels if want_panels else [],
         elevons=elevon_parts if want_panels else [],
-        bay_cuts=tuple(cut_list),
         horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,

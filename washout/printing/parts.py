@@ -21,11 +21,6 @@ Two kinds of geometry live here.
     sharing its cap vertices: the web's forward face is triangulated
     with the flange roots as holes and the flanges start on those rings,
     so the union is watertight by construction and no boolean is needed.
-
-The hatch lid is neither. It follows the wing's own skin over the bay,
-so it is a vase-style stack built from the same station loops as the
-panel and lives in `hatch_lid` below; it prints on its edge, span up,
-exactly like the wing, as a two-bead lens.
 """
 
 from __future__ import annotations
@@ -37,7 +32,6 @@ from scipy.spatial import Delaunay
 
 from .. import linkage as _lkg
 from . import stl as _stl
-from .bays import BaySpec, UPPER, _detour, split_skins
 from .vase import LayerStack, PrintSettings, arc_length_mm, thicken_for_nozzle
 
 SOLID_PLA_GCC = 1.24
@@ -889,14 +883,6 @@ PROP_PLANE_MM = 26.0
 plus the hub. A declared dimension of the hardware."""
 
 
-def lid_thickness_mm(settings: PrintSettings) -> float:
-    """Two beads that touch: the lens is one bead inside the other with
-    `rib_clearance_factor` of the bead width between the toolpaths, so
-    the two walls weld into a solid curved plate -- the same rule the
-    rib slits use. The ledge the lid rests on is cut this deep."""
-    return settings.extrusion_width_mm * (1.0 + settings.rib_clearance_factor)
-
-
 def _station_loop(plan, eta: float, settings: PrintSettings):
     st = plan.at(float(eta))
     chord_mm = st.chord_m * 1000.0
@@ -912,75 +898,3 @@ def _to_planform_mm(pts_unit: np.ndarray, st, chord_mm: float) -> np.ndarray:
     rot = np.stack([p[:, 0] * ca - p[:, 1] * sa,
                     p[:, 0] * sa + p[:, 1] * ca], 1)
     return rot * chord_mm + np.array([st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
-
-
-def hatch_lid(plan, settings: PrintSettings, cut, name: str,
-              z_step_mm: float | None = None,
-              n_pts: int = 41) -> LayerStack | None:
-    """The lid over a root bay, as a vase-style stack across BOTH halves.
-
-    At each span station the lid is a lens: the upper skin's contour
-    between the bay's walls, and the same arc one bead lower, closed by
-    two blunt ends. Printed on its edge, span up, like the panel it sits
-    on -- so it follows the wing's own curvature with no support and no
-    second print mode -- as two beads that weld into one plate.
-
-    It covers the span over which the ledge is at its full depth. Beyond
-    that the ramp has made the opening shallower than the lid and the
-    ledge has become the floor; what remains there is a taper the lid
-    cannot sit in.
-
-    ONE PER HALF, printed from the centreline outward, and the pair meets
-    over the centre joint the panels already have. Mirroring it into a
-    single part across both halves was the first version and it failed
-    two gates at once: 259 mm of print height against a 250 mm envelope,
-    and a first layer of 32 mm2 against the 40 mm2 a small part needs to
-    stay on the bed -- because a tip-to-tip lid begins at an OUTBOARD end,
-    where the bay has narrowed to almost nothing. Begun at the
-    centreline it starts on the widest, thickest section it has."""
-    if cut.open_from != UPPER or cut.ledge_mm <= 0.0 or cut.eta0 > 1e-9:
-        return None
-    step = z_step_mm or settings.layer_h_mm
-    # planform-level spec: full depth from the root face, one ramp out
-    span_mm = arc_length_mm(plan, 0.0, cut.eta1) + cut.dead_out_mm
-    spec = BaySpec(cut.name, cut.x0, cut.x1, 0.0, span_mm, cut.ramp_out_mm,
-                   cut.depth_mm, settings.extrusion_width_mm,
-                   open_from=UPPER, ledge_mm=cut.ledge_mm,
-                   length_mm=cut.length_mm, x_abs_mm=cut.x_abs_mm)
-    z_max = span_mm + cut.ramp_out_mm
-    zs = np.arange(0.0, z_max + 1e-9, step)
-    # z -> eta by arc length along the half span
-    e_tab = np.linspace(0.0, 1.0, 400)
-    s_tab = np.array([0.0] + [arc_length_mm(plan, 0.0, e, n=60) for e in e_tab[1:]])
-    t_lid = lid_thickness_mm(settings)
-    contours, z_keep = [], []
-    for z in zs:
-        eta = float(np.interp(z, s_tab, e_tab))
-        st, c_mm, loop = _station_loop(plan, eta, settings)
-        upper, lower = split_skins(loop)
-        x_le = st.x_le_m * 1000.0
-        det = _detour(spec, upper, lower, c_mm, float(z),
-                      settings.extrusion_width_mm, x_le)
-        x0, x1 = spec.band(c_mm, x_le)
-        y_l0 = float(np.interp(x0, upper[:, 0], upper[:, 1])) - spec.ledge_mm / c_mm
-        y_l1 = float(np.interp(x1, upper[:, 0], upper[:, 1])) - spec.ledge_mm / c_mm
-        if abs(det[0, 1] - y_l0) > 1e-9 or abs(det[5, 1] - y_l1) > 1e-9:
-            break                                   # ledge clamped: lid ends
-        xs = x0 + (x1 - x0) * 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_pts)))
-        ys = np.interp(xs, upper[:, 0], upper[:, 1])
-        outer = np.stack([xs, ys], 1)
-        inner = np.stack([xs, ys - t_lid / c_mm], 1)
-        lens = np.concatenate([outer[::-1], inner], 0)      # 2n, two blunt ends
-        contours.append(_to_planform_mm(lens, st, c_mm))
-        z_keep.append(float(z))
-    if len(contours) < 3:
-        return None
-    full = np.array(contours)
-    z_full = np.array(z_keep)
-    flat = full.reshape(-1, 2)
-    origin = 0.5 * (flat.min(0) + flat.max(0))
-    full = full - origin
-    eta_full = np.array([float(np.interp(z, s_tab, e_tab)) for z in z_full])
-    return LayerStack(z_mm=z_full, eta=eta_full, contours=full, settings=settings,
-                      name=name, z_step_mm=step, has_ribs=False, role="lid",
-                      n_upper=n_pts, origin_mm=(float(origin[0]), float(origin[1])))

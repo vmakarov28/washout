@@ -52,7 +52,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from .vase import (LayerStack, PrintSettings, arc_length_mm,
+from .vase import (LayerStack, PrintSettings,
                    thicken_for_nozzle)
 
 
@@ -168,48 +168,44 @@ def nose_swing_mm(depth_mm: float, deflect_deg: float) -> float:
 
 def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
                  name: str, chamfer_deg: float,
-                 z_step_mm: float | None = None) -> LayerStack:
+                 z_step_mm: float | None = None, frame=None) -> LayerStack:
     """One elevon panel, printed root-down like the wing it came off.
+
+    Cut in the SAME frame as that wing panel, so every layer of the two
+    parts lies in one plane and the hinge faces are one surface: an elevon
+    sliced square to its own axis would meet its wing at the angle between
+    them.
 
     Nothing is cut into it. The horn's socket used to be, and it was a
     pocket in the thin tail where there was least section to hold it;
     the horn is part of the contour now."""
-    tip, root = plan.at(eta1), plan.at(eta0)
-    dy = (eta1 - eta0) * plan.half_span_m
-    dz = tip.z_le_m - root.z_le_m
-    panel_len_mm = float(np.hypot(dy, dz)) * 1000.0
+    from . import frames as fr
+    if frame is None:
+        frame = fr.standalone(plan, eta0, eta1, settings)
+    panel_len_mm = float(frame.length_mm)
 
     step = z_step_mm or settings.layer_h_mm
     n_layers = max(int(round(panel_len_mm / step)), 2)
     z = np.arange(n_layers) * step
     z = z[z <= panel_len_mm + 1e-9]
-    eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
-
-    n_pts = 2 * settings.contour_points
-    contours = np.empty((len(z), n_pts, 2))
     xh = hinge_x(settings)
-    for k, e in enumerate(eta):
-        st = plan.at(float(e))
-        chord_mm = st.chord_m * 1000.0
-        loop = thicken_for_nozzle(st.airfoil.coords(settings.contour_points),
-                                  chord_mm, settings)
-        loop = elevon_loop(loop, xh, chord_mm, settings.hinge_gap_mm,
-                           chamfer_deg, settings.contour_points)
-        p = loop - np.array([0.25, 0.0])
-        a = np.radians(-st.twist_deg)
-        ca, sa = np.cos(a), np.sin(a)
-        rot = np.stack([p[:, 0] * ca - p[:, 1] * sa,
-                        p[:, 0] * sa + p[:, 1] * ca], 1)
-        contours[k] = rot * chord_mm + np.array(
-            [st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
 
+    def unit_loop(st, chord_mm, s_mm, te_scale):
+        loop = thicken_for_nozzle(st.airfoil.coords(settings.contour_points),
+                                  chord_mm, settings,
+                                  min_te_mm=settings.min_te_mm * te_scale)
+        return elevon_loop(loop, xh, chord_mm, settings.hinge_gap_mm,
+                           chamfer_deg, settings.contour_points)
+
+    contours, eta = fr.slice_layers(plan, frame, z, unit_loop)
     flat = contours.reshape(-1, 2)
     origin = 0.5 * (flat.min(0) + flat.max(0))
     contours -= origin
     return LayerStack(z_mm=z, eta=eta, contours=contours, settings=settings,
                       name=name, z_step_mm=step, has_ribs=False,
                       origin_mm=(float(origin[0]), float(origin[1])),
-                      role="elevon", n_upper=settings.contour_points)
+                      role="elevon", n_upper=settings.contour_points,
+                      frame=frame)
 
 
 def build_elevons(plan, settings: PrintSettings, panel_etas,
@@ -220,17 +216,20 @@ def build_elevons(plan, settings: PrintSettings, panel_etas,
     Sharing the wing's joint stations is not tidiness: each elevon panel
     then sits against exactly one wing panel, one hinge rod or one strip
     of tape serves both, and the parts cannot be assembled in the wrong
-    order."""
+    order. It shares the wing's FRAMES for the same reason, solved from
+    the same split by the same function."""
     if not has_elevon(settings):
         return []
+    from .frames import panel_frames
+    frames = panel_frames(plan, panel_etas, settings)
     out = []
     j = 0
-    for a, b in panel_etas:
+    for (a, b), f in zip(panel_etas, frames):
         if a < settings.elevon_eta - 1e-9:
             continue
         out.append(build_elevon(plan, settings, a, b,
                                 f"{plan.name}_elevon{j}", chamfer_deg,
-                                z_step_mm=z_step_mm))
+                                z_step_mm=z_step_mm, frame=f))
         j += 1
     return out
 

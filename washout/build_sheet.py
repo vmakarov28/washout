@@ -170,6 +170,35 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A(f"Everything above is **one half wing**. Print two of each and mirror.")
     A("")
 
+    # ------------------------------------------------------------ joints
+    wing = [p for p in parts if p.role == "wing" and getattr(p, "frame", None)]
+    if wing:
+        H = plan.half_span_m * 1000.0
+        A("## Joints")
+        A("")
+        A("Each panel follows the wing's dihedral curve inside itself; the")
+        A("joints are where it turns. Two end faces square to two different")
+        A("axes cannot both be one plane, so each joint hinges about the skin")
+        A("named and opens as a wedge on the other one. **Fill the wedge when")
+        A("bonding** -- it is part of the wing's shape, not a gap to close by")
+        A("forcing the panels together.")
+        A("")
+        A("| joint | where | turns | faces touch at | wedge opens to |")
+        A("|---|---|---|---|---|")
+        A("| centre | the symmetry plane | 0 deg | the whole face | 0 mm: "
+          "the two `p0` root faces mate flat |")
+        far = {"upper": "lower", "lower": "upper"}
+        for prev, p in zip(wing, wing[1:]):
+            f = p.frame
+            touch = (f"{f.pivot} skin" if f.pivot in far
+                     else "the chord line")
+            opens = (f"**{f.wedge_mm:.1f} mm** at the {far[f.pivot]} skin"
+                     if f.pivot in far else f"{f.wedge_mm:.1f} mm, split")
+            A(f"| `{prev.name}` / `{p.name}` | eta {f.eta0:.3f}, "
+              f"{f.eta0 * H:.0f} mm out | **{f.kink_deg:+.1f} deg** | "
+              f"{touch} | {opens} |")
+        A("")
+
     # ------------------------------------------------------------ slicer
     A("## Slicer")
     A("")
@@ -275,7 +304,8 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("   apart.** After the centre joint there is no access.")
     A("3. Slide the spars in and bond them, seated against the skin the cut")
     A("   list names.")
-    A("4. Join the panels outboard, then the two halves at the centreline.")
+    A("4. Join the panels outboard, each at the angle the Joints table")
+    A("   gives, then the two halves at the centreline.")
     A("5. Hinge the elevons, fit the horns and the pushrods.")
     A("6. Glue the tip fins on.")
     A("7. Balance to the CG window above. Then set the throws.")
@@ -401,6 +431,19 @@ def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
             "footprint_mm": [round(bx, 1), round(by, 1)],
             "first_layer_mm2": round(float(area), 1),
             "eta": [round(float(p.eta[0]), 4), round(float(p.eta[-1]), 4)]})
+        f = getattr(p, "frame", None)
+        if f is not None:
+            # Where the part flies, from where it prints: flight x is
+            # print X + origin[0]; with Y' = print Y + origin[1] and s =
+            # print Z, flight y = y0 + s cos(phi) - Y' sin(phi) and flight
+            # z = z0 + s sin(phi) + Y' cos(phi). Right half; mirror y.
+            out["half_wing_parts"][-1]["placement"] = {
+                "phi_deg": round(f.phi_deg, 4),
+                "pivot_yz_mm": [round(v, 3) for v in f.origin_yz_mm],
+                "print_origin_xy_mm": [round(v, 3) for v in p.origin_mm],
+                "root_joint": {"turns_deg": round(f.kink_deg, 3),
+                               "touches_at": f.pivot,
+                               "wedge_mm": round(f.wedge_mm, 2)}}
     if getattr(ev, "fins", None) is not None:
         out["half_wing_parts"].append(
             {"file": f"{ev.plan.name}_tip_fin.stl", "profile": "solid",

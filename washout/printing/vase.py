@@ -172,6 +172,19 @@ class LayerStack:
     section rejects a part that was never meant to hold one; and the
     300 mm2 bed-adhesion floor is sized for a 111 mm tall centre body,
     not for a 25 mm wide trailing-edge wedge."""
+    frame: object | None = None
+    """This part's `frames.PanelFrame`: where it sits in the aircraft.
+
+    Print X is flight x less `origin_mm[0]`; print Y is height square to
+    the panel axis less `origin_mm[1]`; print Z is distance along the
+    axis. `frame.to_flight` undoes it, which is how the build sheet
+    reports the joints and how the CAD export and the conformance gate
+    put a printed part back where it flies."""
+
+    def to_flight(self, X, Y, Z) -> np.ndarray:
+        """Print coordinates, as they are on the bed -> flight mm."""
+        ox, oy = self.origin_mm
+        return self.frame.to_flight(np.asarray(X) + ox, np.asarray(Y) + oy, Z)
 
     @property
     def layers_per_sample(self) -> float:
@@ -264,6 +277,7 @@ def thicken_for_nozzle(
     loop_unit: np.ndarray,
     chord_mm: float,
     settings: PrintSettings,
+    min_te_mm: float | None = None,
 ) -> np.ndarray:
     """Force minimum printable thickness on a unit-chord section.
 
@@ -278,6 +292,11 @@ def thicken_for_nozzle(
     The floor is applied with a smooth max, not clip(): a hard corner in
     thickness puts a crease in the lofted skin and a visible facet in the
     slicer's spiral. eps sets how gently the two meet.
+
+    `min_te_mm` overrides the setting for one section. A layer is cut
+    square to a tilted panel, which is thinner than the `y = const`
+    section it is carried from by cos(delta - phi) / cos(delta), so the
+    floor is raised by that factor here for the printed edge to keep it.
     """
     n = (len(loop_unit) + 1) // 2
     upper = loop_unit[:n][::-1]                 # LE -> TE
@@ -286,7 +305,7 @@ def thicken_for_nozzle(
     cam = 0.5 * (upper[:, 1] + lower[:, 1])
     t = upper[:, 1] - lower[:, 1]
 
-    t_min = settings.min_te_mm / chord_mm
+    t_min = (settings.min_te_mm if min_te_mm is None else min_te_mm) / chord_mm
     eps = max(settings.te_blend / chord_mm, 1e-6)
     t_new = 0.5 * (t + t_min + np.sqrt((t - t_min) ** 2 + eps**2))
 
@@ -302,18 +321,26 @@ def build_stack(
     eta1: float = 1.0,
     name: str = "panel",
     z_step_mm: float | None = None,
+    frame=None,
 ) -> LayerStack:
     """Slice a spanwise panel of the planform into printable layers.
 
-    Print Z is arc length along the panel, so dihedral does not shorten
-    the part -- dihedral is a joint angle applied at assembly, and the
-    panel itself prints straight.
+    Print Z is distance along the panel's AXIS, and each layer is the
+    loft cut square to that axis -- see `frames.py`. The panel follows
+    the dihedral curve inside itself as a lean in print Y, so a panel
+    printed straight up the Z axis is the loft, not a straightened copy of
+    it; only the joints between panels are straight lines, and they are
+    reported as the wedges they leave.
+
+    `frame` is this panel's `frames.PanelFrame`. `build_panels` solves one
+    for every panel together, because a joint's pivot depends on both
+    sides of it; without one, the panel gets the frame it would have alone
+    (horizontal at the centreline, chord line to chord line elsewhere).
     """
-    dih = plan.at(0.5 * (eta0 + eta1))
-    tip, root = plan.at(eta1), plan.at(eta0)
-    dy = (eta1 - eta0) * plan.half_span_m
-    dz = tip.z_le_m - root.z_le_m
-    panel_len_mm = float(np.hypot(dy, dz)) * 1000.0
+    from . import frames as fr
+    if frame is None:
+        frame = fr.standalone(plan, eta0, eta1, settings)
+    panel_len_mm = float(frame.length_mm)
 
     # Wholly outboard of the hinge station -> this panel is the wing
     # FORWARD of the elevon and its trailing edge is a cut face. Wholly,
@@ -326,15 +353,7 @@ def build_stack(
     n_layers = max(int(round(panel_len_mm / step)), 2)
     z = np.arange(n_layers) * step
     z = z[z <= panel_len_mm + 1e-9]
-    eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
 
-    # Every layer's station, once: the exclusion envelopes below and the
-    # contour loop beneath both want them, and `plan.at` is the expensive
-    # call in this function.
-    stations = [plan.at(float(e)) for e in eta]
-    chord_of = np.array([s_.chord_m * 1000.0 for s_ in stations])
-    x_le_of = np.array([s_.x_le_m * 1000.0 for s_ in stations])
-    layout_chord = plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
@@ -369,6 +388,13 @@ def build_stack(
         deta_dz = (eta1 - eta0) / max(panel_len_mm / 1000.0, 1e-9)
         used = max(abs(dxle), abs(dxle + dc)) * deta_dz
         allowed = np.tan(np.radians(settings.max_overhang_deg))
+        # The panel's LEAN -- the dihedral curve's departure from the
+        # panel axis -- moves every point in print Y as Z rises, and that
+        # motion is square to the ribs' chordwise sweep, so it comes off
+        # the budget in QUADRATURE (ROADMAP-BUILD.md section 0), not by
+        # subtraction.
+        lean = fr.max_lean_rate(plan, frame)
+        allowed_x = float(np.sqrt(max(allowed * allowed - lean * lean, 0.0)))
         # The analytic bound is a LOWER bound: it tracks the leading and
         # trailing edges but not twist, thickness change or the trailing-
         # edge thickening, all of which also move contour points. Measured
@@ -376,7 +402,7 @@ def build_stack(
         # 1.82x low, so 2.0 is the factor that keeps it conservative. The
         # cost is a shallower truss, which is the right way to be wrong.
         rib_spec = replace(rib_spec,
-                           rate_mm_per_mm=max(allowed - 2.0 * used, 0.02))
+                           rate_mm_per_mm=max(allowed_x - 2.0 * used, 0.02))
     # How many ribs this panel can actually take. Per panel, because the
     # spar corridors it must dodge are per panel -- and the point budget
     # follows it, so the invariant holds within a stack without
@@ -390,34 +416,34 @@ def build_stack(
     # the next.
     rib_spec = replace(rib_spec, n_ribs=n_rib_eff).with_layout(
         plan.at(0.5 * (eta0 + eta1)).chord_m * 1000.0)
-    n_pts = 2 * settings.contour_points - 1 + POINTS_PER_RIB * n_rib_eff
-    contours = np.empty((len(z), n_pts, 2))
-    for k, st in enumerate(stations):
-        chord_mm = float(chord_of[k])
+    clr = settings.extrusion_width_mm * settings.rib_clearance_factor
+    if truncated:
+        from .elevons import hinge_x, truncate_loop
+        xh_cut = hinge_x(settings)
+
+    def unit_loop(st, chord_mm, s_mm, te_scale):
         loop = st.airfoil.coords(settings.contour_points)
-        loop = thicken_for_nozzle(loop, chord_mm, settings)
+        loop = thicken_for_nozzle(loop, chord_mm, settings,
+                                  min_te_mm=settings.min_te_mm * te_scale)
         if truncated:
-            from .elevons import hinge_x, truncate_loop
-            loop = truncate_loop(loop, hinge_x(settings))
+            loop = truncate_loop(loop, xh_cut)
         if n_rib_eff > 0:
             # ONE pass for every slit on the section. Inserting them one
             # at a time re-interpolated a skin that already had vertical
             # walls in it, which put a vertex 7.2 mm down a wall between
             # two adjacent layers.
-            clr = settings.extrusion_width_mm * settings.rib_clearance_factor
-            loop = insert_detours(loop, chord_mm, float(z[k]), rib_spec,
-                                  slit_mm=clr, gap_mm=clr,
+            # The floor's gap to the lower skin is a THICKNESS, and the cut
+            # square to a tilted panel shrinks every thickness by the same
+            # factor the trailing edge is raised against -- which took the
+            # trainer's tip-panel floor from 0.50 mm to 0.43, under a bead.
+            # The slit's width runs along the chord and is not touched.
+            loop = insert_detours(loop, chord_mm, s_mm, rib_spec,
+                                  slit_mm=clr, gap_mm=clr * te_scale,
                                   min_groove_mm=settings.extrusion_width_mm)
-        # twist about the quarter chord, then scale to mm and sweep
-        p = loop - np.array([0.25, 0.0])
-        a = np.radians(-st.twist_deg)
-        ca, sa = np.cos(a), np.sin(a)
-        rot = np.stack([p[:, 0] * ca - p[:, 1] * sa,
-                        p[:, 0] * sa + p[:, 1] * ca], 1)
-        contours[k] = rot * chord_mm + np.array(
-            [st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
+        return loop
 
-    # centre the whole part on the bed
+    contours, eta = fr.slice_layers(plan, frame, z, unit_loop)
+
     # The solved corridors, in this loop's own chord. A truncated panel's
     # loop spans [0, x_hinge] of the original chord, so a spar at 0.54c
     # sits at 0.54/x_hinge of what remains.
@@ -426,6 +452,7 @@ def build_stack(
                   for c, reach in settings.spar_corridors
                   if reach >= eta0 + 1e-9)
 
+    # centre the whole part on the bed
     flat = contours.reshape(-1, 2)
     origin = 0.5 * (flat.min(0) + flat.max(0))
     contours -= origin
@@ -433,7 +460,7 @@ def build_stack(
                       settings=settings, name=name, z_step_mm=step,
                       has_ribs=n_rib_eff > 0,
                       origin_mm=(float(origin[0]), float(origin[1])),
-                      spar_x_local=local)
+                      spar_x_local=local, frame=frame)
 
 
 # ------------------------------------------------------------------- gates
@@ -969,7 +996,9 @@ def build_panels(plan: Planform, settings: PrintSettings,
     across it, and nothing cut through the skin. The wing is loaded
     through those open ends before the panels are bonded, which is why
     there is no opening to place and no ramp to budget."""
+    from .frames import panel_frames
     spans = panel_etas(plan, settings, z_margin_mm)
+    frames = panel_frames(plan, spans, settings)
     return [build_stack(plan, settings, a, b, name=f"{plan.name}_p{i}",
-                        z_step_mm=z_step_mm)
-            for i, (a, b) in enumerate(spans)]
+                        z_step_mm=z_step_mm, frame=f)
+            for i, ((a, b), f) in enumerate(zip(spans, frames))]

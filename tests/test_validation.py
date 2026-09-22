@@ -788,3 +788,155 @@ def test_the_design_sheet_never_takes_the_export_down(tmp_path, monkeypatch):
     monkeypatch.setattr(report, "_figure", boom)
     out = report.figure(ev, s, tmp_path / "none.png", title="t")
     assert out == tmp_path / "none.png"          # returned, did not raise
+
+
+# ------------------------------------------ panels are slices of the loft
+
+def _fleet_design(name):
+    import json as _json
+    from washout.search.design import Mission, build, unit_to_physical
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    u = np.array(d["u"])
+    mission = getattr(Mission, name)()
+    plan = build(u, mission, cst.load_selig(ASSETS / "mh45.dat"))
+    p = unit_to_physical(u)
+    s = vase.PrintSettings(elevon_chord=p["elevon_chord"],
+                           elevon_eta=p["elevon_eta"])
+    return plan, s
+
+
+def _off_loft_mm(plan, stack, x_lo=0.02, x_hi=0.85, every=6):
+    """Largest distance from a printed skin vertex, put back where it
+    flies, to the loft's own section at that vertex's span station --
+    measured to the ANALYTIC surface on a grid in t = sqrt(x), which is
+    where CST is a polynomial and where the nose is resolved. The first
+    2% and the last 15% of chord are the nozzle's, not the loft's: the
+    nose and the trailing edge are thickened to a printable floor on
+    purpose."""
+    H = plan.half_span_m * 1000.0
+    worst = 0.0
+    n_up = (stack.contours.shape[1] + 1) // 2
+    for k in range(0, len(stack.z_mm), every):
+        c = stack.contours[k]
+        P = stack.to_flight(c[:, 0], c[:, 1], np.full(len(c), stack.z_mm[k]))
+        for i in range(0, len(c), 2):
+            x, y, z = P[i]
+            st = plan.at(float(np.clip(y / H, 0.0, 1.0)))
+            cm = st.chord_m * 1000.0
+            a = np.radians(-st.twist_deg)
+            rx = (x - st.x_le_m * 1000.0 - 0.25 * cm) / cm
+            rz = (z - st.z_le_m * 1000.0) / cm
+            u = rx * np.cos(a) + rz * np.sin(a) + 0.25
+            v = -rx * np.sin(a) + rz * np.cos(a)
+            if not x_lo <= u <= x_hi:
+                continue
+            t = np.clip(np.sqrt(u) + np.linspace(-0.06, 0.06, 2001), 0.0, 1.0)
+            ys = (st.airfoil.y_upper(t * t) if i < n_up
+                  else st.airfoil.y_lower(t * t))
+            worst = max(worst, float(np.hypot(t * t - u, ys - v).min()) * cm)
+    return worst
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "micro_fpv"])
+def test_a_layer_is_the_loft_cut_square_to_its_panel(name):
+    """Every printed panel is the loft, not a straightened copy of it.
+
+    `build_stack` used to stack the loft's `y = const` sections straight up
+    the print axis and never read `z_le`, so each panel printed straight
+    while the lattice scored a curve: micro_fpv's outer panel sat 9.0 mm
+    off the loft, and every tilted panel printed 1/cos(phi) too thick when
+    assembled (+13% on the trainer's tip panel). Each layer is now the
+    loft cut square to the panel's own axis, and every skin vertex, put
+    back where it flies, must lie on the loft's surface at its own span
+    station. 0.06 mm is under a sixth of a bead; the slice as built is
+    within 0.045 mm on the whole fleet."""
+    plan, s = _fleet_design(name)
+    for stack in vase.build_panels(plan, s, z_step_mm=2.0):
+        off = _off_loft_mm(plan, stack)
+        assert off < 0.06, f"{stack.name}: a printed vertex is {off:.3f} mm off the loft"
+
+
+def test_the_centre_body_meets_its_mirror_flat():
+    """The centre body's axis is horizontal, so its root face IS the
+    symmetry plane. Any tilt and the two halves meet in a V: open on one
+    side and interpenetrating on the other, which two printed parts
+    cannot do."""
+    plan, s = _fleet_design("micro_fpv")
+    p0 = vase.build_panels(plan, s, z_step_mm=2.0)[0]
+    assert p0.frame.phi_deg == 0.0
+    c = p0.contours[0]
+    P = p0.to_flight(c[:, 0], c[:, 1], np.zeros(len(c)))
+    assert np.abs(P[:, 1]).max() < 1e-6
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "micro_fpv"])
+def test_two_panels_never_share_material_at_a_joint(name):
+    """A joint between panels on different axes cannot be one plane. Hinged
+    about the chord line, the two parts would interpenetrate above it and
+    gape below; hinged about the joint section's top skin when the wing
+    turns up, every point of each lies on its own side and the joint opens
+    as a wedge on the lower skin instead -- glue, which the build sheet
+    sizes. Checked on the actual printed layers either side of every
+    joint, put back where they fly."""
+    plan, s = _fleet_design(name)
+    pans = vase.build_panels(plan, s, z_step_mm=1.0)
+    for inner, outer in zip(pans, pans[1:]):
+        f_in, f_out = inner.frame, outer.frame
+        q = np.array(f_out.origin_yz_mm)
+        a_in = np.array([f_in.cos, f_in.sin])
+        a_out = np.array([f_out.cos, f_out.sin])
+        c = outer.contours[0]
+        P = outer.to_flight(c[:, 0], c[:, 1], np.zeros(len(c)))[:, 1:]
+        into_inner = -((P - q) @ a_in).min()
+        c = inner.contours[-1]
+        P = inner.to_flight(c[:, 0], c[:, 1],
+                            np.full(len(c), inner.z_mm[-1]))[:, 1:]
+        into_outer = ((P - q) @ a_out).max()
+        assert into_inner < 0.05 and into_outer < 0.05, (
+            f"{inner.name}/{outer.name}: parts overlap by "
+            f"{max(into_inner, into_outer):.2f} mm")
+        if abs(f_out.kink_deg) > 1.0:
+            assert f_out.pivot in ("upper", "lower") and f_out.wedge_mm > 0.0
+
+
+def test_an_elevon_is_cut_in_its_wing_panels_frame():
+    """The elevon and the wing panel it came off must share a frame, layer
+    for layer, or their hinge faces are two different surfaces meeting at
+    the angle between two axes."""
+    from washout.printing import elevons
+    plan, s = _fleet_design("trainer_v3")
+    spans = vase.panel_etas(plan, s)
+    wing = vase.build_panels(plan, s, z_step_mm=2.0)
+    elv = elevons.build_elevons(plan, s, spans, 16.0, z_step_mm=2.0)
+    by_span = {(round(p.frame.eta0, 9), round(p.frame.eta1, 9)): p.frame for p in wing}
+    for e in elv:
+        assert e.frame == by_span[(round(e.frame.eta0, 9), round(e.frame.eta1, 9))]
+
+
+def test_every_joint_is_on_the_build_sheet():
+    """The angle each joint turns through, and the wedge it opens, are the
+    builder's to set and to fill. Before this nothing reported either:
+    a 17 degree kink on micro_fpv's only joint, and nowhere to read it."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro_fpv"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro_fpv(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert "## Joints" in text
+    wing = [p for p in ev.panels if p.role == "wing"]
+    for prev, p in zip(wing, wing[1:]):
+        row = next(line for line in text.splitlines()
+                   if line.startswith(f"| `{prev.name}` / `{p.name}`"))
+        assert f"{p.frame.kink_deg:+.1f} deg" in row
+        assert f"{p.frame.wedge_mm:.1f} mm" in row
+    m = build_sheet.manifest(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert all("placement" in part for part in m["half_wing_parts"]
+               if part["profile"] == "vase")

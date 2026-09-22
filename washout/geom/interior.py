@@ -65,14 +65,20 @@ MID = "mid"
 ANCHORS = (LOWER, UPPER, MID)
 
 
-def depth_mm(plan, eta: float, x_frac: float, wall_mm: float) -> float:
+def depth_mm(plan, eta: float, x_frac, wall_mm: float):
     """Usable internal depth at one station, both skins removed.
 
     The same quantity `spars.depth_at` computes, kept here so this module
-    does not depend on the spar fitter it is meant to serve."""
+    does not depend on the spar fitter it is meant to serve.
+
+    `x_frac` may be an array of chord stations at the one span station,
+    and then an array comes back. The checks below ask for five or seven
+    chord stations at every span station they visit, and asking one at a
+    time made this function 30% of a design evaluation."""
     st = plan.at(float(np.clip(eta, 0.0, 1.0)))
-    t = float(st.airfoil.thickness(np.array([float(np.clip(x_frac, 0.0, 1.0))]))[0])
-    return t * st.chord_m * 1000.0 - 2.0 * wall_mm
+    x = np.clip(np.asarray(x_frac, dtype=float), 0.0, 1.0)
+    t = st.airfoil.thickness(np.atleast_1d(x)) * st.chord_m * 1000.0 - 2.0 * wall_mm
+    return float(t[0]) if x.ndim == 0 else t
 
 
 @dataclass(frozen=True)
@@ -138,24 +144,34 @@ class Volume:
     def x_mid(self) -> float:
         return 0.5 * (self.x0 + self.x1)
 
-    def z_interval(self, plan, eta: float, x_frac: float,
-                   wall_mm: float) -> tuple[float, float]:
+    def z_interval(self, plan, eta: float, x_frac,
+                   wall_mm: float):
         """(lo, hi) in mm above the lower inner skin at this station.
 
         Returns an EMPTY interval (lo > hi) where the section is too
         shallow to hold the part at all, so a caller that asks about a
         station outboard of where the part fits gets "nothing here"
-        rather than a silently clipped answer."""
+        rather than a silently clipped answer.
+
+        With an array of chord stations, (lo, hi) are arrays, empty
+        element by element."""
         d = depth_mm(plan, eta, x_frac, wall_mm)
-        if d < self.height_mm + self.offset_mm:
-            return (1.0, 0.0)
+        if np.ndim(d) == 0:
+            if d < self.height_mm + self.offset_mm:
+                return (1.0, 0.0)
+            lo = self._lo(d)
+            return (lo, lo + self.height_mm)
+        lo = self._lo(d) + np.zeros_like(d)
+        hi = lo + self.height_mm
+        short = d < self.height_mm + self.offset_mm
+        return np.where(short, 1.0, lo), np.where(short, 0.0, hi)
+
+    def _lo(self, d):
         if self.anchor == LOWER:
-            lo = self.offset_mm
-        elif self.anchor == UPPER:
-            lo = d - self.height_mm - self.offset_mm
-        else:
-            lo = 0.5 * (d - self.height_mm)
-        return (lo, lo + self.height_mm)
+            return self.offset_mm
+        if self.anchor == UPPER:
+            return d - self.height_mm - self.offset_mm
+        return 0.5 * (d - self.height_mm)
 
     def fits(self, plan, wall_mm: float, n_eta: int = 7,
              n_x: int = 5) -> tuple[bool, float]:
@@ -167,9 +183,8 @@ class Volume:
         worst = np.inf
         for eta in np.linspace(self.eta0, self.eta1, n_eta):
             x0, x1 = self.band(plan, float(eta))
-            for x in np.linspace(x0, x1, n_x):
-                d = depth_mm(plan, float(eta), float(x), wall_mm)
-                worst = min(worst, d - self.height_mm - self.offset_mm)
+            d = depth_mm(plan, float(eta), np.linspace(x0, x1, n_x), wall_mm)
+            worst = min(worst, float((d - self.height_mm - self.offset_mm).min()))
         return bool(worst >= 0.0), float(worst)
 
 
@@ -193,6 +208,8 @@ def overlap_mm(a: Volume, b: Volume, plan, wall_mm: float,
         return 0.0                       # no shared span at all
 
     worst = 0.0
+    de_mm = (min(a.eta1, b.eta1) - max(a.eta0, b.eta0)) \
+        * plan.half_span_m * 1000.0
     for eta in np.linspace(e0, e1, n_eta):
         # the bands are LOCAL to this station: a part with a physical
         # length is wider, as a fraction, where the chord is shorter
@@ -200,21 +217,17 @@ def overlap_mm(a: Volume, b: Volume, plan, wall_mm: float,
         x0, x1 = max(ax[0], bx[0]), min(ax[1], bx[1])
         if x1 < x0:
             continue                     # no shared chord here
-        for x in np.linspace(x0, x1, n_x):
-            alo, ahi = a.z_interval(plan, float(eta), float(x), wall_mm)
-            blo, bhi = b.z_interval(plan, float(eta), float(x), wall_mm)
-            if ahi < alo or bhi < blo:
-                continue                 # one of them does not fit here
-            dz = min(ahi, bhi) - max(alo, blo)
-            if dz <= 0.0:
-                continue                 # stacked clear of each other
-            # the separation is the cheapest axis to move along
-            dx = x1 - x0
-            st = plan.at(float(eta))
-            dx_mm = dx * st.chord_m * 1000.0
-            de_mm = (min(a.eta1, b.eta1) - max(a.eta0, b.eta0)) \
-                * plan.half_span_m * 1000.0
-            worst = max(worst, min(dz, dx_mm, de_mm))
+        xs = np.linspace(x0, x1, n_x)
+        alo, ahi = a.z_interval(plan, float(eta), xs, wall_mm)
+        blo, bhi = b.z_interval(plan, float(eta), xs, wall_mm)
+        dz = np.minimum(ahi, bhi) - np.maximum(alo, blo)
+        # one of them does not fit here, or they are stacked clear
+        hit = (ahi >= alo) & (bhi >= blo) & (dz > 0.0)
+        if not hit.any():
+            continue
+        # the separation is the cheapest axis to move along
+        dx_mm = (x1 - x0) * plan.at(float(eta)).chord_m * 1000.0
+        worst = max(worst, float(np.minimum(dz[hit], min(dx_mm, de_mm)).max()))
     return float(worst)
 
 

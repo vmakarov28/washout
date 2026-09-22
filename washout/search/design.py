@@ -1128,6 +1128,32 @@ LATTICE_NC = 8
 
 _VLM_CACHE: "OrderedDict[tuple, VLM]" = OrderedDict()
 _VLM_CACHE_SIZE = 2
+_BUILD_CACHE: "OrderedDict[tuple, Planform]" = OrderedDict()
+
+
+def _cached_build(u, mission: Mission, base: Airfoil) -> Planform:
+    """The planform for this design, built at most once per evaluation.
+
+    `evaluate` scores the bare shell and then the ribbed one, and each pass
+    rebuilt an identical Planform from the same vector -- which threw away
+    the station memo `Planform.at` keeps, so every station the second pass
+    asked for was lofted twice. Keyed on everything `build` reads,
+    including the mission's NAME, which becomes the planform's and so every
+    part's; a hit is the same geometry by construction. A Planform is
+    frozen, so sharing one is safe."""
+    key = (np.asarray(u, dtype=float).tobytes(), mission.span_m,
+           mission.span_free, mission.fairness, mission.name,
+           base.au.tobytes(), base.al.tobytes(), float(base.te_gap),
+           float(base.te_camber))
+    plan = _BUILD_CACHE.get(key)
+    if plan is None:
+        plan = build(u, mission, base)
+        _BUILD_CACHE[key] = plan
+        while len(_BUILD_CACHE) > _VLM_CACHE_SIZE:
+            _BUILD_CACHE.popitem(last=False)
+    else:
+        _BUILD_CACHE.move_to_end(key)
+    return plan
 
 
 def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
@@ -1261,7 +1287,7 @@ def _evaluate_once(
                 f"{prop.MAX_TIP_SPEED_MS:.0f}")
             penalty += 15.0
     try:
-        plan = build(u, mission, base)
+        plan = _cached_build(u, mission, base)
     except Exception as e:
         return Evaluation(False, -1e6, reasons=(f"geometry: {e}",))
 

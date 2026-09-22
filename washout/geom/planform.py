@@ -75,6 +75,7 @@ class Planform:
         if any(b <= a for a, b in zip(etas, etas[1:])):
             raise ValueError("station etas must strictly increase")
         object.__setattr__(self, "_interp", None)
+        object.__setattr__(self, "_at_cache", {})
 
     def _lofter(self):
         """Build (once) the interpolators over every station quantity.
@@ -123,13 +124,28 @@ class Planform:
     # ---------------------------------------------------------------- loft
 
     def at(self, eta: float) -> Station:
-        """The interpolated station at any span fraction."""
-        eta = float(np.clip(eta, 0.0, 1.0))
+        """The interpolated station at any span fraction.
+
+        Memoised per planform, because one evaluation asks for about
+        160 000 stations and only about 6 000 of them are different: the
+        interior checks walk the same span grid once per chordwise sample
+        and once per candidate seat. The cache returns the SAME Station, so
+        its coefficient arrays are made read-only -- a caller that edited
+        one in place would otherwise be editing every later answer."""
+        # min/max rather than np.clip: the same value for every finite
+        # float and for NaN, at a tenth of the cost on a scalar
+        eta = min(max(float(eta), 0.0), 1.0)
+        cache = object.__getattribute__(self, "_at_cache")
+        hit = cache.get(eta)
+        if hit is not None:
+            return hit
         f, n_c = self._lofter()
         v = np.asarray(f(eta)).ravel()
         au = v[4:4 + n_c]
         al = v[4 + n_c:4 + 2 * n_c]
-        return Station(
+        au.flags.writeable = False
+        al.flags.writeable = False
+        st = Station(
             eta=eta,
             chord_m=float(max(v[0], 1e-4)),
             x_le_m=float(v[1]),
@@ -138,6 +154,8 @@ class Planform:
             airfoil=Airfoil(au=au, al=al, te_gap=float(v[-2]),
                             te_camber=float(v[-1]), name="lofted"),
         )
+        cache[eta] = st
+        return st
 
     def section_3d(self, eta: float, n: int = 121) -> np.ndarray:
         """The section loop placed in aircraft coordinates -> (N, 3).

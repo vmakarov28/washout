@@ -497,19 +497,74 @@ def overhang_deg(stack: LayerStack, stride: int = 4) -> tuple[float, float]:
     run 13 mm from the nearest vertex below and 0.1 mm from the bead. The
     bead is continuous along its segments; the printer sees segments.
     """
-    worst, worst_z = 0.0, 0.0
     c = stack.contours
-    for k in range(0, len(c) - stride, stride):
-        d = _dist_to_segments(c[k + stride], c[k])
-        # rise is the ACTUAL Z between the two sampled contours, not the
-        # nominal layer height: when the search samples coarsely those
-        # differ by 8x, and using the nominal value reports 82 deg of
-        # overhang on a wing that really has 42.
-        rise = float(stack.z_mm[k + stride] - stack.z_mm[k])
-        ang = np.degrees(np.arctan2(d.max(), max(rise, 1e-9)))
-        if ang > worst:
-            worst, worst_z = float(ang), float(stack.z_mm[k])
-    return worst, worst_z
+    ks = np.arange(0, len(c) - stride, stride)
+    if ks.size == 0:
+        return 0.0, 0.0
+    # rise is the ACTUAL Z between the two sampled contours, not the
+    # nominal layer height: when the search samples coarsely those differ
+    # by 8x, and using the nominal value reports 82 deg of overhang on a
+    # wing that really has 42.
+    rise = np.maximum(stack.z_mm[ks + stride] - stack.z_mm[ks], 1e-9)
+    # EXACT, and pruned. The full vertex-to-segment search is an (N, N)
+    # matrix per pair of layers and was a quarter of a design evaluation.
+    # The worst point is almost always near the segments of the same
+    # index on the layer below -- the point count is constant and the
+    # contour moves smoothly -- so the distance to that window of
+    # segments is an UPPER bound on each point's true distance, computed
+    # for every pair at once. Pairs whose bound cannot beat the worst
+    # angle found so far are skipped, and within a pair only the points
+    # whose bound can still beat it get the full search. The answer is the
+    # one the full search gives; `test_overhang_pruning_is_exact` pins it.
+    upper = _window_bound(c, ks, stride) / rise[:, None]      # tan, (P, N)
+    order = np.argsort(-upper.max(1), kind="stable")
+    worst, worst_k, best_tan = 0.0, int(ks[0]), -1.0
+    for p in order:
+        bound = upper[p]
+        if bound.max() < best_tan:
+            break                       # no remaining pair can beat it
+        k = int(ks[p])
+        cand = np.flatnonzero(bound >= best_tan)
+        cand = cand[np.argsort(-bound[cand], kind="stable")]
+        d_max = -1.0
+        for chunk in np.array_split(cand, max(len(cand) // 32, 1)):
+            if bound[chunk[0]] < max(best_tan, d_max / rise[p]):
+                break                   # nothing left here can raise it
+            d_max = max(d_max, float(_dist_to_segments(c[k + stride][chunk],
+                                                       c[k]).max()))
+        if d_max < 0.0:
+            continue
+        # the angle exactly as the unpruned loop computed it, and its tie
+        # rule: the LOWEST layer wins among equal angles
+        ang = float(np.degrees(np.arctan2(d_max, rise[p])))
+        if ang > worst or (ang == worst and ang > 0.0 and k < worst_k):
+            worst, worst_k = ang, k
+        best_tan = max(best_tan, d_max / rise[p])
+    return worst, (float(stack.z_mm[worst_k]) if worst > 0.0 else 0.0)
+
+
+def _window_bound(c: np.ndarray, ks: np.ndarray, stride: int,
+                  w: int = 3) -> np.ndarray:
+    """Distance from each vertex of layer k+stride to the nearest of the
+    2w+1 segments of layer k around the same index -> (len(ks), N).
+
+    An upper bound on the vertex-to-segment distance `overhang_deg`
+    wants, because it is a minimum over a subset of the segments."""
+    n = c.shape[1]
+    a = c[ks]                                   # (P, N, 2) the layer below
+    ab = np.roll(a, -1, axis=1) - a
+    denom = np.maximum(np.einsum("pij,pij->pi", ab, ab), 1e-12)
+    pts = c[ks + stride]                        # (P, N, 2)
+    best = np.full(pts.shape[:2], np.inf)
+    idx = np.arange(n)
+    for off in range(-w, w + 1):
+        j = (idx + off) % n
+        aj, abj, dj = a[:, j], ab[:, j], denom[:, j]
+        ap = pts - aj
+        t = np.clip(np.einsum("pij,pij->pi", ap, abj) / dj, 0.0, 1.0)
+        d = np.linalg.norm(ap - t[..., None] * abj, axis=2)
+        best = np.minimum(best, d)
+    return best
 
 
 def ramp_budget(stack: LayerStack, x0: float, x1: float,
@@ -585,7 +640,8 @@ def ramp_span_mm(stack: LayerStack, depth_mm: float,
     return float(depth_mm / rate) if rate > 0.0 else float("inf")
 
 
-def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17) -> float:
+def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17,
+                   only_mid: bool = False) -> float:
     """Diameter of the largest circle that fits at chord station x.
 
     This is the question the bore gate is actually asking. A spar is a
@@ -609,6 +665,11 @@ def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17) -> float:
     the section is not convex -- a reflexed aerofoil with a rib detour has
     more than one local optimum, and a root-finder would return whichever
     it started next to.
+
+    `only_mid` scores the middle centre alone. Its clearance is one of the
+    fifteen the full scan maximises over, so it is a LOWER bound on the
+    answer, at a fifteenth of the cost -- which is what `spar_fit` prunes
+    with.
     """
     p = np.asarray(contour, dtype=float)
     a = p
@@ -623,6 +684,8 @@ def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17) -> float:
     cy = np.linspace(y0, y1, n)[1:-1]
     if cy.size == 0:
         return 0.0
+    if only_mid:
+        cy = cy[len(cy) // 2:len(cy) // 2 + 1]
     c = np.stack([np.full(cy.shape, x), cy], 1)            # (m, 2)
 
     ap = c[:, None, :] - a[None, :, :]                      # (m, N, 2)
@@ -630,6 +693,37 @@ def _inscribed_gap(contour: np.ndarray, x: float, n: int = 17) -> float:
     closest = a[None, :, :] + tt[:, :, None] * ab[None, :, :]
     d = np.linalg.norm(c[:, None, :] - closest, axis=2).min(1)   # (m,)
     return float(2.0 * d.max())
+
+
+def _mid_gaps(contours: np.ndarray, xs: np.ndarray, n: int = 17) -> np.ndarray:
+    """`_inscribed_gap(contours[k], xs[k], only_mid=True)` for every layer
+    at once -> (L,).
+
+    The middle centre is placed exactly as `np.linspace` places it --
+    start plus index times step -- so it is one of the centres the full
+    scan scores, and the bound is a true lower bound rather than one a
+    rounding away from it."""
+    x0, y0 = contours[:, :, 0], contours[:, :, 1]
+    x1, y1 = np.roll(x0, -1, axis=1), np.roll(y0, -1, axis=1)
+    x = xs[:, None]
+    hit = (((x0 - x) * (x1 - x)) <= 0.0) & (np.abs(x1 - x0) > 1e-12)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tt = (x - x0) / (x1 - x0)
+    ys = y0 + tt * (y1 - y0)
+    lo = np.where(hit, ys, np.inf).min(1)
+    hi = np.where(hit, ys, -np.inf).max(1)
+    ok = hit.sum(1) >= 2
+    mid = (n - 1) // 2
+    cy = mid * ((hi - lo) / (n - 1)) + lo
+    a = contours
+    ab = np.roll(a, -1, axis=1) - a
+    denom = np.einsum("lij,lij->li", ab, ab)
+    denom[denom < 1e-12] = 1e-12
+    cpt = np.stack([xs, cy], 1)[:, None, :]                 # (L, 1, 2)
+    ap = cpt - a
+    t = np.clip(np.einsum("lij,lij->li", ap, ab) / denom, 0.0, 1.0)
+    d = np.linalg.norm(cpt - (a + t[..., None] * ab), axis=2).min(1)
+    return np.where(ok, 2.0 * d, 0.0)
 
 
 def _crossings(contour: np.ndarray, x: float) -> np.ndarray:
@@ -687,18 +781,34 @@ def spar_fit(stack: LayerStack) -> tuple[float, float]:
     """
     s = stack.settings
     fracs = stack.spar_x_local or (s.spar_x_frac,)
-    best, pinch_z = np.inf, 0.0
-    for k, layer in enumerate(stack.contours):
-        lo_x, hi_x = layer[:, 0].min(), layer[:, 0].max()
-        chord = hi_x - lo_x
-        for f in fracs:
-            # the inscribed circle already stops one bead inside the
-            # contour's centreline, so only the fit clearance is deducted
-            gap = (_inscribed_gap(layer, lo_x + float(f) * chord)
-                   - s.extrusion_width_mm - s.spar_clearance_mm)
-            if gap < best:
-                best, pinch_z = float(gap), float(stack.z_mm[k])
-    return best, pinch_z
+    # the inscribed circle already stops one bead inside the contour's
+    # centreline, so only the fit clearance is deducted.
+    #
+    # Pruned, and exact: the full scan tries 15 centres per layer, and any
+    # ONE of them -- the middle -- gives a LOWER bound on the diameter.
+    # Layers are visited in order of that bound and the scan stops once
+    # no remaining layer's bound can undercut the pinch already found.
+    # `test_bore_pruning_is_exact` pins the answer to the full scan's,
+    # including its tie rule (the lowest layer wins).
+    c = stack.contours
+    lo_x, hi_x = c[:, :, 0].min(1), c[:, :, 0].max(1)
+    rows = []
+    for f in fracs:
+        xs = lo_x + float(f) * (hi_x - lo_x)
+        lbs = _mid_gaps(c, xs) - s.extrusion_width_mm - s.spar_clearance_mm
+        rows += [(float(lb), k, float(x))
+                 for k, (lb, x) in enumerate(zip(lbs, xs))]
+    best, best_k = np.inf, None
+    for lb, k, x in sorted(rows, key=lambda r: (r[0], r[1])):
+        if lb > best or (lb == best and best_k is not None and k > best_k):
+            break
+        # subtracted in the same order the full scan did, so the answer is
+        # the same float and not one rounding away from it
+        gap = (_inscribed_gap(stack.contours[k], x)
+               - s.extrusion_width_mm - s.spar_clearance_mm)
+        if gap < best or (gap == best and best_k is not None and k < best_k):
+            best, best_k = float(gap), k
+    return best, (float(stack.z_mm[best_k]) if best_k is not None else 0.0)
 
 
 def check(stack: LayerStack) -> Printability:

@@ -117,12 +117,29 @@ def reach_of(plan, x_frac: float, spec: SparSpec, wall_mm: float,
     panel can thicken again relative to its chord), and a root-finder
     would happily return the far side of a pinch the tube cannot pass
     through. The FIRST station that blocks is the real limit."""
+    return float(reach_many(plan, np.array([x_frac]), spec, wall_mm, n)[0])
+
+
+def reach_many(plan, xs, spec: SparSpec, wall_mm: float,
+               n: int = 160) -> np.ndarray:
+    """`reach_of` for every chord station in `xs` at once.
+
+    The same scan, span station by span station, with the whole row of
+    candidate stations evaluated together: the fitter asks about 25 of
+    them, and asking one at a time lofted every span station 25 times."""
     need = spec.needed_mm(wall_mm)
-    etas = np.linspace(0.0, 1.0, n)
-    for e in etas:
-        if depth_at(plan, float(e), x_frac, wall_mm) < need:
-            return float(max(e - 1.0 / (n - 1), 0.0))
-    return 1.0
+    xs = np.asarray(xs, dtype=float)
+    out = np.ones(len(xs))
+    open_ = np.ones(len(xs), dtype=bool)
+    for e in np.linspace(0.0, 1.0, n):
+        st = plan.at(float(e))
+        d = (st.airfoil.thickness(xs) * st.chord_m * 1000.0 - 2.0 * wall_mm)
+        stop = open_ & (d < need)
+        out[stop] = max(e - 1.0 / (n - 1), 0.0)
+        open_ &= ~stop
+        if not open_.any():
+            break
+    return out
 
 
 def place(plan, spec: SparSpec, wall_mm: float, joints=(),

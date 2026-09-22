@@ -43,12 +43,20 @@ def cg_window_mm(ev) -> tuple[float, float]:
     not "balance here" but "balance here, and here is how far out you may
     be before it stops flying the way it was designed to."
     """
-    t = ev.trim
     mac = ev.plan.mac_m * 1000.0
-    x_np = t.x_np_m * 1000.0
+    x_np = neutral_point_mm(ev)
     lo = x_np - mac * ev.sm_band[1]
     hi = x_np - mac * ev.sm_band[0]
     return float(min(lo, hi)), float(max(lo, hi))
+
+
+def neutral_point_mm(ev) -> float:
+    """From the trim state when there is one; otherwise from the CG and the
+    static margin, which are both known before trim is attempted --
+    SM = (x_np - x_cg) / mac is a definition, not an estimate."""
+    if ev.trim is not None:
+        return ev.trim.x_np_m * 1000.0
+    return (ev.mass.x_cg_m + ev.static_margin * ev.plan.mac_m) * 1000.0
 
 
 def pack_travel_mm(ev) -> float:
@@ -62,7 +70,7 @@ def pack_travel_mm(ev) -> float:
     if pack is None or pack.mass_kg <= 0.0:
         return 0.0
     lo, hi = cg_window_mm(ev)
-    cg = ev.trim.x_cg_m * 1000.0
+    cg = ev.mass.x_cg_m * 1000.0
     slack = min(cg - lo, hi - cg)
     return float(max(slack, 0.0) * ev.mass.total_kg / pack.mass_kg)
 
@@ -138,10 +146,14 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("## Balance this first")
     A("")
     lo, hi = cg_window_mm(ev)
-    A(f"- **CG: {t.x_cg_m*1000:.1f} mm aft of the root leading edge.**")
+    if t is None:
+        A("- **This design does not trim.** No elevon-neutral angle of attack")
+        A("  balances it, so it cannot be flown as drawn; the misses are listed")
+        A("  at the end. The numbers below are what it is, not what it needs.")
+    A(f"- **CG: {m.x_cg_m*1000:.1f} mm aft of the root leading edge.**")
     A(f"- Acceptable window **{lo:.1f} to {hi:.1f} mm** — that is the static")
     A(f"  margin band {ev.sm_band[0]:.2f} to {ev.sm_band[1]:.2f} expressed as a")
-    A(f"  position, with the neutral point at {t.x_np_m*1000:.1f} mm.")
+    A(f"  position, with the neutral point at {neutral_point_mm(ev):.1f} mm.")
     travel = pack_travel_mm(ev)
     if travel > 0.0:
         A(f"- The pack may sit **{travel:.0f} mm** either side of its drawn")
@@ -223,19 +235,30 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     if ev.spar_fits:
         A("## Spar cut list")
         A("")
-        A("| spar | tube | cut length | chord station | seat | reaches |")
-        A("|---|---|---|---|---|---|")
+        A("| spar | tube | cut | root seat | runs | reaches | centre joiner |")
+        A("|---|---|---|---|---|---|---|")
         tube = ev.structure.spar.name if ev.structure else "?"
         for f in ev.spar_fits:
-            A(f"| {f.spec.name} | {tube} | **{2*f.reach_mm:.0f} mm** | "
-              f"{f.x_frac:.2f}c ({f.x_frac*root_c:.0f} mm aft of root LE) | "
-              f"{f.anchor} skin | eta {f.reach_eta:.2f} |")
+            x0, z0 = f.root_xz_mm
+            if f.one_piece:
+                cut = f"**1 x {2*f.reach_mm:.0f} mm**, tip to tip"
+                join = "none: one tube"
+            else:
+                cut = f"**2 x {f.reach_mm:.0f} mm**, one a side"
+                join = (f"**V: {2*f.sweep_deg:.0f} deg in plan, "
+                        f"{2*f.dihedral_deg:.0f} deg seen from the front**")
+            A(f"| {f.spec.name} | {tube} | {cut} | {x0:.0f} mm aft of the "
+              f"root LE, {f.anchor} skin | swept {f.sweep_deg:.1f} deg, "
+              f"dihedral {f.dihedral_deg:.1f} deg | eta {f.reach_eta:.2f} | "
+              f"{join} |")
         A("")
-        A("Each tube runs **tip to tip through the centre body** — one length,")
-        A("not two meeting at the centreline. The bore is the shell's own")
-        A("cavity: there is no hole to drill through the wall, but the tube")
-        A("has to be seated against the skin the table names, because that is")
-        A("where the clearance was solved for.")
+        A("A tube is straight, so on a swept wing with dihedral each half gets")
+        A("its own, and they meet at the centreline in a V joiner at the angles")
+        A("above. The tube leaves the wing's depth where the table says it")
+        A("reaches; outboard of that the shell alone carries the load. The")
+        A("bore is the shell's own cavity: there is no hole to drill through")
+        A("the wall, but the tube must start at the root seat named, because")
+        A("that is where its whole line was solved from.")
         A("")
 
     # ----------------------------------------------------------- controls
@@ -364,9 +387,18 @@ def bom(ev, parts) -> str:
     for f in ev.spar_fits:
         m = next((i.mass_kg for i in ev.mass.items
                   if i.name == f"spar {f.spec.name}"), 0.0)
-        L.append(f"| 1 | carbon tube — {f.spec.name} | {tube}, "
-                 f"**{2*f.reach_mm:.0f} mm** | {m*1000:.0f} g | "
-                 f"seats on the {f.anchor} skin at {f.x_frac:.2f}c |")
+        if f.one_piece:
+            L.append(f"| 1 | carbon tube — {f.spec.name} | {tube}, "
+                     f"**{2*f.reach_mm:.0f} mm** | {m*1000:.0f} g | "
+                     f"tip to tip, from the {f.anchor} skin at {f.x_frac:.2f}c |")
+        else:
+            L.append(f"| 2 | carbon tube — {f.spec.name} | {tube}, "
+                     f"**{f.reach_mm:.0f} mm** | {m*1000:.0f} g | one a side, "
+                     f"from the {f.anchor} skin at {f.x_frac:.2f}c |")
+            L.append(f"| 1 | V joiner — {f.spec.name} | {tube} bore, "
+                     f"{2*f.sweep_deg:.0f} deg in plan, "
+                     f"{2*f.dihedral_deg:.0f} deg from the front | — | "
+                     f"not generated yet: bend or print to these angles |")
     known = {f"spar {f.spec.name}" for f in ev.spar_fits}
     for i in ev.mass.items:
         if i.name in known:

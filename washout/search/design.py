@@ -1346,10 +1346,17 @@ def _evaluate_once(
         spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
                                reserved=tuple(bay_vols),
                                min_reach=mission.min_spar_reach_frac)
-        avoid = sp.exclusion_bands(spar_fits, wall)
-        settings = replace(
-            settings, spar_avoid=avoid,
-            spar_corridors=tuple((f.x_frac, f.reach_eta) for f in spar_fits))
+        # The tubes as the straight lines they are. The panels keep their
+        # truss out of the chord band each line sweeps through inside
+        # them, and the bore is gated at the line's own centre in every
+        # layer it reaches -- not at a fixed chord fraction, which is the
+        # tube that bent with the wing (ROADMAP-CAD.md section 0.1).
+        def line(f):
+            d = max(f.spec.d_mm, settings.spar_d_mm)
+            return (f.root_xz_mm[0], f.root_xz_mm[1], f.slope[0], f.slope[1],
+                    f.reach_y_mm, 0.5 * d + 0.5 * wall + f.spec.clearance_mm, d)
+        settings = replace(settings, spar_avoid=(), spar_corridors=(),
+                           spar_lines=tuple(line(f) for f in spar_fits))
 
     # --- printable? the shell mass comes out of this, so it runs early ---
     panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
@@ -1436,7 +1443,8 @@ def _evaluate_once(
     # The tubes that were actually fitted, at the stations the fit solved
     # for. Not a flat allowance: see structure.spar_masses.
     for s_name, s_kg, s_x in struct.spar_masses(
-            spar_fits, spar_od_mm if spar_od_mm is not None else mission.spar_d_mm):
+            spar_fits, spar_od_mm if spar_od_mm is not None else mission.spar_d_mm,
+            root_chord_mm=root_c * 1000.0):
         items += (perf.PointMass(f"spar {s_name}", s_kg, s_x * root_c),)
     if fins is not None:
         # at the tips and aft: they move the CG back and add roll inertia,
@@ -1485,6 +1493,108 @@ def _evaluate_once(
         # a 12 mm tube through the pack, or the optimizer sees a cliff
         penalty += 8.0 * mm
 
+    # The gates that are GEOMETRY, asked before trim is attempted. None of
+    # them depends on the flight condition, and a design that fails to trim
+    # returns early -- so asked after trim they went unreported on exactly
+    # the designs whose report matters most: micro's servo shaft sat 81 mm
+    # inboard of its elevon and nothing said so once it stopped trimming.
+    # --- spar gates ---
+    #
+    # A spar aft of the hinge line is a spar inside the control surface:
+    # the elevon is a separate printed part now, so a tube there has
+    # nothing to run through and the surface cannot move. Newly askable --
+    # before the hinge line reached the geometry there was no line to be
+    # aft of.
+    #
+    # Asked along the tube, at every station it occupies outboard of the
+    # hinge station: a straight tube's chord fraction drifts as the wing
+    # sweeps and tapers under it, so being forward of the hinge at the
+    # root says nothing about the tip.
+    x_hinge = elv.hinge_x(settings) if elv.has_elevon(settings) else 1.0
+    for f in spar_fits:
+        if f.reach_eta <= settings.elevon_eta:
+            continue
+        over, at = -np.inf, 0.0
+        for e in np.linspace(settings.elevon_eta, f.reach_eta, 9):
+            c_mm = plan.at(float(e)).chord_m * 1000.0
+            hx = 0.5 * f.spec.d_mm * np.sqrt(1.0 + f.slope[0] ** 2)
+            o = (f.x_frac_at(plan, float(e)) - x_hinge) * c_mm + hx
+            if o > over:
+                over, at = o, float(e)
+        if over > 0.0:
+            reasons.append(f"{f.spec.name} is {over:.1f} mm aft of the hinge "
+                           f"line ({x_hinge:.2f}c) at eta {at:.2f}")
+            penalty += 10.0 * over
+
+    for f in spar_fits:
+        if f.joints_blocked:
+            reasons.append(f"{f.spec.name}: a straight tube cannot reach the "
+                           f"joint{'s' if len(f.joints_blocked) > 1 else ''} at eta "
+                           + ",".join(f"{e:.2f}" for e in f.joints_blocked)
+                           + f" (reaches {f.reach_eta:.2f})")
+            penalty += 30.0 * len(f.joints_blocked)
+        if f.reach_eta < mission.min_spar_reach_frac:
+            reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
+                           f"(need {mission.min_spar_reach_frac:.2f})")
+            penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
+
+    # --- can the propeller swing without striking the wing? ---
+    #
+    # A pusher at the trailing edge of a SWEPT wing loses its clearance
+    # outboard: the trailing edge runs aft as the disc runs out, so it is
+    # the blade tips that are in danger and not the root. The motor was a
+    # point mass at 0.97c and nothing else until the mount was generated,
+    # and two of the three aircraft turned out to swing their declared
+    # five-inch prop within a couple of millimetres of their own trailing
+    # edge -- micro 2.0 mm, demon1 0.3 mm, against the 10 mm a mount
+    # bonded to foam should keep.
+    if mission.powertrain is not None:
+        clear = pmod.prop_clearance_mm(plan, p_vec["prop_diam_in"])
+        if clear < PROP_CLEARANCE_MM:
+            reasons.append(
+                f"prop disc clears the trailing edge by {clear:.1f} mm, "
+                f"needs {PROP_CLEARANCE_MM:.0f}")
+            penalty += 2.0 * (PROP_CLEARANCE_MM - clear)
+
+    # --- and can the MECHANISM deliver it? ---
+    #
+    # dcm_ddeg, below, says how much moment a degree of elevon buys, and
+    # the speed objective spends `max_elevon_deflect_deg` of it. Nothing
+    # until now asked whether the servo, its arm, the pushrod and the horn
+    # can reach that angle: demon1's headline speed was computed from a
+    # deflection the aircraft had never been shown able to make.
+    #
+    # Solved as a four-bar rather than by the ratio r_servo / r_horn,
+    # which is the small-angle limit of a parallel linkage and is wrong in
+    # the two ways that matter -- it is linear, so it cannot show a
+    # mechanism running out of travel, and it is symmetric, so it cannot
+    # show the differential a real linkage has.
+    # `link` was solved above, with the mechanism.
+    if link is not None and horn_at is not None:
+        _, e_shaft, applied = horn_at
+        e_horn = max(e_shaft, float(settings.elevon_eta))
+        servo_bay = next(b for b in mission.bays if b.name == "servos")
+        half_mm = plan.half_span_m * 1000.0
+        if servo_bay.drives_elevon and e_shaft < settings.elevon_eta - 1e-9:
+            short = (settings.elevon_eta - e_shaft) * half_mm
+            reasons.append(
+                f"servo shaft at eta {e_shaft:.2f} is {short:.0f} mm inboard "
+                f"of the elevon it drives (starts at eta "
+                f"{settings.elevon_eta:.2f})")
+            penalty += 0.25 * short
+        # A lock inside the servo's travel is geometry, not a fault, so
+        # long as it comes well AFTER the deflection the score spends: a
+        # 17 mm horn on an 11 mm arm always locks before 54 degrees of
+        # servo, and the transmitter's endpoints are what stop the servo
+        # short of it. A lock BEFORE the wanted deflection is the fault.
+        want = mission.max_elevon_deflect_deg
+        ok_link, why = lkg.delivers(link, want)
+        if not ok_link:
+            thr_down, thr_up, _ = lkg.sweep(link)
+            got = min(thr_down, -thr_up)
+            reasons.append(why)
+            penalty += 8.0 * max(want - got, 1.0)
+
     # --- trim fixes CL; CL fixes cruise speed ---
     vlm = _cached_vlm(u, mission, base, plan, ns, nc)
     x_np = perf.neutral_point(vlm, plan)
@@ -1496,15 +1606,37 @@ def _evaluate_once(
     # high trim angle unacceptable is proximity to the stall, and that is
     # already gated properly by cl_max_section below.
     alpha = vlm.trim_alpha(mass.x_cg_m, bounds=(-10.0, 18.0))
+
+    def untrimmed(score: float) -> Evaluation:
+        # Rejected at trim, but everything BEFORE trim was computed and is
+        # true: the parts, the settings they were cut with, the tubes, the
+        # mechanism, the mass. They used to be dropped, so exporting a
+        # design that does not trim -- which is how you find out WHY --
+        # crashed on settings that were never handed back, and every
+        # check of the parts silently skipped it.
+        return Evaluation(
+            False, score, reasons=tuple(reasons), plan=plan, mass=mass,
+            static_margin=sm, mass_kg=mass.total_kg,
+            panels=panels if want_panels else [],
+            elevons=elevon_parts if want_panels else [],
+            horn_eta=float(horn_at[0]) if horn_at else 0.0,
+            spar_fits=spar_fits, fairness=fair,
+            fairness_limits=mission.fairness, fins=fins,
+            max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
+            linkage=link,
+            sm_band=(mission.min_static_margin, mission.max_static_margin),
+            cruise_band=tuple(mission.cruise_band_ms),
+            max_loading_gdm2=mission.max_wing_loading_gdm2,
+            print_settings=settings)
+
     if alpha is None:
         reasons.append("no trim angle in [-10, 18] deg")
-        return Evaluation(False, -1e5 - 10 * len(reasons), reasons=tuple(reasons),
-                          plan=plan, mass=mass, static_margin=sm)
+        return untrimmed(-1e5 - 10 * len(reasons))
     pt = vlm.solve(alpha, mass.x_cg_m)
 
     if pt.CL <= 0.02:
         reasons.append(f"trims at CL {pt.CL:.3f}: cannot support itself")
-        return Evaluation(False, -1e5, reasons=tuple(reasons), plan=plan, mass=mass)
+        return untrimmed(-1e5)
 
     v = float(np.sqrt(2 * mass.total_kg * perf.G
                       / (perf.RHO_AIR * plan.area_m2 * pt.CL)))
@@ -1591,51 +1723,6 @@ def _evaluate_once(
                        f"{mission.min_cl_trim:.2f}")
         penalty += 60.0 * (mission.min_cl_trim - pt.CL)
 
-    # --- spar gates ---
-    #
-    # A spar aft of the hinge line is a spar inside the control surface:
-    # the elevon is a separate printed part now, so a tube there has
-    # nothing to run through and the surface cannot move. Newly askable --
-    # before the hinge line reached the geometry there was no line to be
-    # aft of.
-    x_hinge = elv.hinge_x(settings) if elv.has_elevon(settings) else 1.0
-    root_c_mm = plan.stations[0].chord_m * 1000.0
-    for f in spar_fits:
-        aft = f.x_frac + 0.5 * f.spec.d_mm / max(root_c_mm, 1e-9)
-        if f.reach_eta > settings.elevon_eta and aft > x_hinge:
-            over = (aft - x_hinge) * root_c_mm
-            reasons.append(f"{f.spec.name} at {f.x_frac:.2f}c is {over:.1f} mm "
-                           f"aft of the hinge line ({x_hinge:.2f}c)")
-            penalty += 10.0 * over
-
-    for f in spar_fits:
-        if f.joints_blocked:
-            reasons.append(f"{f.spec.name}: joints too shallow at "
-                           + ",".join(f"{e:.2f}" for e in f.joints_blocked))
-            penalty += 30.0 * len(f.joints_blocked)
-        if f.reach_eta < mission.min_spar_reach_frac:
-            reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
-                           f"(need {mission.min_spar_reach_frac:.2f})")
-            penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
-
-    # --- can the propeller swing without striking the wing? ---
-    #
-    # A pusher at the trailing edge of a SWEPT wing loses its clearance
-    # outboard: the trailing edge runs aft as the disc runs out, so it is
-    # the blade tips that are in danger and not the root. The motor was a
-    # point mass at 0.97c and nothing else until the mount was generated,
-    # and two of the three aircraft turned out to swing their declared
-    # five-inch prop within a couple of millimetres of their own trailing
-    # edge -- micro 2.0 mm, demon1 0.3 mm, against the 10 mm a mount
-    # bonded to foam should keep.
-    if mission.powertrain is not None:
-        clear = pmod.prop_clearance_mm(plan, p_vec["prop_diam_in"])
-        if clear < PROP_CLEARANCE_MM:
-            reasons.append(
-                f"prop disc clears the trailing edge by {clear:.1f} mm, "
-                f"needs {PROP_CLEARANCE_MM:.0f}")
-            penalty += 2.0 * (PROP_CLEARANCE_MM - clear)
-
     # --- and do the BONDED joints carry what the spar does not? ---
     #
     # Panels butt together on the spar and are glued face to face. The
@@ -1698,45 +1785,6 @@ def _evaluate_once(
         reasons.append(f"elevon dCm/ddeg {abs(dcm_ddeg):.4f} above "
                        f"{mission.max_elevon_power:.4f} (twitchy)")
         penalty += 20.0 * (abs(dcm_ddeg) - mission.max_elevon_power)
-
-    # --- and can the MECHANISM deliver it? ---
-    #
-    # dcm_ddeg above says how much moment a degree of elevon buys, and the
-    # speed objective below spends `max_elevon_deflect_deg` of it. Nothing
-    # until now asked whether the servo, its arm, the pushrod and the horn
-    # can reach that angle: demon1's headline speed was computed from a
-    # deflection the aircraft had never been shown able to make.
-    #
-    # Solved as a four-bar rather than by the ratio r_servo / r_horn,
-    # which is the small-angle limit of a parallel linkage and is wrong in
-    # the two ways that matter -- it is linear, so it cannot show a
-    # mechanism running out of travel, and it is symmetric, so it cannot
-    # show the differential a real linkage has.
-    # `link` was solved above, with the mechanism.
-    if link is not None and horn_at is not None:
-        _, e_shaft, applied = horn_at
-        e_horn = max(e_shaft, float(settings.elevon_eta))
-        servo_bay = next(b for b in mission.bays if b.name == "servos")
-        half_mm = plan.half_span_m * 1000.0
-        if servo_bay.drives_elevon and e_shaft < settings.elevon_eta - 1e-9:
-            short = (settings.elevon_eta - e_shaft) * half_mm
-            reasons.append(
-                f"servo shaft at eta {e_shaft:.2f} is {short:.0f} mm inboard "
-                f"of the elevon it drives (starts at eta "
-                f"{settings.elevon_eta:.2f})")
-            penalty += 0.25 * short
-        # A lock inside the servo's travel is geometry, not a fault, so
-        # long as it comes well AFTER the deflection the score spends: a
-        # 17 mm horn on an 11 mm arm always locks before 54 degrees of
-        # servo, and the transmitter's endpoints are what stop the servo
-        # short of it. A lock BEFORE the wanted deflection is the fault.
-        want = mission.max_elevon_deflect_deg
-        ok_link, why = lkg.delivers(link, want)
-        if not ok_link:
-            thr_down, thr_up, _ = lkg.sweep(link)
-            got = min(thr_down, -thr_up)
-            reasons.append(why)
-            penalty += 8.0 * max(want - got, 1.0)
 
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:
@@ -1947,9 +1995,12 @@ def evaluate(
 
     Designs rejected before trim never pay for the second pass. Pass
     size_structure=False for a bare-shell verdict on purpose."""
+    # Parts are built on both passes; asking for them on the first costs
+    # only the keeping. It matters when the first pass is the LAST one --
+    # a design that does not trim never gets a second -- and its parts
+    # are what someone exporting it to see why needs.
     first = _evaluate_once(u, mission, base, settings, drag=drag, ns=ns, nc=nc,
-                           want_panels=want_panels and not size_structure,
-                           z_step_mm=z_step_mm)
+                           want_panels=want_panels, z_step_mm=z_step_mm)
     if not size_structure or first.trim is None or first.plan is None:
         return first
     st, tuned = choose_structure(first, mission, first.print_settings or settings,

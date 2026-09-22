@@ -74,8 +74,9 @@ def test_the_exported_shell_carries_the_elevon_the_search_scored():
         ps = ev.print_settings
         assert ps.elevon_chord == pytest.approx(p["elevon_chord"]), name
         assert ps.elevon_eta == pytest.approx(p["elevon_eta"]), name
-        assert len(ps.spar_corridors) == len(mission.spars), name
-        assert len(ps.spar_avoid) == len(mission.spars), name
+        # the tubes now reach the panels as the straight lines they are,
+        # which replaced the chord-fraction corridors (ROADMAP-CAD.md 0.1)
+        assert len(ps.spar_lines) == len(mission.spars), name
 
 
 def test_a_truncated_panel_keeps_the_loop_invariants():
@@ -157,13 +158,22 @@ def test_a_spar_may_not_live_inside_the_control_surface():
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
     xh = 1.0 - ev.print_settings.elevon_chord
-    root_c_mm = ev.plan.stations[0].chord_m * 1000.0
+    # Asked where the tube actually is: a straight tube's chord fraction
+    # drifts along a swept, tapered wing, so its root seat says nothing
+    # about the stations outboard of the hinge. The trainer's TE tube
+    # starts at 0.71c -- aft of the 0.72c hinge by its own radius at the
+    # ROOT, where there is no elevon -- and is forward of it by the time
+    # the elevon begins.
     for f in ev.spar_fits:
-        aft = f.x_frac + 0.5 * f.spec.d_mm / root_c_mm
-        if f.reach_eta > ev.print_settings.elevon_eta:
-            assert aft <= xh + 1e-9, (
-                f"{f.spec.name} reaches {aft:.3f}c, hinge at {xh:.3f}c, and "
-                f"the design was not rejected for it")
+        if f.reach_eta <= ev.print_settings.elevon_eta:
+            continue
+        rejected = any(f.spec.name in r and "hinge line" in r for r in ev.reasons)
+        for e in np.linspace(ev.print_settings.elevon_eta, f.reach_eta, 9):
+            c = ev.plan.at(float(e)).chord_m * 1000.0
+            aft = f.x_frac_at(ev.plan, float(e)) + 0.5 * f.spec.d_mm / c
+            assert aft <= xh + 1e-9 or rejected, (
+                f"{f.spec.name} reaches {aft:.3f}c at eta {e:.2f}, hinge at "
+                f"{xh:.3f}c, and the design was not rejected for it")
 
 
 # --------------------------------------- two bugs older than the elevons

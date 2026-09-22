@@ -57,6 +57,22 @@ def _built(name):
     return ev, mission
 
 
+def _trimmed_fleet():
+    """The tracked designs that get as far as the aeroelastic gate.
+
+    micro's does not any more. Its 8 g tube, swept 46 degrees, is weighed
+    at the middle of its length -- 102 mm aft of the root LE -- rather
+    than at its root seat at 58 mm, which put its CG 1.5 mm ahead of the
+    neutral point and left no trim angle in the solver's bracket. That is
+    the aircraft changing (ROADMAP-CAD.md section 0.1), and a re-search is
+    what brings it back; until then the other three carry every finding
+    in this file, and `test_validation.py`'s untrimmed-design test carries
+    micro."""
+    out = [n for n in MISSIONS if _built(n)[0].aeroelastic is not None]
+    assert len(out) >= 3, f"only {out} reach the aeroelastic gate"
+    return out
+
+
 # ---------------------------------------------------- the closed-form parts
 
 def test_bredt_batho_against_a_circular_tube():
@@ -144,7 +160,7 @@ def test_reversal_binds_before_divergence_on_this_airframe():
     three aircraft reversal is the lower speed, by about a factor of
     three -- which is not what you would guess from the fact that
     divergence is the failure everyone names."""
-    for name in MISSIONS:
+    for name in _trimmed_fleet():
         ev, mission = _built(name)
         r = ev.aeroelastic
         assert r is not None, f"{name} has no aeroelastic result"
@@ -189,7 +205,7 @@ def test_the_open_section_penalty_is_quantified():
 
     This is the number Phase 3 of the build roadmap is waiting on: the
     bay and the flutter gate are the same question."""
-    for name in MISSIONS:
+    for name in _trimmed_fleet():
         ev, mission = _built(name)
         r = ev.aeroelastic
         assert 0.0 < r.gj_open_nmm2 < r.gj_nmm2
@@ -250,7 +266,7 @@ def test_the_margin_is_reported_as_a_band_and_gated_on_the_low_end():
     an upper one, because the truss is a diamond and a rib at a given
     chord station exists only at some heights. Carry both rather than
     pick one and call it the answer."""
-    for name in MISSIONS:
+    for name in _trimmed_fleet():
         ev, mission = _built(name)
         r = ev.aeroelastic
         assert r.margin <= r.margin_hi, f"{name}: {r.margin} > {r.margin_hi}"

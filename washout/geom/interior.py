@@ -323,7 +323,103 @@ def bay_volume(name: str, x_frac: float, box_mm, plan,
                   length_mm=float(length), x_abs_mm=float(x_abs))
 
 
-def spar_volume(fit, wall_mm: float, plan) -> Volume:
+def skin_z_mm(plan, eta: float, x_mm, which: str = LOWER, n: int = 81):
+    """Flight z of one skin of the placed section at eta, at flight x.
+
+    The section as it flies: twisted about its quarter chord, scaled,
+    swept and lifted by its dihedral. Linear between cosine-spaced chord
+    stations, which is within a few microns on these sections."""
+    st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+    c = st.chord_m * 1000.0
+    u = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n)))
+    v = st.airfoil.y_upper(u) if which == UPPER else st.airfoil.y_lower(u)
+    a = np.radians(-st.twist_deg)
+    xs = st.x_le_m * 1000.0 + 0.25 * c + c * ((u - 0.25) * np.cos(a) - v * np.sin(a))
+    zs = st.z_le_m * 1000.0 + c * ((u - 0.25) * np.sin(a) + v * np.cos(a))
+    o = np.argsort(xs)
+    return np.interp(np.asarray(x_mm, dtype=float), xs[o], zs[o])
+
+
+@dataclass(frozen=True)
+class TubeVolume:
+    """A straight tube, as the interior region it occupies.
+
+    A `Volume` keeps a fixed chord fraction and a fixed seat against one
+    skin, which is exactly the bendable spar ROADMAP-CAD.md section 0.1
+    found: a carbon tube is straight, so on a swept, dihedralled wing its
+    chord fraction drifts and its height above either skin changes along
+    the span. This carries the line itself -- flight x and z at the
+    centreline and their rates per mm of span -- and answers `band` and
+    `z_interval` from it, so every clash check that takes a `Volume`
+    takes a tube.
+
+    In a `y = const` plane a cylinder whose axis runs along (sx, 1, sz) is
+    an ELLIPSE, not a circle: r sqrt(1 + sx^2) wide along the chord and
+    r sqrt(1 + sz^2) tall. Its extent at any chord station is the root of
+
+        (1 + sz^2) dx^2 - 2 sx sz dx dz + (1 + sx^2) dz^2 = r^2 (1 + sx^2 + sz^2)
+    """
+
+    name: str
+    root_xz_mm: tuple
+    slope: tuple
+    radius_mm: float
+    """The RESERVED radius: tube plus its fit clearance."""
+    eta0: float = 0.0
+    eta1: float = 1.0
+    anchor: str = "tube"
+
+    @property
+    def height_mm(self) -> float:
+        return 2.0 * self.radius_mm
+
+    def centre_mm(self, plan, eta: float) -> tuple[float, float]:
+        y = float(eta) * plan.half_span_m * 1000.0
+        return (self.root_xz_mm[0] + self.slope[0] * y,
+                self.root_xz_mm[1] + self.slope[1] * y)
+
+    def band(self, plan, eta: float) -> tuple[float, float]:
+        st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+        c = st.chord_m * 1000.0
+        xc, _ = self.centre_mm(plan, eta)
+        hx = self.radius_mm * np.sqrt(1.0 + self.slope[0] ** 2)
+        x_le = st.x_le_m * 1000.0
+        return ((xc - hx - x_le) / c, (xc + hx - x_le) / c)
+
+    def z_interval(self, plan, eta: float, x_frac, wall_mm: float):
+        st = plan.at(float(np.clip(eta, 0.0, 1.0)))
+        c = st.chord_m * 1000.0
+        x = st.x_le_m * 1000.0 + np.asarray(x_frac, dtype=float) * c
+        xc, zc = self.centre_mm(plan, eta)
+        sx, sz = self.slope
+        dx = x - xc
+        A = 1.0 + sx * sx
+        B = -2.0 * sx * sz * dx
+        C = (1.0 + sz * sz) * dx * dx - self.radius_mm ** 2 * (1.0 + sx * sx + sz * sz)
+        disc = B * B - 4.0 * A * C
+        root = np.sqrt(np.maximum(disc, 0.0))
+        floor = skin_z_mm(plan, eta, x, LOWER) + wall_mm
+        lo = zc + (-B - root) / (2.0 * A) - floor
+        hi = zc + (-B + root) / (2.0 * A) - floor
+        empty = disc < 0.0
+        if np.ndim(lo) == 0:
+            return (1.0, 0.0) if empty else (float(lo), float(hi))
+        return np.where(empty, 1.0, lo), np.where(empty, 0.0, hi)
+
+
+def spar_volume(fit, wall_mm: float, plan):
+    """A fitted spar, as the interior region it occupies: the straight
+    tube along its own line when the fit has one, which every fit from
+    `spars.place` does."""
+    if getattr(fit, "slope", None) is not None and fit.root_xz_mm is not None:
+        return TubeVolume(name=fit.spec.name, root_xz_mm=tuple(fit.root_xz_mm),
+                          slope=tuple(fit.slope),
+                          radius_mm=0.5 * fit.spec.d_mm + fit.spec.clearance_mm,
+                          eta0=0.0, eta1=float(fit.reach_eta))
+    return _chord_fraction_volume(fit, wall_mm, plan)
+
+
+def _chord_fraction_volume(fit, wall_mm: float, plan) -> Volume:
     """A fitted spar tube, as the interior region it occupies.
 
     Chordwise extent is the tube's own diameter about the station the fit

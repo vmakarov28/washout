@@ -254,10 +254,18 @@ def gj_multicell_nmm2(plan, eta: float, wall_mm: float, n_ribs: int,
     return float(g_mpa * torque), m
 
 
-def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA) -> float:
-    """The tubes' own contribution. J = pi (D^4 - d^4) / 32."""
+def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA,
+                  eta: float | None = None) -> float:
+    """The tubes' own contribution. J = pi (D^4 - d^4) / 32.
+
+    At `eta`, only the tubes that reach it. Every tube used to be added
+    at every station, so the outer third of each wing was stiffened by
+    carbon that ends at eta 0.66 -- a third of the GJ, and reversal, the
+    binding limit on the fleet, goes as its square root."""
     total = 0.0
     for f in spar_fits:
+        if eta is not None and f.reach_eta < eta:
+            continue
         od = f.spec.d_mm
         idm = max(od - 2.0, 0.0)              # 8x6, 6x4: 1 mm wall
         total += np.pi * (od ** 4 - idm ** 4) / 32.0
@@ -332,7 +340,7 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
         gjs.append(gj_closed_nmm2(area, per, wall_mm))
         gjs_open.append(gj_open_nmm2(per, wall_mm))
         eas.append(ea_)
-    spar_gj = gj_spars_nmm2(spar_fits)
+    spar_gj = np.array([gj_spars_nmm2(spar_fits, eta=float(e_)) for e_ in etas])
     gj = _harmonic(np.array(gjs) + spar_gj)
     gj_open = _harmonic(np.array(gjs_open) + spar_gj)
     # The rib truss divides the box into cells and a multi-cell section is

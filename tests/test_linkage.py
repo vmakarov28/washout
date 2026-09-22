@@ -325,7 +325,14 @@ def test_the_build_sheet_lists_every_part_and_the_cut_list():
     assert "fuselage" in text, "the builder has to know which panel that is"
     for f in ev.spar_fits:
         assert f.spec.name in text
-        assert f"{2*f.reach_mm:.0f} mm" in text, "tip to tip, not one side"
+        # One tube a side and its joiner, or one tube tip to tip only when
+        # the line really is parallel to the span. It said tip to tip on
+        # every aircraft, and on a swept wing that tube leaves the skin.
+        if f.one_piece:
+            assert f"1 x {2*f.reach_mm:.0f} mm" in text
+        else:
+            assert f"2 x {f.reach_mm:.0f} mm" in text, "one tube a side"
+            assert f"V: {2*f.sweep_deg:.0f} deg in plan" in text
 
 
 # ------------------------------------------- the output contract, and determinism
@@ -404,7 +411,7 @@ def test_the_bom_does_not_double_count_the_pairs():
     assert "mass (all of them)" in text
     assert "| servos x2 |" not in text, "the count belongs in the qty column"
     for f in ev.spar_fits:
-        assert f"{2*f.reach_mm:.0f} mm" in text
+        assert f"{(2 if f.one_piece else 1) * f.reach_mm:.0f} mm" in text
     total = sum(i.mass_kg for i in ev.mass.items)
     assert total == pytest.approx(ev.mass.total_kg - ev.mass.shell_kg)
 

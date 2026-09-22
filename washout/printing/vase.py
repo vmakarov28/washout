@@ -86,6 +86,16 @@ class PrintSettings:
     reach the tip would force the whole wing thick to satisfy its
     thinnest tenth. `min_spar_reach_frac` is the gate for that, and it is
     a mission constraint, not a print one."""
+    spar_lines: tuple = ()
+    """Every fitted spar as the straight tube it is, flight millimetres:
+    (root_x, root_z, dx/dy, dz/dy, reach_y, rib_half_width, diameter).
+
+    When present this REPLACES `spar_avoid` and `spar_corridors`, which
+    describe a tube at a fixed chord fraction -- the tube that bent with
+    the wing (ROADMAP-CAD.md section 0.1). From the line, each panel keeps
+    its truss out of the chord band the tube actually sweeps through
+    inside that panel, and the bore gate measures at the tube's actual
+    centre in each layer, and only in the layers it reaches."""
     elevon_chord: float = 0.0
     elevon_eta: float = 1.0
     """The control surface, as the EXPORTER sees it. Zero chord means the
@@ -165,6 +175,14 @@ class LayerStack:
     same shape of mistake as the bay and its contents. `build_stack` fills
     this from the solved corridors, converting into the loop's own chord
     when the panel is truncated at the hinge line."""
+    spar_xy: np.ndarray | None = None
+    """(tubes, layers, 2): each straight tube's centre in each layer, print
+    X/Y as on the bed; NaN in the layers it does not reach. Filled from
+    `settings.spar_lines`, and when it is, the bore gate measures here."""
+    spar_ellipse: tuple = ()
+    """Per tube, (ux, uy, cos_gamma, diameter): a tube that crosses the
+    layer plane at an angle gamma cuts it in an ellipse, 1/cos(gamma)
+    longer along the in-plane direction (ux, uy)."""
     role: str = "wing"
     """"wing" or "elevon". Not decoration: two of the printability gates
     are wing-panel rules and are meaningless on a control surface. An
@@ -354,11 +372,14 @@ def build_stack(
     z = np.arange(n_layers) * step
     z = z[z <= panel_len_mm + 1e-9]
 
+    tubes = _tubes_in_panel(plan, frame, z, settings) if settings.spar_lines else None
+    avoid = (tuple(b for b in (t["band"] for t in tubes) if b is not None)
+             if tubes is not None else tuple(settings.spar_avoid))
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
                        enabled=settings.ribs,
-                       avoid=tuple(settings.spar_avoid))
+                       avoid=avoid)
     if truncated:
         # The loop now spans [0, x_hinge], so the truss has to fit the box
         # that exists. Scaled rather than clipped: the ribs keep the same
@@ -456,11 +477,64 @@ def build_stack(
     flat = contours.reshape(-1, 2)
     origin = 0.5 * (flat.min(0) + flat.max(0))
     contours -= origin
+    spar_xy, ellipse = None, ()
+    if tubes is not None:
+        local = ()
+        if tubes:
+            spar_xy = np.stack([t["xy"] for t in tubes]) - origin
+            ellipse = tuple(t["ellipse"] for t in tubes)
     return LayerStack(z_mm=z, eta=eta, contours=contours,
                       settings=settings, name=name, z_step_mm=step,
                       has_ribs=n_rib_eff > 0,
                       origin_mm=(float(origin[0]), float(origin[1])),
-                      spar_x_local=local, frame=frame)
+                      spar_x_local=local, frame=frame,
+                      spar_xy=spar_xy, spar_ellipse=ellipse)
+
+
+def _tubes_in_panel(plan, frame, z_mm, settings) -> list:
+    """Where each straight spar crosses each layer of one panel.
+
+    The tube's axis is (x0 + sx y, y, z0 + sz y); the layer at print
+    height s is the plane (y - y_p) cos(phi) + (z - z_p) sin(phi) = s, so
+    the crossing is at
+
+        y = (s + y_p cos(phi) + (z_p - z0) sin(phi)) / (cos(phi) + sz sin(phi))
+
+    and a tube exists in the layer while 0 <= y <= its reach. From the
+    crossings: the print X/Y of its centre per layer, the chord band it
+    sweeps through in this panel -- the truss has to keep out of all of
+    it, since the rib layout is solved once per panel -- and the ellipse
+    it cuts in a layer, from the angle between the tube and the panel
+    axis."""
+    from .frames import reference_etas
+    out = []
+    ca, sa = frame.cos, frame.sin
+    ay, az = frame.origin_yz_mm
+    etas = reference_etas(plan, frame, z_mm)
+    st = [plan.at(float(np.clip(e, 0.0, 1.0))) for e in etas]
+    x_le = np.array([s_.x_le_m for s_ in st]) * 1000.0
+    chord = np.array([s_.chord_m for s_ in st]) * 1000.0
+    for (x0, z0, sx, sz, reach_y, half, d) in settings.spar_lines:
+        y = (np.asarray(z_mm) + ay * ca + (az - z0) * sa) / (ca + sz * sa)
+        x, zz = x0 + sx * y, z0 + sz * y
+        X = x
+        Y = -(y - ay) * sa + (zz - az) * ca
+        here = (y >= -1e-9) & (y <= reach_y + 1e-9)
+        xy = np.where(here[:, None], np.stack([X, Y], 1), np.nan)
+        band = None
+        if here.any():
+            f = (x[here] - x_le[here]) / chord[here]
+            c_mid = float(np.median(chord[here]))
+            band = (float(0.5 * (f.min() + f.max())),
+                    float(half + 0.5 * (f.max() - f.min()) * c_mid))
+        # the tube's direction in print coordinates, and its angle to Z
+        dX, dY, dS = sx, -sa + sz * ca, ca + sz * sa
+        n_in = float(np.hypot(dX, dY))
+        cos_g = float(dS / np.sqrt(dX * dX + dY * dY + dS * dS))
+        ux, uy = ((dX / n_in, dY / n_in) if n_in > 1e-12 else (1.0, 0.0))
+        out.append({"xy": xy, "band": band,
+                    "ellipse": (float(ux), float(uy), cos_g, float(d))})
+    return out
 
 
 # ------------------------------------------------------------------- gates
@@ -807,6 +881,8 @@ def spar_fit(stack: LayerStack) -> tuple[float, float]:
     minus the fit clearance.
     """
     s = stack.settings
+    if stack.spar_xy is not None:
+        return _tube_bore(stack)
     fracs = stack.spar_x_local or (s.spar_x_frac,)
     # the inscribed circle already stops one bead inside the contour's
     # centreline, so only the fit clearance is deducted.
@@ -836,6 +912,41 @@ def spar_fit(stack: LayerStack) -> tuple[float, float]:
         if gap < best or (gap == best and best_k is not None and k < best_k):
             best, best_k = float(gap), k
     return best, (float(stack.z_mm[best_k]) if best_k is not None else 0.0)
+
+
+def _tube_bore(stack: LayerStack) -> tuple[float, float]:
+    """The bore at each straight tube's actual centre, in the layers it
+    reaches: the usable diameter is twice the distance from the centre
+    to the nearest contour segment, less a bead and the fit clearance --
+    the inscribed-circle rule, asked at the one centre that matters.
+
+    The tube crosses a layer at an angle, so its section is an ellipse,
+    1/cos(gamma) longer along its in-plane direction. Compressing the
+    contour along that direction by cos(gamma), about the centre, turns
+    the ellipse into the circle and leaves the question a distance.
+    -> (smallest margin-adjusted diameter, the Z where it is)."""
+    s = stack.settings
+    best, best_z = np.inf, 0.0
+    c = stack.contours
+    for xy, (ux, uy, cos_g, d) in zip(stack.spar_xy, stack.spar_ellipse):
+        here = np.flatnonzero(np.isfinite(xy[:, 0]))
+        if here.size == 0:
+            continue
+        rel = c[here] - xy[here][:, None, :]
+        along = rel[..., 0] * ux + rel[..., 1] * uy
+        rel = rel - (1.0 - cos_g) * along[..., None] * np.array([ux, uy])
+        a = rel
+        ab = np.roll(a, -1, axis=1) - a
+        den = np.maximum(np.einsum("lij,lij->li", ab, ab), 1e-12)
+        t = np.clip(-np.einsum("lij,lij->li", a, ab) / den, 0.0, 1.0)
+        dist = np.linalg.norm(a + t[..., None] * ab, axis=2).min(1)
+        # against `spar_d_mm`, the tube the structure sized, which is what
+        # `check` compares it with -- as the chord-fraction gate did
+        gap = 2.0 * dist - s.extrusion_width_mm - s.spar_clearance_mm
+        k = int(np.argmin(gap))
+        if gap[k] < best:
+            best, best_z = float(gap[k]), float(stack.z_mm[here[k]])
+    return best, best_z
 
 
 def check(stack: LayerStack) -> Printability:

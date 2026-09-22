@@ -940,3 +940,208 @@ def test_every_joint_is_on_the_build_sheet():
     m = build_sheet.manifest(ev, ev.panels + ev.elevons, ev.print_settings)
     assert all("placement" in part for part in m["half_wing_parts"]
                if part["profile"] == "vase")
+
+
+# ------------------------------------------------- a spar is a straight tube
+
+def _inside_section(plan, eta, x_mm, z_mm):
+    """Independent of the fitter: is each flight (x, z) inside the placed
+    section at eta? Built from `Planform.at` and the CST surfaces alone."""
+    st = plan.at(float(eta))
+    c = st.chord_m * 1000.0
+    a = np.radians(-st.twist_deg)
+    u = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, 401)))
+    out = []
+    for v in (st.airfoil.y_upper(u), st.airfoil.y_lower(u)):
+        xs = st.x_le_m * 1000.0 + 0.25 * c + c * ((u - 0.25) * np.cos(a) - v * np.sin(a))
+        zs = st.z_le_m * 1000.0 + c * ((u - 0.25) * np.sin(a) + v * np.cos(a))
+        o = np.argsort(xs)
+        out.append((xs[o], zs[o]))
+    (xu, zu), (xl, zl) = out
+    x_mm, z_mm = np.asarray(x_mm), np.asarray(z_mm)
+    return ((x_mm > max(xu[0], xl[0])) & (x_mm < min(xu[-1], xl[-1]))
+            & (z_mm < np.interp(x_mm, xu, zu)) & (z_mm > np.interp(x_mm, xl, zl)))
+
+
+def _tube_ring(f, y, r, n=24):
+    """Points around a straight tube's section by the plane at span y: an
+    ellipse, because the tube crosses the plane at an angle."""
+    sx, sz = f.slope
+    x0, z0 = f.centre_mm(y)
+    m = float(np.hypot(sx, sz))
+    e1 = np.array([sx, sz]) / m if m > 1e-12 else np.array([1.0, 0.0])
+    e2 = np.array([-e1[1], e1[0]])
+    th = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    p = (np.cos(th)[:, None] * r * np.sqrt(1 + sx * sx + sz * sz) * e1
+         + np.sin(th)[:, None] * r * e2)
+    return x0 + p[:, 0], z0 + p[:, 1]
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "demon1", "micro", "micro_fpv"])
+def test_a_spar_is_a_straight_tube_inside_the_wing(name):
+    """The fit asked whether the section was deep enough at one chord
+    fraction, station by station, which let the tube bend with the sweep
+    and the dihedral: it claimed eta 0.76-1.00 where a straight tube
+    reaches 0.66-0.69, and the build sheet asked for one tube tip to tip
+    that left the skin at eta 0.25-0.43 on every aircraft.
+
+    Checked here without the fitter's own machinery: the straight tube,
+    with its fit clearance, is inside the section at 400 stations from
+    the root to its reach -- more than twice the fitter's resolution --
+    and would NOT be at a station just past where the fit stopped, so the
+    reach is the geometry's and not a cautious guess."""
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, s = _fleet_design(name)
+    mission = getattr(Mission, name)()
+    H = plan.half_span_m * 1000.0
+    for f in sp.fit_all(plan, mission.spars, 0.45,
+                        min_reach=mission.min_spar_reach_frac):
+        r = sp.fit_radius_mm(f.spec, 0.45)
+        for y in np.linspace(0.0, f.reach_y_mm, 400):
+            x, z = _tube_ring(f, y, r)
+            assert _inside_section(plan, y / H, x, z).all(), (
+                f"{name} {f.spec.name}: the straight tube leaves the wing at "
+                f"eta {y / H:.3f}, inside its claimed reach {f.reach_eta:.3f}")
+        if f.reach_eta < 0.97:
+            sx, sz = f.slope
+            lean = np.hypot(sx, sz)
+            beyond = (f.reach_y_mm + r * lean / np.sqrt(1 + lean * lean)
+                      + 2.0 * H / 160)
+            x, z = _tube_ring(f, beyond, r)
+            assert not _inside_section(plan, beyond / H, x, z).all(), (
+                f"{name} {f.spec.name}: the tube still fits past its reach")
+
+
+def test_the_old_fit_let_the_tube_bend():
+    """The finding, pinned so it cannot quietly come back. The trainer's LE
+    spar, asked the old question -- is there depth at 0.21c, station by
+    station -- 'reaches' the tip. The straight tube does not get past
+    seven tenths of the span."""
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("trainer_v3")
+    spec = Mission.trainer_v3().spars[0]
+    assert sp.reach_of(plan, 0.21, spec, 0.45) >= 0.95
+    f = sp.fit_all(plan, (spec,), 0.45)[0]
+    assert f.reach_eta <= 0.72 and not f.one_piece
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "demon1", "micro", "micro_fpv"])
+def test_every_fitted_tube_passes_the_print_bore(name):
+    """The fit works on the loft in the flight frame; the bore gate works on
+    the printed layers, at the tube's own centre, with the ellipse a tube
+    cuts in a tilted layer. The fit's clearance is the stricter of the two,
+    so a tube the fit seats must pass the gate -- and micro's did not, by
+    0.09 mm at its last layer, because a cut tube's end face is square to
+    its axis and on a 46 degree tube reaches 3.3 mm further out than the
+    axis does, into section no station had checked."""
+    from dataclasses import replace
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, s = _fleet_design(name)
+    mission = getattr(Mission, name)()
+    spans = vase.panel_etas(plan, s)
+    d = mission.spar_d_mm
+    fits = sp.fit_all(plan, mission.spars, 0.45, spans,
+                      min_reach=mission.min_spar_reach_frac)
+    lines = tuple((f.root_xz_mm[0], f.root_xz_mm[1], f.slope[0], f.slope[1],
+                   f.reach_y_mm, 0.5 * d + 0.225 + f.spec.clearance_mm, d)
+                  for f in fits)
+    s = replace(s, spar_d_mm=d, spar_lines=lines)
+    for pan in vase.build_panels(plan, s, z_step_mm=0.5):
+        v, z = vase.spar_fit(pan)
+        assert v >= d, f"{pan.name}: {v:.2f} mm of bore at z {z:.1f} for a {d:.0f} mm tube"
+
+
+def test_a_tube_is_weighed_where_its_mass_is():
+    """A straight tube swept 47 degrees has its mass well aft of its root
+    seat. Charged at the seat, as every tube was, micro_fpv's CG sat well
+    forward of where it is and its static margin read 0.132 where it is
+    0.09 -- inside its band where it is outside it."""
+    from washout import spars as sp
+    from washout import structure as st
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("micro_fpv")
+    m = Mission.micro_fpv()
+    f = sp.fit_all(plan, m.spars, 0.45, min_reach=m.min_spar_reach_frac)[0]
+    root_c = plan.stations[0].chord_m * 1000.0
+    (_, kg, x_frac), = st.spar_masses([f], 6.0, root_chord_mm=root_c)
+    assert x_frac * root_c == pytest.approx(f.centroid_x_mm())
+    assert f.centroid_x_mm() > f.root_xz_mm[0] + 50.0
+    tube = st.tube_for_od(6.0)
+    assert kg == pytest.approx(tube.mass_g(2.0 * f.reach_mm) * 1e-3)
+
+
+def test_tube_stiffness_stops_where_the_tube_does():
+    """The torsion model added every tube at every span station, so the
+    outer third of each wing was stiffened by carbon that ends at eta
+    0.66 -- and reversal, the binding aeroelastic limit on the fleet,
+    goes as the square root of that stiffness."""
+    from washout import aeroelastic as ael
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("micro_fpv")
+    m = Mission.micro_fpv()
+    fits = sp.fit_all(plan, m.spars, 0.45, min_reach=m.min_spar_reach_frac)
+    assert ael.gj_spars_nmm2(fits, eta=0.5 * fits[0].reach_eta) > 0.0
+    assert ael.gj_spars_nmm2(fits, eta=min(fits[0].reach_eta + 0.05, 1.0)) == 0.0
+
+
+def test_the_build_sheet_asks_for_the_tube_that_exists():
+    """BUILD.md said 'each tube runs tip to tip through the centre body --
+    one length, not two meeting at the centreline' on a 48.7 degree swept
+    wing, where that tube leaves the skin a quarter of the way out. It now
+    says what the fit found: one tube a side and the V joiner's angles, or
+    one tube only when the line really is parallel to the span."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro_fpv"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro_fpv(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=6.0,
+                                     bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    bom = build_sheet.bom(ev, ev.panels + ev.elevons)
+    for f in ev.spar_fits:
+        if f.one_piece:
+            assert "tip to tip" in text
+        else:
+            assert "tip to tip through the centre body" not in text
+            assert f"V: {2 * f.sweep_deg:.0f} deg in plan" in text
+            assert "V joiner" in bom
+
+
+def test_an_untrimmed_design_keeps_what_it_knows():
+    """A design rejected at trim used to come back with its plan, its mass
+    and nothing else: no print settings, no spar fits, no mechanism, no
+    parts -- all computed, all thrown away. So exporting one, which is how
+    you find out WHY it will not fly, crashed on settings that were never
+    handed back, and every check of the parts silently skipped it.
+
+    micro's tracked design is the live example: weighed where its swept
+    tube's mass really is, it no longer trims. It must still carry its
+    parts, and its build sheet must say plainly that it does not trim."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                                     bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    if ev.trim is not None:
+        pytest.skip("micro trims again -- re-searched; nothing left to pin here")
+    assert any("no trim angle" in r for r in ev.reasons)
+    assert ev.print_settings is not None and ev.panels
+    assert ev.spar_fits and ev.linkage is not None and ev.mass is not None
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert "does not trim" in text
+    assert "## Joints" in text and "## Spar cut list" in text

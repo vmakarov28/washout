@@ -53,6 +53,23 @@ two defects on: its build sheet told the builder to run a straight 6 mm
 tube tip to tip through a 48.7° swept wing, and its outer panel printed
 straight where the loft rises 66 mm. Both change its verdict once fixed.
 
+## 2026-09-22: straight tubes and sliced panels
+
+Two defects were fixed on this date (`docs/ROADMAP-CAD.md` section 0):
+the spars were modelled as tubes that bend with the wing, and the
+printed panels as straight where the loft curves. Re-checked with both
+fixed, **none of the four tracked designs is feasible**:
+
+| | now misses, among others |
+|---|---|
+| trainer | neither straight tube reaches the joint at eta 0.74; SM +0.128; wing loading 26.9; 350 g |
+| demon1 | neither tube reaches eta 0.63; reversal 0.70x (was 0.92x) -- the tubes' stiffness now stops where they do |
+| micro | does not trim: its 46 deg tube weighs 44 mm aft of where it was charged, and SM fell to +0.012 |
+| micro_fpv | SM +0.091 against 0.12, for the same reason; trims 10.1 deg |
+
+Every one of those is the aircraft changing. A re-search is what closes
+them, and it searches the aircraft that would be built.
+
 ## All three are now infeasible, and that is the point
 
 The table above is the state as **searched**. Since then two pieces of

@@ -92,7 +92,8 @@ def tube_for_od(od_mm: float, tubes=STOCK_TUBES) -> SparTube:
     return tubes[-1]
 
 
-def spar_masses(fits, od_mm: float, tubes=STOCK_TUBES) -> tuple:
+def spar_masses(fits, od_mm: float, tubes=STOCK_TUBES,
+                root_chord_mm: float | None = None) -> tuple:
     """Price the spars that were actually FITTED.
 
     -> ((name, mass_kg, x_frac), ...), one entry per corridor.
@@ -104,11 +105,13 @@ def spar_masses(fits, od_mm: float, tubes=STOCK_TUBES) -> tuple:
     reaching eta 0.76. Nothing connected the three, so the second tube was
     never weighed at all and the first was weighed by guess.
 
-    Length is twice each spar's own measured reach, because one tube runs
-    tip to tip through the centre body rather than two meeting at the
-    centreline. Chordwise position is the station the fit SOLVED for, not
-    a nominal 0.30c -- a spanwise tube's mass sits at its own x, and on a
-    swept wing the LE and TE corridors are 80 mm apart.
+    Length is twice each spar's own measured reach: one straight tube a
+    side, meeting its mirror image in a joiner at the centreline, or one
+    tube tip to tip when the line is parallel to the span. (This used to
+    say one tube always ran tip to tip. On a swept wing it cannot.)
+    Chordwise position is where the fit SOLVED for, not a nominal 0.30c --
+    a spanwise tube's mass sits at its own x, and on a swept wing the LE
+    and TE corridors are 80 mm apart.
 
     Every corridor is priced at the same `od_mm`, which is the bending
     member's diameter. The aft tube is a torsion member and almost
@@ -119,10 +122,22 @@ def spar_masses(fits, od_mm: float, tubes=STOCK_TUBES) -> tuple:
     adhesive follows from bonded area, which becomes a real quantity when
     the joints get their shear gate (ROADMAP-BUILD.md C1/C2). A declared
     guess here is exactly the thing this function exists to delete.
+
+    A straight tube -- which every fit is now (ROADMAP-CAD.md section 0.1)
+    -- is priced at its own LENGTH, `reach_mm` being measured along the
+    tube, and its mass sits at the middle of that length, which on a swept
+    wing is well aft of its root seat. Given `root_chord_mm` that centroid
+    comes back as a root-chord fraction, the unit the caller multiplies.
     """
     tube = tube_for_od(od_mm, tubes)
+
+    def x_of(f):
+        if root_chord_mm and getattr(f, "slope", None) is not None:
+            return f.centroid_x_mm() / root_chord_mm
+        return float(f.x_frac)
+
     return tuple((f.spec.name, tube.mass_g(2.0 * float(f.reach_mm)) * 1e-3,
-                  float(f.x_frac)) for f in fits)
+                  x_of(f)) for f in fits)
 
 
 @dataclass(frozen=True)

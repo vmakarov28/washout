@@ -267,7 +267,19 @@ class LayerStack:
         n = (N + 1) // 2
         up = self.contours[:, :n][:, ::-1]      # LE -> TE
         lo = self.contours[:, n - 1:]           # LE -> TE
-        return np.linalg.norm(up - lo, axis=2)[:, 1:]
+        sep = np.linalg.norm(up - lo, axis=2)[:, 1:]
+        # The round NOSE is not two walls. Pairs within a few beads of the
+        # leading edge, measured ALONG the loop, are one bead turning round
+        # it, and their straight-line distance says nothing about whether
+        # two walls weld: at 0.04 mm aft of the vertex it is 0.3 mm on
+        # every section, by geometry. The nose used to pass only because
+        # the nozzle floor blunted it into a 1 mm flat (thicken_for_nozzle).
+        def along(skin):
+            seg = np.linalg.norm(np.diff(skin, axis=1), axis=2)
+            return np.cumsum(seg, axis=1)
+        path = along(up) + along(lo)
+        return np.where(path < 4.0 * self.settings.extrusion_width_mm,
+                        np.inf, sep)
 
     def extrusion_length_mm(self) -> float:
         seg = np.linalg.norm(np.diff(self.contours, axis=1), axis=2).sum(1)
@@ -325,7 +337,18 @@ def thicken_for_nozzle(
 
     t_min = (settings.min_te_mm if min_te_mm is None else min_te_mm) / chord_mm
     eps = max(settings.te_blend / chord_mm, 1e-6)
-    t_new = 0.5 * (t + t_min + np.sqrt((t - t_min) ** 2 + eps**2))
+    t_floor = 0.5 * (t + t_min + np.sqrt((t - t_min) ** 2 + eps**2))
+    # The TRAILING edge only, blended in over 0.35c-0.65c where the section
+    # is many beads thick and the floor changes nothing. Applied along the
+    # whole chord, it also raised the NOSE -- where the vertical thickness
+    # is zero by construction, because the nose is round -- to the floor:
+    # the shared leading-edge vertex went to +0.5 mm and the next point
+    # below it to -0.47 mm, 0.04 mm aft. Every printed section carried a
+    # 1 mm vertical flat for a nose, and the CAD export could not fit one
+    # smooth skin through it without a seam at the leading edge.
+    w = np.clip((x - 0.35) / 0.30, 0.0, 1.0)
+    w = w * w * (3.0 - 2.0 * w)
+    t_new = t + w * (t_floor - t)
 
     up = np.stack([x, cam + 0.5 * t_new], 1)
     lo = np.stack([x, cam - 0.5 * t_new], 1)
@@ -979,7 +1002,8 @@ def check(stack: LayerStack) -> Printability:
         # because it is O(n^2) per layer and the geometry varies smoothly
         # with Z.
         step = max(len(stack.contours) // 40, 1)
-        t_min = min(min_clearance_mm(c, skip=8)
+        t_min = min(min_clearance_mm(c, skip=8,
+                                     min_path_mm=4.0 * s.extrusion_width_mm)
                     for c in stack.contours[::step])
         detail = f"general contour clearance, {stack.settings.rib_count} ribs"
     else:

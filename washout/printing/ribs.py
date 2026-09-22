@@ -353,7 +353,8 @@ def rib_point_budget(spec: RibSpec) -> int:
     return POINTS_PER_RIB * max(spec.n_ribs, 0) if spec.enabled else 0
 
 
-def min_clearance_mm(contour_mm: np.ndarray, skip: int = 6) -> float:
+def min_clearance_mm(contour_mm: np.ndarray, skip: int = 6,
+                     min_path_mm: float | None = None) -> float:
     """Closest approach between non-adjacent parts of one contour.
 
     With ribs the old upper/lower index pairing no longer describes the
@@ -382,4 +383,18 @@ def min_clearance_mm(contour_mm: np.ndarray, skip: int = 6) -> float:
     idx = np.arange(m)
     sep = np.abs((idx[:, None] - idx[None, :] + m // 2) % m - m // 2)
     d[sep <= skip] = np.inf
+    if min_path_mm is not None:
+        # Neighbours by distance ALONG THE LOOP as well as by index. At the
+        # nose the chord stations are cosine-packed, so eight indices is a
+        # sliver of arc there, and a round nose read as two walls closing
+        # to 0.42 mm on micro_fpv's tip -- which the nozzle floor had been
+        # hiding by blunting every nose into a 1 mm flat. Two points more
+        # than `min_path_mm` apart along the loop and still within a bead
+        # of each other really are two walls: a rib's legs are, and so is a
+        # nose tighter than about a bead's radius.
+        seg = np.linalg.norm(ab, axis=1)
+        s_ = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
+        per = float(seg.sum())
+        ds = np.abs(s_[:, None] - s_[None, :])
+        d[np.minimum(ds, per - ds) < min_path_mm] = np.inf
     return float(d.min())

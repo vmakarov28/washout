@@ -1145,3 +1145,62 @@ def test_an_untrimmed_design_keeps_what_it_knows():
     text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
     assert "does not trim" in text
     assert "## Joints" in text and "## Spar cut list" in text
+
+
+# ------------------------------------------- the nose, and the chamfer corner
+
+def test_the_nose_is_round_not_a_flat():
+    """`thicken_for_nozzle` exists for the TRAILING edge, and it applied its
+    floor along the whole chord -- including the nose, where the vertical
+    thickness is zero by construction because the nose is round. So the
+    shared leading-edge vertex went to +0.5 mm and the next point below it
+    to -0.47 mm, 0.04 mm aft: every printed section had a 1 mm vertical
+    flat for a nose, and no smooth skin could be fitted through it without
+    a seam at the leading edge.
+
+    The floor now blends in over 0.35c-0.65c. The nose is the aerofoil's,
+    the trailing edge still carries its millimetre, and the wall gates no
+    longer mistake one bead turning round the nose for two walls: they
+    skip neighbours by distance along the loop, not only by index.
+
+    One gate got harder, and it is recorded rather than tuned: micro's
+    centre body overhangs 51.4 degrees at z = 14 mm, where its rounded
+    planform nose sweeps fastest, against 48.8 with the flat nose. The
+    flat was not more printable; it read better under a metric that
+    measures to the nearest wall."""
+    from washout.search.design import Mission, build
+    base = cst.load_selig(ASSETS / "mh45.dat")
+    plan, s = _fleet_design("micro_fpv")
+    for e in (0.0, 0.5, 0.9):
+        st = plan.at(e)
+        c = st.chord_m * 1000.0
+        raw = st.airfoil.coords(s.contour_points)
+        th = vase.thicken_for_nozzle(raw, c, s)
+        n = (len(raw) + 1) // 2
+        assert np.allclose(th[n - 3:n + 2], raw[n - 3:n + 2]), "the nose moved"
+        up, lo = th[:n][::-1], th[n - 1:]
+        assert (up[-1, 1] - lo[-1, 1]) * c >= s.min_te_mm - 1e-6, "the TE lost its floor"
+    for stack in vase.build_panels(plan, s, z_step_mm=2.0):
+        assert vase.check(stack).ok, stack.name
+
+
+def test_the_elevon_chamfer_corner_is_a_vertex_on_every_layer():
+    """The corner where the bevel meets the lower skin fell between two
+    cosine samples, so the printed contour cut it with a chord, and as it
+    moved along the span the turn hopped from one vertex to the next --
+    triangles twisted across it in the STL, and the CAD export, skinning
+    pieces that were not the same piece from one layer to the next,
+    wandered 3.8 mm between sections. It is a vertex now, at the same
+    index on every layer, and the whole turn happens there."""
+    from washout.printing import elevons as elv
+    plan, s = _fleet_design("trainer_v3")
+    spans = vase.panel_etas(plan, s)
+    for part in elv.build_elevons(plan, s, spans, 16.0, z_step_mm=2.0):
+        n = part.n_upper
+        corner = set()
+        for c in part.contours:
+            a = np.diff(c[n:], axis=0)
+            a /= np.linalg.norm(a, axis=1, keepdims=True)
+            turn = np.degrees(np.arccos(np.clip((a[:-1] * a[1:]).sum(1), -1, 1)))
+            corner.add(int(np.flatnonzero(turn >= 30.0)[-1]))
+        assert len(corner) == 1, (part.name, sorted(corner))

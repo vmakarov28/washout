@@ -120,8 +120,36 @@ def elevon_loop(loop_unit: np.ndarray, x_hinge: float, chord_mm: float,
     xs_old = upper[:, 0]
 
     x0 = x_hinge + gap_mm / max(chord_mm, 1e-9)
-    t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n)))
-    xs = x0 + (1.0 - x0) * t
+    tb = max(np.tan(np.radians(chamfer_deg)), 1e-3)
+    y_axis = float(np.interp(x0, xs_old, upper[:, 1]))
+
+    # A VERTEX ON THE CHAMFER'S CORNER, at the same index on every layer.
+    # The corner where the bevel meets the lower skin used to fall between
+    # two cosine samples, so the printed contour cut it with a chord, and
+    # as it moved along the span the turn hopped from one vertex to the
+    # next -- the STL's triangles twisted across it and the CAD export,
+    # skinning pieces that were not the same piece from layer to layer,
+    # wandered 3.8 mm between sections. So the chord stations are two
+    # cosine runs, nose to corner and corner to trailing edge, meeting
+    # exactly at the corner. Upper and lower still share every station,
+    # which the thickness gate's pairing needs.
+    xf = np.linspace(x0, 1.0, 2001)
+    gap_f = (y_axis - (xf - x0) / tb) - np.interp(xf, xs_old, lower[:, 1])
+    x_corner = None
+    below = np.flatnonzero(gap_f <= 0.0)
+    if below.size and below[0] > 0:
+        i = int(below[0])
+        g0, g1 = gap_f[i - 1], gap_f[i]
+        x_corner = float(xf[i - 1] + (xf[i] - xf[i - 1]) * g0 / (g0 - g1))
+    if x_corner is not None and x_corner < x0 + 0.9 * (1.0 - x0):
+        n_a = max(6, n // 6)
+        ta = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_a)))
+        tb_ = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n - n_a + 1)))[1:]
+        xs = np.concatenate([x0 + (x_corner - x0) * ta,
+                             x_corner + (1.0 - x_corner) * tb_])
+    else:
+        t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n)))
+        xs = x0 + (1.0 - x0) * t
     up = np.stack([xs, np.interp(xs, xs_old, upper[:, 1])], 1)
     lo = np.stack([xs, np.interp(xs, xs_old, lower[:, 1])], 1)
 
@@ -145,8 +173,6 @@ def elevon_loop(loop_unit: np.ndarray, x_hinge: float, chord_mm: float,
     # thickness and the bevel runs aft from there: that residual corner is
     # only 1 mm deep, so it swings 1 mm * sin(beta) -- under 0.3 mm --
     # which the hinge gap covers.
-    y_axis = float(up[0, 1])
-    tb = max(np.tan(np.radians(chamfer_deg)), 1e-3)
     y_floor = y_axis - (xs - x0) / tb
     t_min = settings_min_te_frac(chord_mm)
     lo[:, 1] = np.minimum(np.maximum(lo[:, 1], y_floor), up[:, 1] - t_min)

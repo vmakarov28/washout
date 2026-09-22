@@ -157,14 +157,18 @@ def test_a_ribbed_panel_measures_clearance_generally():
     index. A slit inserts vertices into ONE skin, so from the slit aft
     every pairing is off and the gate would measure a vertex against the
     wrong mirror point. Ribbed, the gate takes the general
-    vertex-to-segment path instead."""
+    vertex-to-segment path instead -- skipping neighbours by distance
+    along the loop as well as by index, because at a round nose eight
+    cosine-packed indices are a sliver of arc and the two sides of the
+    nose are not two walls."""
     _, _, _, plan = _plan("trainer_v3")
     s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0, ribs=True)
     pan = next(p for p in vase.build_panels(plan, s) if p.has_ribs)
     chk = vase.check(pan)
     g = next(x for x in chk.gates if x.name == "min wall separation")
     step = max(len(pan.contours) // 40, 1)
-    general = min(min_clearance_mm(c, skip=8) for c in pan.contours[::step])
+    general = min(min_clearance_mm(c, skip=8, min_path_mm=4.0 * s.extrusion_width_mm)
+                  for c in pan.contours[::step])
     assert abs(g.value - general) < 1e-9, (
         f"gate measured {g.value:.3f} mm, the general test says {general:.3f}")
     assert "ribs" in g.detail

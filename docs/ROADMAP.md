@@ -1,11 +1,15 @@
 # What is left between here and a flying wing nobody touched
 
-> Two roadmaps, two axes. **This one is whether the numbers are true.**
+> Three roadmaps, three axes. **This one is whether the numbers are true.**
 > [`ROADMAP-BUILD.md`](ROADMAP-BUILD.md) is whether the parts are
 > buildable without a CAD step. They meet in two places: opening a
 > battery bay destroys the closed torsion box that item 9's flutter
 > gate depends on, and the linkage gate there is what finally proves
 > the elevon deflection demon1's speed objective assumes.
+> [`ROADMAP-CAD.md`](ROADMAP-CAD.md) is the third dimension: a model of
+> the aircraft as built that a geometry kernel can check, the STEP
+> export that falls out of it, and the run modes. Its section 0 found
+> the two defects in item 0 below.
 
 washout already goes from a 35-number design vector to STLs a slicer will
 print in spiral-vase mode, and judges the whole way with a lattice, a
@@ -34,6 +38,31 @@ designs *unrepresentable* over penalising them.
 ---
 
 # A. The numbers are not the numbers
+
+## 0. Two facts that live between the sections - P0, above everything
+
+Found 2026-09-22, and both are the one discipline again: the scored
+aircraft and the built aircraft were different aircraft. Evidence and
+the fixes are in [`ROADMAP-CAD.md`](ROADMAP-CAD.md) sections 0 and 1.
+
+- **The spars bend.** `spars.reach_of` let each tube follow its corridor
+  through the sweep and the dihedral. A straight tube per half reaches
+  eta 0.66-0.69 where the solver claimed 0.76-1.00, a single tube "tip to
+  tip", as `BUILD.md` instructed, leaves the skin at 0.25-0.43 on every
+  aircraft, and the mass, tip deflection and GJ were all computed on tube
+  that is not there. Item 1 below weighed the fitted spars; the fit
+  itself was wrong.
+- **The panels are straight.** `build_stack` never used `z_le`, so each
+  printed panel is straight while the lattice scored a curve: up to
+  4.1 mm off the loft with a panel per control station, 9.0 mm with the
+  minimal split, joint kinks to 21 deg that nothing reported, and outer
+  sections printed `1/cos(phi)` too thick (+13% on the trainer's tip
+  panel).
+
+Both are fixed by making the built geometry follow from the loft in 3D,
+and both will move the fleet. Tier 0 also turned out to run at 12 s an
+evaluation against the 0.4 s CLAUDE.md promises, which is the reason
+gen6's searches were cut to popsize 4; that is item 1.3 there.
 
 ## 1. Charge the spars that were actually fitted - P0
 
@@ -515,6 +544,10 @@ Carried forward. These are not preferences.
 
 # Suggested order
 
+0. Item 0, in the order `ROADMAP-CAD.md` section 5 gives: tier 0 back at
+   its contract first (it changes no number, and it makes everything
+   after it cheaper to check), then true-slice panels, then straight
+   spars.
 1. Items 1, 3 and 4 together - one afternoon, and every number after them
    is trustworthy in a way nothing before them is.
 2. Item 2, after asking about the aft tube.

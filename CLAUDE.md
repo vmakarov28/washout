@@ -13,6 +13,11 @@ reported numbers are not yet the numbers that would be built.
 export prints and flies without a CAD step. Its section 0 derives what
 the one-contour-per-layer constraint does and does not allow, and every
 feature request should be classified against it before being designed.
+`docs/ROADMAP-CAD.md` is the third: the aircraft in 3D. Every gate looks
+at one section at a time, and a tube being straight or a panel being
+straight lives between sections -- both were wrong until 2026-09-22. The
+STEP export (OpenCASCADE, an optional install, never imported by the
+search) is built from the loft and checks the print against it.
 
 ## Non-negotiable rules
 

@@ -10,6 +10,11 @@
   horns, mounts, wiring, FPV. Starts from the constraint that decides
   every answer — one closed contour per layer — and classifies every
   feature by what that constraint allows.
+- **[ROADMAP-CAD.md](ROADMAP-CAD.md)** — the third dimension: the two
+  defects a section-at-a-time pipeline could not see (bent spars,
+  straight panels), a STEP export built from the loft with rules for what
+  makes a CAD file usable, 3D conformance gates, and the run modes the
+  fidelity ladder should have as commands.
 - **[how-washout-designs-aircraft.html](how-washout-designs-aircraft.html)**
   — the long-form narrative: the pipeline, every model in it, and every
   bug found so far with what it cost. Open it in a browser.

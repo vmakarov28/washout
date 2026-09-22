@@ -17,6 +17,8 @@ discovering that wings need camber.
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -63,6 +65,55 @@ class SearchLog:
             self.history = []
 
 
+# ------------------------------------------------ parallel evaluation
+#
+# A search used ONE core. gen6 ran nine searches on a 24-thread machine,
+# which cannot exceed 37% of it, and as searches finished the average fell
+# to about 20% -- while differential evolution with deferred updating is
+# embarrassingly parallel across a generation. So each search can
+# evaluate its population in a pool of worker processes. The bookkeeping
+# -- best so far, feasible count, the history the log keeps -- stays in
+# the parent, fed by the map DE calls, because a worker's copy of the log
+# would be thrown away with the worker.
+
+_WORKER: dict = {}
+
+
+def lower_priority() -> None:
+    """Below-normal priority: a search is background work, and the machine
+    has other things on it -- a desktop, and a WSL session nothing here may
+    disturb (ROADMAP.md, hard constraints)."""
+    try:
+        import psutil
+        proc = psutil.Process()
+        proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _init_worker(mission, base, settings, ns, nc, z_step, drag) -> None:
+    lower_priority()
+    _WORKER.update(mission=mission, base=base, settings=settings, ns=ns,
+                   nc=nc, z_step=z_step, drag=drag)
+
+
+def _summary(ev: Evaluation) -> dict:
+    return {"ok": bool(ev.ok), "score": float(ev.score), "ld": float(ev.ld),
+            "v": float(ev.v_cruise), "mass_g": float(ev.mass_kg * 1000.0),
+            "sm": float(ev.static_margin), "line": ev.line()}
+
+
+def _evaluate_in_worker(u: np.ndarray):
+    """-> (summary, None), or (None, why) when the geometry refused."""
+    w = _WORKER
+    try:
+        ev = evaluate(u, w["mission"], w["base"], w["settings"], ns=w["ns"],
+                      nc=w["nc"], z_step_mm=w["z_step"], drag=w["drag"])
+    except Exception as e:                              # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+    return _summary(ev), None
+
+
 def run_search(
     mission: Mission,
     base: Airfoil,
@@ -83,11 +134,10 @@ def run_search(
     log = SearchLog()
     t0 = time.perf_counter()
 
-    def objective(u: np.ndarray) -> float:
-        try:
-            ev = evaluate(u, mission, base, settings, ns=ns, nc=nc,
-                          z_step_mm=search_z_step_mm, drag=drag)
-        except Exception as e:                       # noqa: BLE001
+    def record(u: np.ndarray, summary: dict | None, why: str | None) -> float:
+        """The parent's bookkeeping for one evaluated design -> DE's value."""
+        log.evaluations += 1
+        if summary is None:
             # A design whose GEOMETRY cannot be built is infeasible, not
             # fatal. Four of gen6's nine searches died on one candidate
             # each, hours in, because two openings wanted the same chord
@@ -95,31 +145,52 @@ def run_search(
             # non-number and stopped. The gates that should have caught
             # it are fixed, and this is the net under them: the cause is
             # logged, the design is rejected, and the run continues.
-            log.evaluations += 1
             log.geometry_failures += 1
             if verbose and log.geometry_failures <= 5:
-                print(f" !![{log.evaluations:6d}] geometry refused: "
-                      f"{type(e).__name__}: {e}")
+                print(f" !![{log.evaluations:6d}] geometry refused: {why}")
             return 1e7
-        log.evaluations += 1
-        log.feasible += int(ev.ok)
-        if ev.ok and ev.score > log.best_feasible_score:
-            log.best_feasible_score = float(ev.score)
+        log.feasible += int(summary["ok"])
+        if summary["ok"] and summary["score"] > log.best_feasible_score:
+            log.best_feasible_score = summary["score"]
             log.best_feasible_u = list(map(float, u))
-        if ev.score > log.best_score:
-            log.best_score = float(ev.score)
+        if summary["score"] > log.best_score:
+            log.best_score = summary["score"]
             log.best_u = list(map(float, u))
             log.history.append({
-                "eval": log.evaluations, "score": ev.score, "ld": ev.ld,
-                "v": ev.v_cruise, "mass_g": ev.mass_kg * 1000,
-                "sm": ev.static_margin, "ok": ev.ok,
-                "t_s": time.perf_counter() - t0,
+                "eval": log.evaluations, "score": summary["score"],
+                "ld": summary["ld"], "v": summary["v"],
+                "mass_g": summary["mass_g"], "sm": summary["sm"],
+                "ok": summary["ok"], "t_s": time.perf_counter() - t0,
             })
             if verbose:
-                tag = "  " if ev.ok else " ~"
-                print(f"{tag}[{log.evaluations:6d}] score {ev.score:7.3f}"
-                      f"{ev.line()}", flush=True)
-        return -ev.score
+                tag = "  " if summary["ok"] else " ~"
+                print(f"{tag}[{log.evaluations:6d}] score {summary['score']:7.3f}"
+                      f"{summary['line']}", flush=True)
+        return -summary["score"]
+
+    def objective(u: np.ndarray) -> float:
+        try:
+            ev = evaluate(u, mission, base, settings, ns=ns, nc=nc,
+                          z_step_mm=search_z_step_mm, drag=drag)
+        except Exception as e:                       # noqa: BLE001
+            return record(u, None, f"{type(e).__name__}: {e}")
+        return record(u, _summary(ev), None)
+
+    pool = None
+    de_workers = 1
+    if workers > 1:
+        # spawn, not fork: the same on Windows and Linux, and a worker that
+        # starts clean cannot inherit a half-built cache from the parent
+        pool = mp.get_context("spawn").Pool(
+            workers, initializer=_init_worker,
+            initargs=(mission, base, settings, ns, nc, search_z_step_mm, drag))
+
+        def de_workers(func, population):
+            # DE hands over its own wrapper of `objective`; the pool runs the
+            # evaluation and THIS process keeps the log, in order
+            xs = [np.asarray(x, dtype=float) for x in population]
+            out = pool.map(_evaluate_in_worker, xs, chunksize=1)
+            return [record(x, summ, why) for x, (summ, why) in zip(xs, out)]
 
     rng = np.random.default_rng(seed)
     n_pop = popsize * N_DIM
@@ -134,11 +205,17 @@ def run_search(
               f"maxiter {maxiter}, objective '{mission.objective}'"
               + (", seeded" if seed_physical else ", from random") + "\n")
 
-    res = differential_evolution(
-        objective, bounds=[(0.0, 1.0)] * N_DIM, init=init, maxiter=maxiter,
-        tol=0.01, mutation=(0.4, 1.0), recombination=0.85, seed=seed,
-        polish=False, workers=workers, updating="deferred" if workers != 1 else "immediate",
-    )
+    try:
+        res = differential_evolution(
+            objective, bounds=[(0.0, 1.0)] * N_DIM, init=init, maxiter=maxiter,
+            tol=0.01, mutation=(0.4, 1.0), recombination=0.85, seed=seed,
+            polish=False, workers=de_workers,
+            updating="deferred" if workers != 1 else "immediate",
+        )
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     chosen = (log.best_feasible_u if log.best_feasible_u is not None
               else log.best_u if log.best_u is not None else list(res.x))
@@ -154,6 +231,7 @@ def run_search(
             "best_u": list(map(float, best_u)),
             "best_physical": unit_to_physical(best_u),
             "evaluations": log.evaluations, "feasible": log.feasible,
+            "workers": workers,
             "best_feasible_score": log.best_feasible_score,
             "elapsed_s": time.perf_counter() - t0,
             "history": log.history,

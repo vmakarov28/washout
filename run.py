@@ -285,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--iters", type=int, default=60)
     ap.add_argument("--popsize", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="search: evaluate each generation in this many "
+                         "worker processes. One search on one core leaves "
+                         "most of a modern machine idle; the fleet runner "
+                         "sets this so the whole fleet fills it")
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "run")
     ap.add_argument("--design", type=Path, default=None)
     ap.add_argument("--airfoil", type=Path, default=ROOT / "assets" / "mh45.dat")
@@ -402,8 +407,11 @@ def main(argv=None) -> int:
         print(f"seeded from {a.seed_design}")
     print(f"washout search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
+    from washout.search.optimize import lower_priority
+    lower_priority()
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed, drag=drag,
+                                   workers=max(int(a.workers), 1),
                                    out_dir=a.out, seed_physical=seed_phys)
     (a.out / "design.json").write_text(json.dumps({
         "u": list(map(float, best_u)),

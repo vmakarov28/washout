@@ -48,7 +48,15 @@ python run.py search --mission trainer_v3 --iters 90 --out out/run1
 python run.py export --mission trainer_v3 --design out/run1/design.json --out out/run1
 python run.py export ... --step                     # and cad/: STEP files + 3D gates
 python -m pytest -q                                 # the validation gates
+python scripts/fleet/gen7.py launch | status | pick # the whole fleet, the whole machine
 ```
+
+`--workers N` evaluates each generation of a search in N processes. One
+search on one core leaves most of a machine idle; the gen7 runner starts
+twelve searches of three workers -- deliberately more workers than
+threads, so a generation's stragglers and a finished search's cores are
+always taken -- at below-normal priority, detached, so they outlive the
+shell that started them.
 
 `--step` needs the OpenCASCADE bindings (`pip install -e .[cad]`); the
 search never does. It writes `cad/<name>_assembly.step` -- the aircraft

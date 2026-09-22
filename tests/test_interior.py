@@ -191,9 +191,14 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
     its declared nominal seat, the spar solved for reach alone -- an 8 mm
     tube shares space with the pack on all three aircraft. This test
     reproduces that state deliberately, so that the detection cannot
-    regress even after the seats and the solver have fixed the designs."""
+    regress even after the seats and the solver have fixed the designs.
+
+    The THREE aircraft the finding was made on, named, not `MISSIONS`.
+    micro_fpv was searched after the occupancy gates existed, so a naive
+    tube in it need not hit its pack -- and a test that demands a clash of
+    every future design is demanding that the gates never worked."""
     found = {}
-    for name in MISSIONS:
+    for name in ("trainer_v3", "demon1", "micro"):
         u, mission, base, plan = _fleet(name)
         p = unit_to_physical(u)
         vols = [it.bay_volume(b.name, p[b.x_var] if b.x_var else b.x_frac,
@@ -211,7 +216,7 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
         found[name] = [(a, b, mm) for a, b, mm in it.clashes(vols + naive, plan, WALL)
                        if pack in (a, b) and any(
                            s.name in (a, b) for s in mission.spars)]
-    for name in MISSIONS:
+    for name in found:
         assert found[name], f"{name}: the spar-through-the-pack clash vanished"
 
 
@@ -220,10 +225,20 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
 def test_a_bay_may_not_straddle_a_print_joint():
     """Micro's 2S 450 reaches eta 0.170 and panel p0 ends at 0.140, so the
     pack was declared across the joint between two separately printed
-    shells. There is no geometry that makes that work."""
-    _, mission, _, plan = _fleet("micro")
-    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0)
+    shells. There is no geometry that makes that work.
+
+    The joints come from the design's OWN elevon. With the print split
+    only as far as the envelope demands, micro's 176 mm half span is one
+    panel until the hinge station forces a break -- asked with default
+    settings (no elevon) there is no joint left to straddle, and the test
+    was asserting something about a split the aircraft does not have."""
+    u, mission, _, plan = _fleet("micro")
+    p = unit_to_physical(u)
+    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0,
+                           elevon_chord=p["elevon_chord"],
+                           elevon_eta=p["elevon_eta"])
     joints = vase.panel_etas(plan, s)
+    assert len(joints) > 1, "the hinge station must be a joint"
     wide = it.bay_volume("wide", 0.40, (40.0, 200.0, 10.0), plan)
     first, last = it.straddles(wide, joints)
     assert last > first >= 0, "a 200 mm wide bay must cross a joint"

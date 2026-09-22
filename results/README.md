@@ -38,6 +38,21 @@ and the buckling-driven ribs inside the search loop, and its ribbed parts
 were produced by a later hand export. The 8 g is the ribs, arriving after
 the verdict. It now passes the damping gate it was recorded as missing.
 
+## A fourth: `fpv_micro_fpv_s4`, tracked 2026-09-22
+
+The `micro_fpv` mission -- sub-250 g, 480 mm, FPV, objective "docile"
+(minimum stall speed) -- ran six searches seeded from `gen4_micro_v92_sized`
+after every opening was removed from the skin. `s4` and `s2` were the
+only designs in `out/` that passed every gate; `s4` is tracked. 163 g,
+wing loading 28.2 g/dm² against a 34 limit, cruise 13.5 m/s, SM +0.132,
+ζ Dutch roll +0.123.
+
+It is tracked so `run.py check` and the fleet tests cover the mission the
+branch added, and it is the aircraft `docs/ROADMAP-CAD.md` measured its
+two defects on: its build sheet told the builder to run a straight 6 mm
+tube tip to tip through a 48.7° swept wing, and its outer panel printed
+straight where the loft rises 66 mm. Both change its verdict once fixed.
+
 ## All three are now infeasible, and that is the point
 
 The table above is the state as **searched**. Since then two pieces of

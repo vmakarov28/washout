@@ -46,11 +46,21 @@ own cavity *is* the channel; a carbon tube slides in after the print.
 python run.py check  --mission trainer_v3          # re-score the tracked design
 python run.py search --mission trainer_v3 --iters 90 --out out/run1
 python run.py export --mission trainer_v3 --design out/run1/design.json --out out/run1
+python run.py export ... --step                     # and cad/: STEP files + 3D gates
 python -m pytest -q                                 # the validation gates
 ```
 
-Missions are `trainer_v3`, `demon1` and `micro`, declared once in
-`design.MISSIONS`. To rebuild a
+`--step` needs the OpenCASCADE bindings (`pip install -e .[cad]`); the
+search never does. It writes `cad/<name>_assembly.step` -- the aircraft
+in the flight frame, both halves and the spar tubes, every part and face
+named -- and one STEP per printed part in its print frame. Each part is a
+handful of named B-spline faces and planar end caps, not a triangle
+soup, and the export reports how far the surfaces are from the print and
+whether each tube is inside the wing, as gates. See
+[`docs/ROADMAP-CAD.md`](docs/ROADMAP-CAD.md).
+
+Missions are `trainer_v3`, `demon1`, `micro` and `micro_fpv`, declared
+once in `design.MISSIONS`. To rebuild a
 design already in the repo, and to see the whole pipeline run end to end:
 
 ```bash

@@ -243,6 +243,23 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
           "slicing.")
 
 
+def do_step(ev, out: Path) -> int:
+    """The CAD export and its 3D gates. Kept out of `do_export` because it
+    needs an optional install, and an STL export must never depend on it."""
+    from washout import cad
+    if not cad.available():
+        print("\nSTEP export needs the OpenCASCADE bindings: "
+              "pip install -e .[cad]")
+        return 1
+    from washout.cad.export import export_step
+    rep = export_step(ev, out)
+    print(f"\nCAD: {out / 'cad'}  ({rep['assembly']['file']}, "
+          f"{rep['assembly']['MB']:.1f} MB)")
+    for g in rep["_gates"]:
+        print(g.line())
+    return 0 if all(g.passed for g in rep["_gates"]) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI, as a value rather than a side effect of main().
 
@@ -287,6 +304,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rib-pitch", type=float, default=25.0, dest="rib_pitch")
     ap.add_argument("--no-structure", action="store_true", dest="no_structure",
                     help="skip spar/rib sizing; export a bare vase shell")
+    ap.add_argument("--step", action="store_true",
+                    help="export: also write cad/ -- the aircraft as STEP, "
+                         "every part as a clean solid, and the 3D gates. "
+                         "Needs the OpenCASCADE bindings: pip install -e .[cad]")
     ap.add_argument("--seed-design", type=Path, default=None, dest="seed_design",
                     help="design.json from an earlier run to put in the starting "
                          "population, so the search cannot finish behind it")
@@ -371,6 +392,8 @@ def main(argv=None) -> int:
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons), "\n")
         do_export(ev, ev.print_settings or settings, a.out, mission)
+        if a.step:
+            return do_step(ev, a.out)
         return 0
 
     seed_phys = (load_seed_physical(a.seed_design) if a.seed_design

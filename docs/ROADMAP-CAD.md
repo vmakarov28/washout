@@ -354,15 +354,92 @@ through FEA as tier 1.
 
 | phase | contents | status |
 |---|---|---|
-| A | `micro_fpv` tracked, suite green | |
-| B | tier 0 at contract (1.3) | |
-| C | true-slice panels, joint pivots and wedges (1.2) | |
-| D | straight spars (1.1) | |
-| E | OML STEP with the topology rules, loft-fidelity and volume gates | |
-| F | print-conformance and tube-inside-shell gates | |
-| G | elevon split, spars as cylinders, assembly with names and colours | |
+| A | `micro_fpv` tracked, suite green | **done** |
+| B | tier 0 at contract (1.3) | **3.5x, not 30x** -- see below |
+| C | true-slice panels, joint pivots and wedges (1.2) | **done** |
+| D | straight spars (1.1) | **done** |
+| E | OML STEP with the topology rules, loft-fidelity and volume gates | **done** |
+| F | print-conformance and tube-inside-shell gates | **done**, one open question (0.4) |
+| G | elevon split, spars as cylinders, assembly with names and colours | **done**; companions and payload not in the assembly yet |
 | H | as-printed structural solid; `verify` with FEA | |
 | I | structural topology (section 4) | |
+
+## What landed, 2026-09-22, and what it found
+
+**B -- tier 0.** Memoised `Planform.at`, a plan shared between the two
+passes, interior depths over arrays, the overhang and bore searches
+pruned against exact bounds. Zero mismatches against a golden snapshot of
+sixteen designs at 1e-9, and every fast path pinned to its slow reference
+in `tests/test_fast_paths.py`. A trainer evaluation went from 11.9 s to
+about 3 s; the suite from 626 s to 175 s. That is not the 0.4 s CLAUDE.md
+contracts -- what is left is `build_stack` and the elevons, lofted layer
+by layer at 0.25 mm, which a search does not need: it is the next item.
+
+**C -- panels are slices.** Every printed skin point, put back where it
+flies, is within 0.045 mm of the loft. Panel masses outboard fell 3-7%:
+the sections square to a tilted panel are thinner than the vertical ones
+they used to be printed as. The joints table is on the build sheet, and
+the minimal panel split is safe.
+
+**D -- straight spars.** The fitter seats a tube at the root and aims it
+at a seat further out, 900-odd candidate lines scanned together in about
+0.03 s. Two things came out of making it honest:
+
+- *A cut tube's end face is square to its axis*, so on a 46 degree tube
+  it reaches 3.3 mm further out than the axis does, into section no
+  station had checked. The bore gate found it (7.91 mm for an 8 mm tube);
+  tubes now end short by exactly that much.
+- *Twelve points round an ellipse are not the ellipse*: the polygon's
+  chords sit 0.2 mm inside it. An independent check at 24 points found a
+  tube poking through micro's skin; the polygon now circumscribes it.
+
+The fleet, re-checked: **no aircraft is feasible**, and every miss is the
+aircraft changing, not the model drifting. No straight tube reaches the
+trainer's or demon1's outer joint. demon1's reversal margin falls from
+0.92x to 0.70x now its tubes' stiffness stops where the tubes do.
+micro_fpv's static margin falls from 0.132 to 0.091, outside its band,
+because a tube swept 47 degrees weighs half its length aft of its seat.
+micro's tracked design no longer trims at all. A re-search is next, and
+it is searching against the aircraft that would actually be built.
+
+**E-G -- the CAD export.** `run.py export --step` writes `cad/`. On
+micro_fpv:
+
+| | the first attempt | now |
+|---|---|---|
+| centre body faces | 9,635 | 4: skin, trailing edge, root plane, tip plane |
+| centre body file | 30.9 MB | 0.30 MB |
+| elevon | 9,600 faces | 7, each named |
+| whole aircraft | -- | 3.7 MB: both halves, both tubes, 8 valid solids |
+| surface vs print | -- | 0.02-0.045 mm on held-out layers |
+
+Three things were wrong with the PRINT and had to be fixed first, because
+a clean B-rep of a defective part is a clean record of the defect:
+
+- *Every section had a 1 mm flat for a nose.* `thicken_for_nozzle`
+  applied the trailing edge's floor along the whole chord, and at the
+  nose, where the vertical thickness is zero by construction, it pushed
+  the leading-edge vertex up half a millimetre and the next point down
+  half. It now acts aft of 0.35c only. The wall gates had been passing the
+  nose BECAUSE of the flat, pairing two sides of one bead's turn as two
+  walls; they now skip neighbours by distance along the loop. One gate got
+  harder and is recorded rather than tuned: micro's centre body overhangs
+  51.4 degrees at its swept root nose, not 48.8.
+- *The elevon's chamfer corner fell between two samples*, so the contour
+  cut it with a chord and the turn hopped between vertices along the
+  span -- twisted triangles in the STL, and 3.8 mm of wander in a surface
+  skinned through it. It is a vertex now, at one index on every layer.
+- *A design that did not trim lost everything it knew.* Rejected at trim,
+  it came back without its parts, settings, tubes or linkage, so it could
+  not be exported to see why, and the build sheet crashed on it. It keeps
+  them now, the sheet says plainly that it does not trim, and the gates
+  that are geometry -- spar reach, hinge line, propeller, four-bar -- run
+  before trim so an untrimmed design's report is complete.
+
+Still open: companions (horn, mount, fins) and payload boxes are not in
+the assembly -- the parts exist as meshes in frames of their own; the
+export takes 60-90 s, almost all of it fitting; and 0.4, which side of
+the bead the surface is, is still a caliper away from settled.
 
 ---
 

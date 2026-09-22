@@ -707,24 +707,45 @@ def test_most_random_designs_are_one_fair_shape():
     assert fair / total >= 0.35, f"only {fair}/{total} random draws are fair"
 
 
-def test_printed_panels_break_at_control_stations_only():
-    """The faired loft emits ~35 dense stations; the printer must not care.
+def test_the_print_is_split_only_as_far_as_the_envelope_demands():
+    """A joint is not free, so there must not be one that is not needed.
 
-    panel_etas() splits the print at the planform's stations. Pointed at
-    the dense stations it would have turned four printed panels into
-    thirty-odd. Breaks belong to the stations a designer placed.
-    """
+    This used to assert that EVERY control station is a panel break. That
+    was stronger than the reason for it: the faired loft emits ~35 dense
+    stations and the printer must not care about them, which is a rule
+    about where a break may LAND, not about how many there must be. Read
+    the strong way it cut a 480 mm wing into four panels a side with
+    every one under a third of the envelope -- four parts, six bonded
+    faces and three steps in the skin, to describe curvature the loft had
+    already described.
+
+    The invariant that actually matters is minimality: no two adjacent
+    panels may be merged. Merging them must either overflow the Z
+    envelope or swallow the elevon's root station, which has to be a
+    joint because a trailing edge cannot vanish mid-panel."""
     from washout.geom import cst as _cst
-    from washout.search.design import Mission, N_DIM, build
+    from washout.search.design import Mission, N_DIM, build, unit_to_physical
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
-    p = build(np.random.default_rng(1).random(N_DIM), Mission.trainer_v3(), base)
+    u = np.random.default_rng(1).random(N_DIM)
+    p = build(u, Mission.trainer_v3(), base)
+    phys = unit_to_physical(u)
+    s = vase.PrintSettings(elevon_chord=phys["elevon_chord"],
+                           elevon_eta=phys["elevon_eta"])
     assert len(p.stations) > 2 * len(p.controls)
-    spans = vase.panel_etas(p, vase.PrintSettings())
-    assert len(spans) <= 2 * len(p.controls)
-    breaks = {round(b, 9) for _, b in spans}
-    for e in p.controls[1:]:
-        assert round(e, 9) in breaks, f"control station {e:.3f} is not a panel break"
+    spans = vase.panel_etas(p, s)
+    limit = s.bed_z_mm - 8.0
+    hinge = phys["elevon_eta"]
+    for (a, _), (b0, b) in zip(spans, spans[1:]):
+        merged = vase.arc_length_mm(p, a, b)
+        swallows = a < hinge - 1e-9 < b
+        assert merged > limit or swallows, (
+            f"panels {a:.3f}-{b0:.3f} and {b0:.3f}-{b:.3f} merge to "
+            f"{merged:.0f} mm, inside the {limit:.0f} mm envelope, and do "
+            f"not straddle the hinge at {hinge:.3f}: that joint is not needed")
+    # and every panel still fits
+    for a, b in spans:
+        assert vase.arc_length_mm(p, a, b) <= limit + 1e-6
 
 
 def test_the_design_sheet_never_takes_the_export_down(tmp_path, monkeypatch):

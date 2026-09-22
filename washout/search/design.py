@@ -705,11 +705,122 @@ class Mission:
         )
 
     @staticmethod
+    def micro_fpv() -> "Mission":
+        """Sub-250 g, FPV, and as forgiving as the class allows.
+
+        250 g is not a target, it is a legal ceiling -- the registration
+        threshold in most places -- so the mission treats it as a gate and
+        spends nothing to approach it. The OBJECTIVE is stall speed, and
+        minimising it pushes mass down and area up together.
+
+        ## Why the span is fixed at 480 mm
+
+        Every other mission lets the search choose a span. This one
+        cannot, because the span IS the part height: panels print
+        root-down with span along Z, so a half wing taller than the 250 mm
+        envelope has to be cut into pieces. 480 mm of span is 240 mm of
+        half span, which fits in one piece with the 8 mm margin
+        `panel_etas` keeps. Ask for a millimetre more and the aircraft
+        arrives as twice as many parts.
+
+        The elevon still forces a break at its own root -- a wing's
+        trailing edge cannot vanish mid-panel, because a surface normal
+        to the span is a roof and spiralize cannot build one -- so the
+        half wing is two parts, not one. Two per side is the floor for
+        anything with a moving surface and a pusher motor between them.
+
+        ## What it carries that the others do not
+
+        An FPV camera and video transmitter, 8 g declared, at the nose.
+        They are NOT given a bay: nothing is cut through the skin any
+        more, so a camera buried inside a closed shell would be looking at
+        the inside of it. The declared mass sits at 0.06c and the hardware
+        goes in a pod bonded to the nose, which is where a camera on a
+        wing this size goes anyway.
+
+        ## Where the gates come from
+
+        The stability numbers are the TRAINER's, not micro's. micro's are
+        deliberately the loosest in the fleet because it is flown close in
+        and is a proof that a 363 mm aeroplane can exist at all; this one
+        is meant to be pleasant, so it inherits the mission that was
+        written around what happens when a beginner lets go of the sticks.
+        Wing loading is the one number relaxed from the trainer's 26, to
+        34: a 480 mm wing cannot reach 26 g/dm2 while carrying 102 g of
+        payload, and pretending otherwise would make the mission
+        unsatisfiable by construction rather than demanding."""
+        return Mission(
+            name="micro_fpv", span_m=0.48, objective="docile",
+            payload=Mission._common(servo_g=0.010, esc_g=0.012) + (
+                # An AIO camera-and-VTX and a dipole: 6 g and 2 g, the
+                # mass of the class of part rather than one part someone
+                # weighed. Declared, and stated as declared.
+                Item("fpv cam + vtx", 0.008, 0.06),
+            ),
+            bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
+                  Bay("AR630", 0.44, (30.0, 20.0, 12.0),
+                      x_lo=0.14, x_hi=0.88,
+                      holds=("AR630 rx", "esc + wiring")),
+                  Bay("servos", 0.55, (24.0, 20.0, 9.0),
+                      x_lo=0.20, x_hi=0.70,
+                      eta_lo=0.30, eta_hi=0.80,
+                      lidded=False, drives_elevon=True,
+                      holds=("servos x2",))),
+            servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
+            servo_stall_nmm=78.0,
+            battery_kg=0.028,
+            # Slow, and the band is wide because the objective is already
+            # pushing on the bottom of it.
+            cruise_band_ms=(6.0, 14.0),
+            # Pitch stiffness, set for THIS aircraft rather than copied.
+            #
+            # The first draft took the trainer's [0.15, 0.32] on the
+            # reasoning that more margin is more docile. That is not true
+            # past a point: a tailless wing at 20% and up is nose-heavy,
+            # needs more up-reflex to trim, and spends elevon authority
+            # holding it there. The handling sweet spot for the type is
+            # 8-15%.
+            #
+            # The floor also has to be reachable at this span. The 900 mm
+            # trainer makes +0.209 comfortably and the 352 mm micro only
+            # +0.035, because the fixed 102 g of payload dictates the CG
+            # at small scale; four 480 mm searches wandered between -0.061
+            # and +0.140 against a 0.15 floor. The seeded design makes
+            # +0.267, so the band was not unreachable -- it was simply the
+            # wrong band, aimed at an aeroplane twice the size.
+            min_static_margin=0.12, max_static_margin=0.28,
+            cl_max_section=0.85, max_mass_kg=0.25,
+            max_wing_loading_gdm2=34.0, tip_stall_margin=0.12,
+            n_limit_g=3.0, max_trim_alpha_deg=8.0,
+            min_cn_beta=0.025, max_roll_yaw_ratio=8.5,
+            min_aeroelastic_margin=1.5,
+            min_dutch_roll_zeta=0.08, min_spiral_t2_s=20.0,
+            fairness=fz.Limits(max_root_t_over_c=0.26,
+                               max_tip_rise_frac=0.28),
+            # 6 mm, not micro's 8. The bore gate rejected two of the
+            # four first searches on the outboard panel, which on a 480 mm
+            # wing is a few millimetres of section -- and an 8 mm tube is
+            # sized for a 900 mm trainer pulling 3 g at 500 g. The
+            # buckling and aeroelastic gates size what is actually needed;
+            # this is only the floor they start from.
+            spar_d_mm=6.0, motor=prop.M2205, battery=prop.PACKS["2S 450"],
+            spars=(sp.SparSpec("main spar", 6.0, 0.18, 0.40),),
+            powertrain=prop.micro_power(),
+            min_spar_reach_frac=0.45,
+            # Relaxed from micro's 0.75. That number is for an aeroplane
+            # that has to climb away from a hand launch briskly; this one
+            # is slow by construction, and 0.6 static is enough to
+            # accelerate a 7 m/s wing off a throw. It is still a gate.
+            min_thrust_weight=0.60,
+            min_elevon_power=0.004, max_elevon_power=0.026,
+        )
+
+    @staticmethod
     def beginner_trainer() -> "Mission":
         return Mission.trainer_v3()
 
 
-MISSIONS = ("trainer_v3", "demon1", "micro")
+MISSIONS = ("trainer_v3", "demon1", "micro", "micro_fpv")
 """Every mission the CLI may be asked for, declared beside the factories.
 
 run.py's argparse used to carry its own hardcoded list, and the list had
@@ -1681,6 +1792,24 @@ def _evaluate_once(
         # smallest flyable: span dominates, mass breaks ties. Negated
         # because the optimizer maximises.
         merit = -(plan.span_m * 100.0 + mass.total_kg * 10.0)
+    elif mission.objective == "docile":
+        # SLOW is the objective, and stall speed is the one number that
+        # says it. Everything a nervous pilot complains about scales with
+        # it: the speed the aeroplane arrives at the ground, how far it
+        # travels while they think, and how much energy a mistake has.
+        #
+        # It is not a weighted sum of the stability derivatives, and that
+        # is deliberate -- those are GATES, and feasibility dominates the
+        # score, so a design that misses Dutch roll damping cannot buy its
+        # way back with a slower stall. What the merit does is pick, among
+        # designs that are already stable enough, the one that flies
+        # slowest.
+        #
+        # v_stall = sqrt(2W / rho S CLmax), so minimising it minimises
+        # wing loading: it pushes mass DOWN and area UP at the same time,
+        # which is why the 250 g ceiling is a gate rather than a target.
+        # A design has no reason to spend mass it does not need.
+        merit = -perf.stall_speed_ms(mass, plan, mission.cl_max_section)
     else:
         merit = ld
 

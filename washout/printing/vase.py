@@ -792,48 +792,62 @@ def panel_etas(plan: Planform, settings: PrintSettings,
                min_panel_mm: float = 5.0) -> list[tuple[float, float]]:
     """Split the half-span into panels that each fit the Z envelope.
 
-    Breaks land on the planform's own stations first -- a kink is where
-    the shape changes fastest and where a spar joint is least intrusive
-    anyway -- and any remaining over-tall panel is divided into equal
-    pieces. Equal pieces, not greedy-fill, so the joints stay symmetric
-    and one spar length serves them all."""
+    Two kinds of break, and the difference between them is the whole
+    function.
+
+    MANDATORY: the root, the tip, and the ELEVON's root station. The
+    wing's trailing edge has to stop where the elevon begins, and a
+    surface normal to the span is a roof in this print orientation, which
+    spiralize cannot build. Breaking the print there makes every panel
+    wholly plain or wholly truncated and turns that roof into a joint.
+
+    OPTIONAL: the planform's own control stations. These are where the
+    loft's curvature is DESCRIBED, which is not the same as where the
+    aircraft has to come apart -- and breaking at all of them regardless
+    cut a 480 mm wing into four panels a side when every one of them was
+    under a third of the envelope. A joint is not free: two more faces to
+    bond, a step for the air to find, and mass. So a control station is
+    used only where a span is genuinely too tall, and the one nearest the
+    middle is preferred, because an even split leaves the most room on
+    both sides.
+
+    Anything still over the envelope is divided into equal pieces --
+    equal, not greedy-fill, so the joints stay symmetric and one spar
+    length serves them all."""
     limit = settings.bed_z_mm - z_margin_mm
-    # CONTROL stations, not every station: the faired loft emits ~35
-    # dense stations to carry its curves, and splitting the print at
-    # each of them would turn three panels into thirty.
-    #
-    # And the ELEVON station, whenever there is one. The elevon begins at
-    # a spanwise station, so the wing's trailing edge has to disappear
-    # there -- and a surface normal to the span is a roof in this print
-    # orientation, which spiralize cannot build. Breaking the print at
-    # `elevon_eta` makes every panel wholly plain or wholly truncated and
-    # turns that roof into a print joint.
-    breaks = sorted({0.0, 1.0} | set(plan.controls))
+    mandatory = {0.0, 1.0}
     if 0.0 < settings.elevon_eta < 1.0 and settings.elevon_chord > 1e-6:
-        # Merge, do not just add. Micro's hinge station is eta 0.438 and a
-        # planform control station sits at 0.436 -- 0.2 mm of arc length
-        # apart -- so adding it produced a panel 0.2 mm tall weighing
-        # 0.0 g, which is a part in the parts list and a joint in the
-        # assembly that cannot exist. The HINGE station wins any tie: it
-        # is where the trailing edge has to stop, while a control station
-        # is only where the loft's curvature is described.
-        e = float(settings.elevon_eta)
-        breaks = [b for b in breaks
-                  if b in (0.0, 1.0)
-                  or arc_length_mm(plan, min(b, e), max(b, e)) > min_panel_mm]
-        breaks = sorted(set(breaks) | {e})
-    return _split_to_envelope(plan, breaks, limit)
-
-
-def _split_to_envelope(plan: Planform, breaks, limit: float) -> list:
-    """Divide any over-tall span between breaks into equal pieces."""
+        mandatory.add(float(settings.elevon_eta))
+    optional = [float(e) for e in sorted(set(plan.controls)) if 0.0 < e < 1.0]
     out: list[tuple[float, float]] = []
-    for a, b in zip(breaks, breaks[1:]):
-        length = arc_length_mm(plan, a, b)
-        n = max(int(np.ceil(length / limit)), 1)
-        edges = np.linspace(a, b, n + 1)
-        out.extend((float(u), float(v)) for u, v in zip(edges, edges[1:]))
+    edges = sorted(mandatory)
+    for a, b in zip(edges, edges[1:]):
+        out.extend(_fit_span(plan, a, b, optional, limit, min_panel_mm))
     return out
+
+
+def _fit_span(plan: Planform, a: float, b: float, optional, limit: float,
+              min_panel_mm: float) -> list[tuple[float, float]]:
+    """One mandatory span, divided only as far as the envelope demands."""
+    if arc_length_mm(plan, a, b) <= limit:
+        return [(a, b)]
+    # A control station inside it, nearest the middle, that leaves no
+    # sliver either side. A sliver is a part in the parts list and a
+    # joint in the assembly that cannot exist: micro's hinge station and
+    # a control station once sat 0.2 mm apart and produced a panel 0.2 mm
+    # tall weighing 0.0 g.
+    mid = 0.5 * (a + b)
+    inside = [e for e in optional if a < e < b
+              and arc_length_mm(plan, a, e) >= min_panel_mm
+              and arc_length_mm(plan, e, b) >= min_panel_mm]
+    if inside:
+        cut = min(inside, key=lambda e: abs(e - mid))
+        return (_fit_span(plan, a, cut, optional, limit, min_panel_mm)
+                + _fit_span(plan, cut, b, optional, limit, min_panel_mm))
+    n = max(int(np.ceil(arc_length_mm(plan, a, b) / limit)), 1)
+    cuts = np.linspace(a, b, n + 1)
+    return [(float(u), float(v)) for u, v in zip(cuts, cuts[1:])]
+
 
 
 def build_panels(plan: Planform, settings: PrintSettings,

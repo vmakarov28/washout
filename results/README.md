@@ -17,6 +17,80 @@ Pass the same `--polar` the search used. Without it the export falls back
 to the flat tier-0 drag model and reports a different, flattering L/D for
 the same aeroplane — the mistake commit `f3b61a9` exists to prevent.
 
+## gen8, 2026-09-23: micro_fpv, curled tips against real winglets
+
+Two families on the same gates and objective (stall speed), four seeds
+each (`scripts/fleet/gen8.py`, 5.0 h). `micro_fpv_winglet` is micro_fpv
+with the tip rise capped at 12% of the semi-span and the fins free to
+grow into winglets. The fins are now panels in the vortex lattice, not
+a plate-model add-on (`ROADMAP.md` item 20).
+
+| | mission | mass | area | stall | L/D | trim | SM | fins | tip rise |
+|---|---|---|---|---|---|---|---|---|---|
+| `gen8_micro_fpv_v132` | micro_fpv | 165 g | 757 cm² | **6.40 m/s** | 5.33 | +4.77° | +0.124 | 2 × 5 cm² | 27% |
+| `gen8_micro_fpv_winglet_v130` | micro_fpv_winglet | 165 g | 674 cm² | 6.80 m/s | 5.49 | +7.78° | +0.170 | 2 × 17 cm², 50 mm | 12% |
+
+The curl wins the mission's objective. For the same mass it carries 12%
+more wing area. The winglet design has slightly better tier-0 L/D, but
+it trims at 7.8° against an 8° limit. L/D is tier 0, so the ranking
+holds and the levels are not quotable. One winglet seed (v132) stopped
+early on differential evolution's tolerance with nothing feasible.
+
+The joints now have wedge inserts (`printing/inserts.py`): a printed
+part that fills the gap the dihedral leaves between panels. On the
+winglet winner, the tube cuts through the wedge, so that joint is filled
+with glue (0.6 g of microballoon epoxy, declared) instead.
+
+**Open before printing either one:**
+- The **horn socket gate fails on both** (0.45× and 0.57× of the couple
+  the servo can apply). It is a build-sheet gate, not a search gate.
+- micro_fpv's centre body misses **loft fidelity** by 0.4 µm at the nose
+  (0.0504 against 0.05 mm, `ROADMAP-CAD.md`).
+
+### In the tunnel (tier 2)
+
+Every run is the whole aircraft in the 3D LBM tunnel
+(`scripts/tunnel3d.py`), fins included, at 68 cells per MAC. The Re is
+**15k, about ten times below flight** (126k–145k), so the coefficients
+are not flight values. What the runs compare is where the lift is
+carried.
+
+| run | α | tunnel CL | VLM CL | inner half, tunnel / VLM | outer 20%, tunnel / VLM |
+|---|---|---|---|---|---|
+| gen7 micro_fpv | 3.16° (trim) | 0.077 | 0.203 | 103% / 67% | −1% / 7% |
+| gen7 micro_fpv | 9° | 0.208 | 0.493 | 80% / 61% | 2.4% / 11% |
+| gen8 micro_fpv (curl) | 4.77° (trim) | 0.113 | 0.234 | 88% / 67% | 2.8% / 7.9% |
+| gen8 micro_fpv (curl) | 9° | 0.223 | 0.443 | 76% / 62% | 6.0% / 10.9% |
+| gen8 winglet | 7.78° (trim) | 0.103 | 0.264 | 102% / 71% | 0.1% / 6.0% |
+| gen8 winglet | 9° | 0.130 | 0.326 | 94% / 68% | 0.9% / 7.8% |
+
+Tunnel CL is momentum exchange on the body. The spanwise split comes
+from Kutta–Joukowski circulation on the time-averaged flow, and it
+recovers 89–93% of the force total.
+
+At this Re, both families carry their lift on the centre body, and the
+outer wing carries almost none. The winglet aircraft does so more
+strongly than the curl, and at a higher α: its outer 20% carries under
+1% of the lift. So these runs do not show the winglets doing the job the
+lattice credits them with. At Re 15k, though, the outer panels are
+thin, laminar sections that separate. That is a Reynolds-number effect
+this tunnel cannot remove, and it is the same reason every tunnel CL
+here is about half the lattice's. Do not read it as a flight prediction.
+It is the strongest argument yet for the tier-1 section polar at flight
+Re (`ROADMAP.md`).
+
+Each run folder in `out/tunnel3d/<run>/` holds `smoke.mp4` (three-colour
+dye, three cameras), `span_loading.png`, `report.json` and
+`tunnel/viewer/`. The viewer is an interactive 3D view: ray-marched
+smoke, a speed or vortex volume, streamlines, and the body coloured by
+surface Cp. To open it:
+
+```bash
+python ../windtunnel/scripts/serve_viewer.py out/tunnel3d/gen8_micro_fpv_winglet_a9/tunnel/viewer
+```
+
+then go to http://localhost:8765.
+
 ## gen7, 2026-09-22: the fleet re-searched against the aircraft as built
 
 After the straight spars and the sliced panels (below), twelve searches

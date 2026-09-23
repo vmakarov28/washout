@@ -879,7 +879,13 @@ def test_two_panels_never_share_material_at_a_joint(name):
     turns up, every point of each lies on its own side and the joint opens
     as a wedge on the lower skin instead -- glue, which the build sheet
     sizes. Checked on the actual printed layers either side of every
-    joint, put back where they fly."""
+    joint, put back where they fly.
+
+    gen7's trainer found the hole in the pivot rule: with both joints on
+    their top points its first joint turned -0.3 degrees instead of +10,
+    and the fallback to a chord-line pivot put the 10 degrees back about
+    the chord line -- p0 and p1 shared 4.3 mm. That joint now sits at the
+    height where it does not turn, and the faces mate flat."""
     plan, s = _fleet_design(name)
     pans = vase.build_panels(plan, s, z_step_mm=1.0)
     for inner, outer in zip(pans, pans[1:]):
@@ -940,6 +946,36 @@ def test_every_joint_is_on_the_build_sheet():
     m = build_sheet.manifest(ev, ev.panels + ev.elevons, ev.print_settings)
     assert all("placement" in part for part in m["half_wing_parts"]
                if part["profile"] == "vase")
+
+
+def test_a_joint_that_does_not_turn_says_so():
+    """gen7's trainer has a joint placed where it does not turn. The
+    Joints table knew only skins and the chord line, so it would have told
+    the builder that joint hinges about the chord line -- the pivot that
+    put 4.3 mm of shared material into it."""
+    from washout import build_sheet
+    from washout.printing import frames
+    plan, s = _fleet_design("trainer_v3")
+    wing = vase.build_panels(plan, s, z_step_mm=2.0)
+    flat = [p for p in wing if p.frame.pivot == "flat"]
+    assert flat, "the tracked trainer is the design with a flat joint"
+    rows = frames.joint_report([p.frame for p in wing])
+    assert any("mate flat" in r for r in rows)
+    from washout.search.design import Mission, evaluate
+    import json as _json
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["trainer_v3"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.trainer_v3(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    for p in flat:
+        i = [q.name for q in ev.panels].index(p.name)
+        row = next(line for line in text.splitlines()
+                   if line.startswith(f"| `{ev.panels[i - 1].name}` / `{p.name}`"))
+        assert "mate flat" in row and "chord line" not in row, row
 
 
 # ------------------------------------------------- a spar is a straight tube

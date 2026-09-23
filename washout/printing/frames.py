@@ -92,7 +92,8 @@ class PanelFrame:
     there times the change in the axes' slopes."""
     pivot: str = "centre"
     """Which point of the root joint the two faces hinge about:
-    "centre" (the symmetry plane), "upper", "lower" or "chord"."""
+    "centre" (the symmetry plane), "upper", "lower", "chord", or "flat"
+    -- the height inside the section at which the joint does not turn."""
 
     @property
     def cos(self) -> float:
@@ -146,8 +147,8 @@ def panel_frames(plan: Planform, spans, settings) -> list[PanelFrame]:
     Pivots are chosen from the sign of the kink, which needs the axes, so
     this is solved twice: once on chord-line pivots to find which way each
     joint turns, then on the real pivots. A joint whose turn changes sign
-    between the two -- a kink of a fraction of a degree -- keeps its chord
-    line pivot."""
+    between the two is put at the height where it does not turn at all,
+    if its section contains one, and on its chord line if not."""
     spans = [(float(a), float(b)) for a, b in spans]
     H = plan.half_span_m * 1000.0
     n = len(spans)
@@ -175,12 +176,38 @@ def panel_frames(plan: Planform, spans, settings) -> list[PanelFrame]:
             kinds.append("upper" if turn > 0.0 else "lower")
             pivots.append((e * H, zt if turn > 0.0 else zb))
     phis = axes(pivots)
-    for j in range(len(joints)):
-        turn0, turn1 = phis0[j + 1] - phis0[j], phis[j + 1] - phis[j]
-        if kinds[j] != "chord" and turn0 * turn1 <= 0.0:
-            kinds[j] = "chord"
-            pivots[j] = chord[j]
+    # A joint whose turn changes sign once the pivots move is a joint that
+    # can be made NOT to turn: some height inside its section puts it on
+    # the line through its neighbours' pivots (for the first joint, level
+    # with the next, the centre body's axis being horizontal), and there
+    # the two faces are one plane -- no overlap and no wedge. The
+    # gen7 trainer's first joint flipped from +10 to -0.3 degrees when both
+    # joints moved to their tops; falling back to the chord line then put
+    # a 10-degree turn about the chord line back, and p0 and p1 shared
+    # 4.3 mm of material above it. The chord line is kept only where no
+    # such height exists.
+    for _ in range(len(joints)):
+        changed = False
+        for j in range(len(joints)):
+            turn0, turn1 = phis0[j + 1] - phis0[j], phis[j + 1] - phis[j]
+            if kinds[j] in ("chord", "flat") or turn0 * turn1 > 0.0:
+                continue
+            y = joints[j] * H
+            nxt = pivots[j + 1] if j + 1 < len(joints) else tip
+            if j == 0:
+                z = nxt[1]
+            else:
+                prv = pivots[j - 1]
+                z = prv[1] + (nxt[1] - prv[1]) * (y - prv[0]) / (nxt[0] - prv[0])
+            zb, _, zt = ext[j]
+            if zb <= z <= zt:
+                kinds[j], pivots[j] = "flat", (y, float(z))
+            else:
+                kinds[j], pivots[j] = "chord", chord[j]
             phis = axes(pivots)
+            changed = True
+        if not changed:
+            break
 
     out = []
     for i, (a, b) in enumerate(spans):
@@ -264,8 +291,13 @@ def slice_layers(plan: Planform, frame: PanelFrame, z_mm: np.ndarray,
     x_le = np.array([s_.x_le_m for s_ in st]) * 1000.0
     z_le = np.array([s_.z_le_m for s_ in st]) * 1000.0
     tw = np.radians(np.array([s_.twist_deg for s_ in st]))
+    # Second-order differences at the ends too: the root layer is where
+    # points travel furthest (a pivot on the top skin puts the chord line's
+    # crossing outboard of it), and a one-sided first-order rate there left
+    # the gen7 trainer's tip panel 0.064 mm off the loft at its root.
+    eo = 2 if len(y) >= 3 else 1
     if len(y) >= 2 and np.ptp(y) > 1e-9:
-        d = lambda v: np.gradient(v, y)                     # noqa: E731
+        d = lambda v: np.gradient(v, y, edge_order=eo)                     # noqa: E731
         d_c, d_xle, d_zle, d_a = d(chord), d(x_le), d(z_le), -d(tw)
     else:
         d_c = d_xle = d_zle = d_a = np.zeros_like(y)
@@ -287,7 +319,7 @@ def slice_layers(plan: Planform, frame: PanelFrame, z_mm: np.ndarray,
     vu = np.array([s_.airfoil.y_upper(ug) for s_ in st])
     vl = np.array([s_.airfoil.y_lower(ug) for s_ in st])
     if len(y) >= 2 and np.ptp(y) > 1e-9:
-        dvu, dvl = np.gradient(vu, y, axis=0), np.gradient(vl, y, axis=0)
+        dvu, dvl = np.gradient(vu, y, axis=0, edge_order=eo), np.gradient(vl, y, axis=0, edge_order=eo)
     else:
         dvu = dvl = np.zeros_like(vu)
 
@@ -325,6 +357,10 @@ def joint_report(frames) -> list[str]:
     """One line per joint, root outboard, for the build sheet."""
     rows = []
     for i, f in enumerate(frames[1:], start=1):
+        if f.pivot == "flat":
+            rows.append(f"p{i - 1}/p{i} at eta {f.eta0:.3f}: does not turn; "
+                        f"the faces mate flat")
+            continue
         rows.append(
             f"p{i - 1}/p{i} at eta {f.eta0:.3f}: turns {f.kink_deg:+.1f} deg, "
             f"faces hinge about the {f.pivot} point and open "

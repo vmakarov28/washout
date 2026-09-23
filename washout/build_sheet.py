@@ -202,10 +202,13 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
         far = {"upper": "lower", "lower": "upper"}
         for prev, p in zip(wing, wing[1:]):
             f = p.frame
-            touch = (f"{f.pivot} skin" if f.pivot in far
-                     else "the chord line")
-            opens = (f"**{f.wedge_mm:.1f} mm** at the {far[f.pivot]} skin"
-                     if f.pivot in far else f"{f.wedge_mm:.1f} mm, split")
+            if f.pivot == "flat":
+                touch, opens = "the whole face", "0 mm: the faces mate flat"
+            else:
+                touch = (f"{f.pivot} skin" if f.pivot in far
+                         else "the chord line")
+                opens = (f"**{f.wedge_mm:.1f} mm** at the {far[f.pivot]} skin"
+                         if f.pivot in far else f"{f.wedge_mm:.1f} mm, split")
             A(f"| `{prev.name}` / `{p.name}` | eta {f.eta0:.3f}, "
               f"{f.eta0 * H:.0f} mm out | **{f.kink_deg:+.1f} deg** | "
               f"{touch} | {opens} |")

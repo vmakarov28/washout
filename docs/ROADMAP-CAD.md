@@ -441,6 +441,28 @@ the assembly -- the parts exist as meshes in frames of their own; the
 export takes 60-90 s, almost all of it fitting; and 0.4, which side of
 the bead the surface is, is still a caliper away from settled.
 
+**Added 2026-09-23:** joint wedge inserts are solids in the assembly: a
+ruled loft between the two joint faces, split at corners (sharp, or a
+rounded bend that sums to 25 degrees), both faces interpolated on ONE
+parameter set so the rulings join corresponding points, and true
+cylinders for the bores. They hold the STL's volume within 0.4% on all
+three fleet inserts.
+
+**Open, 2026-09-23: gen8 micro_fpv's centre body misses loft fidelity
+by 0.4 um** (0.0504 mm against 0.05). The worst points are all the
+leading-edge vertex, 8-10 mm from the root, where the planform's nose
+rounds at about 27 mm radius in plan. What is known:
+  - the held-out deviation does NOT converge with section spacing: 0.048
+    at 3 mm, 0.050 at 1.5, 1.0 and 0.5 mm;
+  - it does not converge with chordwise poles either: 128 -> 240 took
+    the section fit from 0.0247 to 0.0174, and the held-out stayed at 0.05;
+  - re-slicing the panel at 0.25 mm changed nothing;
+  - it is not a crease in the planform, whose leading-edge slope is
+    continuous there.
+So something makes the held-out layers differ from a smooth surface
+through their neighbours at the nose. It is not found yet. The part's
+volume matches its layers to 0.01%.
+
 ---
 
 # 6. What not to do

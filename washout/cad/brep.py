@@ -235,23 +235,52 @@ def insert_solid(ins) -> tuple[object, dict]:
     d1 = np.diff(a, axis=0)
     d1 /= np.maximum(np.linalg.norm(d1, axis=1, keepdims=True), 1e-12)
     turn = np.degrees(np.arccos(np.clip((d1[:-1] * d1[1:]).sum(1), -1.0, 1.0)))
-    cuts = [0] + [int(i) + 1 for i in np.flatnonzero(turn > 25.0)] + [len(a) - 1]
+    # Corners, sharp or ROUNDED: a run of vertices each turning 8 degrees
+    # or more whose turns add up to 25 is one corner, cut at its sharpest
+    # vertex. gen8's micro_fpv turns 80 degrees over five vertices, none
+    # of them over 25, and one spline across it bulged the solid 3.7%.
+    # every sharp vertex is its own corner (a hinge cut is two of them,
+    # side by side); a run of gentler ones adds one cut if it sums to 25
+    cut_at = {int(k) + 1 for k in np.flatnonzero(turn > 25.0)}
+    i = 0
+    while i < len(turn):
+        if not 8.0 <= turn[i] <= 25.0:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(turn) and 8.0 <= turn[j + 1] <= 25.0:
+            j += 1
+        if turn[i:j + 1].sum() >= 25.0:
+            cut_at.add(i + 1 + int(np.argmax(turn[i:j + 1])))
+        i = j + 1
+    cuts = [0] + sorted(c for c in cut_at if 0 < c < len(a) - 1) + [len(a) - 1]
+    # ONE parameter set for both faces, from their mean chord length: a
+    # ruled loft joins points of equal parameter, and two curves
+    # parametrised independently joined a point before a bend on one face
+    # to one after it on the other.
+    la = np.linalg.norm(np.diff(ins.arc_a, axis=0), axis=1)
+    lb = np.linalg.norm(np.diff(ins.arc_b, axis=0), axis=1)
+    s_all = np.concatenate([[0.0], np.cumsum(0.5 * (la + lb))])
 
-    def edge(run: np.ndarray):
+    def edge(run: np.ndarray, s: np.ndarray):
         if len(run) <= 2:
             return BRepBuilderAPI_MakeEdge(gp_Pnt(*map(float, run[0])),
                                            gp_Pnt(*map(float, run[-1]))).Edge()
+        from OCP.collections import HArray1_double
         pts = HArray1_gp_Pnt(1, len(run))
-        for i, (x, y, z) in enumerate(run, start=1):
-            pts.SetValue(i, gp_Pnt(float(x), float(y), float(z)))
-        it = GeomAPI_Interpolate(pts, False, 1e-7)
+        par = HArray1_double(1, len(run))
+        t = (s - s[0]) / max(s[-1] - s[0], 1e-12)
+        for k, ((x, y, z), tk) in enumerate(zip(run, t), start=1):
+            pts.SetValue(k, gp_Pnt(float(x), float(y), float(z)))
+            par.SetValue(k, float(tk))
+        it = GeomAPI_Interpolate(pts, par, False, 1e-7)
         it.Perform()
         return BRepBuilderAPI_MakeEdge(it.Curve()).Edge()
 
     def wire(arc: np.ndarray):
         w = BRepBuilderAPI_MakeWire()
         for i0, i1 in zip(cuts, cuts[1:]):
-            w.Add(edge(arc[i0:i1 + 1]))
+            w.Add(edge(arc[i0:i1 + 1], s_all[i0:i1 + 1]))
         w.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(*map(float, arc[-1])),
                                       gp_Pnt(*map(float, arc[0]))).Edge())
         return w.Wire()

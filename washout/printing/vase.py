@@ -594,6 +594,51 @@ class Printability:
         return [g.name for g in self.gates if not g.passed]
 
 
+def check_insert(ins, settings: PrintSettings) -> Printability:
+    """A joint wedge insert (printing/inserts.py), printed flat on its face
+    A in normal mode. Four gates, each with its number:
+
+      * it fits the bed, at the orientation it is drawn in;
+      * the mesh is watertight -- a slicer fills what it cannot close;
+      * its thinnest printed edge is two beads, where the knife edge at
+        the pivot was cut off (the crest left is glue, and reported);
+      * every tube bore has a bead of material round it on both faces --
+        a bore that breaks out of the insert's outline reads negative."""
+    from .stl import manifold_report
+    out = Printability()
+    if getattr(ins, "glue_fill", False):
+        # nothing prints: the wedge is filled (see JointInsert.glue_fill)
+        out.gates.append(Gate("wedge is a glue fill", True, ins.max_gap_mm, 0.0,
+                              "mm", f"a tube severs it; {ins.fill_g():.1f} g of filler"))
+        return out
+    size = ins.size_mm()
+    foot = float(max(size[0], size[1]))
+    lim = float(min(settings.bed_x_mm, settings.bed_y_mm))
+    out.gates.append(Gate("insert fits the bed", foot <= lim and size[2] <= settings.bed_z_mm,
+                          foot, lim, "mm", f"{size[0]:.0f} x {size[1]:.0f} x {size[2]:.1f} mm"))
+    tight = manifold_report(ins.tris)["watertight"]
+    out.gates.append(Gate("insert watertight", bool(tight), float(tight), 1.0, "",
+                          f"{len(ins.tris)} triangles"))
+    beads = 2.0 * settings.extrusion_width_mm
+    out.gates.append(Gate("insert thinnest edge", ins.crest_mm >= beads - 1e-9,
+                          ins.crest_mm, beads, "mm",
+                          "cut square where the wedge thins; the crest is glue"))
+    for b in ins.bores:
+        if b.get("kind") == "notch":
+            # the tube sits against the skin, so the insert is cut round it;
+            # what matters is the material left between notch and far skin
+            out.gates.append(Gate(f"insert neck at notch ({b['name']})",
+                                  b["neck_mm"] >= 2.0 * settings.extrusion_width_mm,
+                                  b["neck_mm"], 2.0 * settings.extrusion_width_mm, "mm",
+                                  f"{b['d_mm']:.0f} mm tube against the skin: notched"))
+        else:
+            out.gates.append(Gate(f"insert bore wall ({b['name']})",
+                                  b["wall_mm"] >= settings.extrusion_width_mm,
+                                  b["wall_mm"], settings.extrusion_width_mm, "mm",
+                                  f"{b['d_mm']:.0f} mm tube"))
+    return out
+
+
 def _dist_to_segments(pts: np.ndarray, poly: np.ndarray) -> np.ndarray:
     """Distance from each of `pts` to the nearest segment of the closed
     polygon `poly`. Vectorised: one (m, n) matrix per call."""

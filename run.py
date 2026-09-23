@@ -38,7 +38,7 @@ from washout import build_sheet
 from washout import spars as sp
 from washout.geom import cst
 from washout.printing import elevons, stl, vase
-from washout.search.design import (BOUNDS, MISSIONS, Mission,  # noqa: F401
+from washout.search.design import (BOUNDS, MISSION_VARIANTS, MISSIONS, Mission,  # noqa: F401
                                 choose_structure, evaluate, unit_to_physical)
 from washout.search.optimize import SEEDS, run_search
 
@@ -214,6 +214,21 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
         print(f"  {ev.plan.name + '_tip_fin':<14} flat plate {w_mm:.0f}x{h_mm:.0f} mm, "
               f"{fins.thickness_m*1000:.1f} mm -- print TWO in normal (not vase) "
               f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
+    for ins in getattr(ev, "inserts", None) or []:
+        chk = vase.check_insert(ins, settings)
+        if ins.glue_fill:
+            print(f"  joint {ins.joint} wedge: FILL with microballoon epoxy, "
+                  f"~{ins.fill_g():.1f} g a side (the spar severs a printed insert)")
+            continue
+        stl.write_stl(out / f"{ins.name}.stl", ins.verts, ins.tris,
+                      header=f"washout {ins.name} (print 2, mirror 1)")
+        w, d, h = ins.size_mm()
+        print(f"  {ins.name:<14} joint {ins.joint} wedge, {w:.0f}x{d:.0f}x{h:.1f} mm, "
+              f"{ins.mass_g(settings.filament_density_gcc):.1f} g -- print TWO "
+              f"(mirror one) in normal mode, face A down  "
+              f"{'OK' if chk.ok else 'CHECK: ' + ','.join(chk.failures())}")
+        for g in chk.gates:
+            print("    " + g.line())
     companions = export_companions(ev, settings, out, mission)
     if companions:
         print("")
@@ -275,7 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Choices come from design.py, never from a second list here: the
     # hardcoded one had drifted and offered `fpv_1m`, which has no factory
     # and crashed every command that named it.
-    ap.add_argument("--mission", choices=MISSIONS, default="trainer_v3")
+    ap.add_argument("--mission", choices=MISSIONS + tuple(MISSION_VARIANTS),
+                    default="trainer_v3")
     ap.add_argument("--polar", type=str, default=None,
                     help="measured LBM polar CSV; switches the search from "
                          "the flat tier-0 drag model to strip theory on real "

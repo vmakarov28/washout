@@ -38,6 +38,9 @@ class PointMass:
     mass_kg: float
     x_m: float          # aft of the aircraft nose datum (x=0 at root LE)
     z_m: float = 0.0
+    y_m: float = 0.0
+    """Spanwise station of a PAIR of items, one each side (0: centreline).
+    Only the roll and yaw inertia read it; the CG is symmetric either way."""
 
 
 @dataclass

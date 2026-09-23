@@ -185,6 +185,9 @@ def inertia(plan, mass, alpha_deg: float, servo_eta: float, fins=None,
             xf, zf = fins.centroid()
             for sg in (1.0, -1.0):
                 pts.append((it.mass_kg / 2.0, xf, sg * fins.y_m, zf))
+        elif getattr(it, "y_m", 0.0):
+            for sg in (1.0, -1.0):
+                pts.append((it.mass_kg / 2.0, it.x_m, sg * it.y_m, it.z_m))
         else:
             pts.append((it.mass_kg, it.x_m, 0.0, it.z_m))
     P = np.array(pts)
@@ -208,7 +211,13 @@ def analyse(vlm, plan, mass, alpha_deg: float, x_cg_m: float, v_ms: float,
     D = np.array(vlm.lateral_derivatives(alpha_deg, ref), dtype=float)
     D[2, 2] += profile_yaw_damping(plan, cd0_wing)
     if fins is not None:
-        D = D + fins.derivatives(plan.area_m2, plan.span_m, x_cg_m, z_cg, alpha_deg)
+        # A lattice that carries the fins has already solved their side
+        # force, with the wing's tip flow acting on them and theirs on the
+        # wing; adding the flat-plate estimate on top would count each fin
+        # twice. Only a fin-less lattice gets the closed-form plate.
+        if not getattr(vlm, "has_fins", False):
+            D = D + fins.derivatives(plan.area_m2, plan.span_m, x_cg_m, z_cg,
+                                     alpha_deg)
         # fin skin friction acts at the tips, y = b/2, where the strip
         # formula above reduces to exactly -CD_fin
         D[2, 2] -= fins.cd0(v_ms, plan.area_m2)

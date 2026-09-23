@@ -276,7 +276,7 @@ def _figure(ev, settings: vase.PrintSettings, path: Path, title: str,
     # --------------------------------------------------------- span loading
     ax = fig.add_subplot(gs[2, 1])
     if t:
-        v = VLM(plan, ns=30, nc=6)
+        v = VLM(plan, ns=30, nc=6, fins=fins)
         pt = v.solve(t.alpha_deg, t.x_cg_m)
         order = np.argsort(pt.y_strip)
         y = pt.y_strip[order] / plan.half_span_m

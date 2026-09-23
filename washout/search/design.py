@@ -35,6 +35,7 @@ from ..printing import vase
 from ..printing import detours as det
 from ..printing import parts as pmod
 from ..printing import elevons as elv
+from ..printing import inserts as ins_
 from ..aero import performance as perf
 from ..aero import lateral
 from ..aero import dynamics as dyn
@@ -816,6 +817,29 @@ class Mission:
         )
 
     @staticmethod
+    def micro_fpv_winglet() -> "Mission":
+        """micro_fpv with its wing kept nearly flat, so that yaw stiffness
+        has to come from REAL winglets -- the tip fins.
+
+        micro_fpv's gen7 winner curled the outer 27% of its semi-span up
+        through 54 degrees of cant (its cap is 28%) and carried no fins,
+        which looks extreme and raised the obvious question: is the curl a
+        winglet, or just what the search found cheapest? It was an uneven
+        contest at the time: the curl was in the vortex lattice and the
+        fins were not, so a fin earned nothing for tip losses. With the
+        fins in the lattice, this mission asks the same question the other
+        way round -- same gates, same objective, same aircraft -- with the
+        tip rise capped at 12% of the semi-span. Whichever finds the
+        better feasible design answers it on the numbers.
+
+        A variant, not a fifth aircraft: see MISSION_VARIANTS. The cap is
+        part of the design -> planform map (`build` clamps the rise to it),
+        so a design found here is only this aircraft under this mission."""
+        m = Mission.micro_fpv()
+        return replace(m, name="micro_fpv_winglet",
+                       fairness=replace(m.fairness, max_tip_rise_frac=0.12))
+
+    @staticmethod
     def beginner_trainer() -> "Mission":
         return Mission.trainer_v3()
 
@@ -835,6 +859,14 @@ of mistake as a design vector that can express an invalid planform: the
 fix is to make it unrepresentable rather than to correct the one instance.
 `beginner_trainer` is deliberately absent -- it is an alias for
 trainer_v3, not a fourth aircraft."""
+
+MISSION_VARIANTS = {"micro_fpv_winglet": "micro_fpv"}
+"""Search-space variants of a fleet mission: variant -> parent.
+
+Same aircraft, same gates, same objective; a narrower design space. The
+CLI offers them beside MISSIONS, but the fleet -- the tuple the tests walk
+and results/fleet/index.json answers for -- is MISSIONS alone, so a
+variant never has to have a tracked winner to exist."""
 
 # --------------------------------------------------------- the design vector
 
@@ -1157,7 +1189,7 @@ def _cached_build(u, mission: Mission, base: Airfoil) -> Planform:
 
 
 def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
-                ns: int, nc: int) -> VLM:
+                ns: int, nc: int, fins=None) -> VLM:
     """The lattice for this design, built at most once.
 
     Scoring the aircraft as built takes a bare-shell pass, a structure
@@ -1174,10 +1206,14 @@ def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
     key = (np.asarray(u, dtype=float).tobytes(), mission.span_m,
            mission.span_free, mission.fairness, base.au.tobytes(),
            base.al.tobytes(), float(base.te_gap), float(base.te_camber),
-           int(ns), int(nc))
+           int(ns), int(nc), fins)
     vlm = _VLM_CACHE.get(key)
     if vlm is None:
-        vlm = VLM(plan, ns=ns, nc=nc)
+        # The fins are panels of the lattice: their end-plate effect on
+        # the tip loading and the wake is part of the solve, where it used
+        # to be left unclaimed -- which scored a real winglet at zero
+        # induced-drag benefit and a curled wing tip at its full one.
+        vlm = VLM(plan, ns=ns, nc=nc, fins=fins)
         _VLM_CACHE[key] = vlm
         while len(_VLM_CACHE) > _VLM_CACHE_SIZE:
             _VLM_CACHE.popitem(last=False)
@@ -1216,6 +1252,10 @@ class Evaluation:
     fairness: object | None = None
     fairness_limits: object | None = None
     fins: object | None = None
+    inserts: list = field(default_factory=list)
+    """The joint wedge inserts (printing/inserts.py): the loft a turning
+    joint leaves between two panel faces, as its own printed part.
+    Charged in the mass budget, gated for print, exported."""
     dynamics: object | None = None
     structure: object | None = None
     linkage: object | None = None
@@ -1400,6 +1440,25 @@ def _evaluate_once(
     shell_kg = sum(p.mass_g() for p in panels + elevon_parts) * 2.0 / 1000.0
     print_fail = [f"{p.name}: {','.join(c.failures())}"
                   for p, c in zip(panels + elevon_parts, checks) if not c.ok]
+    # --- the wedges the turning joints leave, as parts ---
+    #
+    # A joint whose dihedral turns leaves a wedge of the loft that neither
+    # panel contains -- 6 mm open at micro_fpv's lower skin. It used to be
+    # "fill with glue" on the build sheet and missing from CAD, and it was
+    # never weighed. It is a printed part now, and a bigger turn is a
+    # heavier part, which is the pressure on the search that belongs here.
+    try:
+        inserts = ins_.joint_inserts(plan, settings, panels)
+    except (ValueError, IndexError, np.linalg.LinAlgError) as e:
+        # a geometry the insert builder cannot parse is a rejection with
+        # a reason, never a crash in a search worker
+        inserts = []
+        reasons.append(f"joint insert: {e}")
+        penalty += 5.0
+    for ins in inserts:
+        chk = vase.check_insert(ins, settings)
+        if not chk.ok:
+            print_fail.append(f"{ins.name}: {','.join(chk.failures())}")
     if mission.require_printable and print_fail:
         reasons.extend(print_fail)
 
@@ -1453,6 +1512,12 @@ def _evaluate_once(
         items += (perf.PointMass("tip fins",
                                  fins.mass_kg(settings.filament_density_gcc * 1000.0),
                                  xf, zf),)
+    for ins in inserts:
+        # one each side, at the joint
+        c = ins.centroid_flight_mm() / 1000.0
+        items += (perf.PointMass(f"joint {'fill' if ins.glue_fill else 'insert'} {ins.joint}",
+                                 2.0 * ins.mass_g(settings.filament_density_gcc) / 1000.0,
+                                 float(c[0]), float(c[2]), y_m=float(c[1])),)
     mass = perf.MassBudget(shell_kg=shell_kg,
                            shell_x_m=perf.shell_centroid_x(plan),
                            items=items)
@@ -1596,7 +1661,7 @@ def _evaluate_once(
             penalty += 8.0 * max(want - got, 1.0)
 
     # --- trim fixes CL; CL fixes cruise speed ---
-    vlm = _cached_vlm(u, mission, base, plan, ns, nc)
+    vlm = _cached_vlm(u, mission, base, plan, ns, nc, fins)
     x_np = perf.neutral_point(vlm, plan)
     sm = (x_np - mass.x_cg_m) / plan.mac_m
     # The bracket is a SOLVER detail, not a design constraint. A slow
@@ -1621,7 +1686,7 @@ def _evaluate_once(
             elevons=elevon_parts if want_panels else [],
             horn_eta=float(horn_at[0]) if horn_at else 0.0,
             spar_fits=spar_fits, fairness=fair,
-            fairness_limits=mission.fairness, fins=fins,
+            fairness_limits=mission.fairness, fins=fins, inserts=inserts,
             max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
             linkage=link,
             sm_band=(mission.min_static_margin, mission.max_static_margin),
@@ -1926,7 +1991,7 @@ def _evaluate_once(
         horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
-        fins=fins, dynamics=modes,
+        fins=fins, inserts=inserts, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
         aeroelastic=aero_e,
@@ -1962,7 +2027,7 @@ def choose_structure(ev: Evaluation, mission: Mission,
     mostly aft of the CG; on the gen4 trainer they pushed trim past 8
     degrees and cut Dutch-roll damping from +0.083 to +0.058. The search
     called that design feasible and the built aircraft was not."""
-    pt = (vlm or VLM(ev.plan, ns, nc)).solve(ev.trim.alpha_deg, ev.trim.x_cg_m)
+    pt = (vlm or VLM(ev.plan, ns, nc, fins=ev.fins)).solve(ev.trim.alpha_deg, ev.trim.x_cg_m)
     st = struct.select(ev.plan, pt, ev.mass_kg,
                        skin_t_mm=settings.extrusion_width_mm,
                        n_limit=mission.n_limit_g,
@@ -2005,7 +2070,8 @@ def evaluate(
         return first
     st, tuned = choose_structure(first, mission, first.print_settings or settings,
                                  ns, nc,
-                                 vlm=_cached_vlm(u, mission, base, first.plan, ns, nc))
+                                 vlm=_cached_vlm(u, mission, base, first.plan, ns, nc,
+                                                  first.fins))
     ev = _evaluate_once(u, mission, base, tuned, drag=drag, ns=ns, nc=nc,
                         want_panels=want_panels, z_step_mm=z_step_mm,
                         spar_od_mm=st.spar.od_mm)

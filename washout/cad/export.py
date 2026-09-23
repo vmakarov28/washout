@@ -118,11 +118,44 @@ def export_step(ev, out_dir, every_mm: float = 3.0, tol_mm: float = 0.02,
                      "held_out_dev_mm": round(rep["held_out_dev_mm"], 4),
                      "volume_err_pct": round(dv, 4)})
 
+    # The joint wedge inserts: built in the flight frame, the right wing's,
+    # so they share faces with the panels there by construction; the part
+    # file is the left wing's, placed by the insert's own proper motion.
+    for ins in getattr(ev, "inserts", None) or []:
+        if ins.glue_fill:
+            continue                 # filled with glue, not a part (BUILD.md)
+        right, info = brep.insert_solid(ins)
+        left = brep.mirrored_y(right)
+        v_occ = brep.volume_mm3(right)
+        dv = 100.0 * (v_occ / ins.volume_mm3 - 1.0)
+        valid = brep.is_valid(right)
+        names = [n for n, _ in info["faces"]]
+        gates += [
+            Gate(f"{ins.name} volume", abs(dv) <= 1.0, abs(dv), 1.0, "%",
+                 f"{v_occ / 1000:.2f} cm3 vs the STL's {ins.volume_mm3 / 1000:.2f}"),
+            Gate(f"{ins.name} valid solid", valid, float(valid), 1.0, "",
+                 "ruled loft, bores cut, BRepCheck"),
+            Gate(f"{ins.name} faces", len(names) <= FACES_PER_PART, len(names),
+                 FACES_PER_PART, "", ", ".join(names)),
+        ]
+        printed = brep.transform_rt(left, ins.print_R, ins.print_t)
+        doc = brep.StepDocument(ins.name)
+        doc.add(ins.name, printed, "solid",
+                list(zip(names, brep._shapes(printed, brep.TopAbs_FACE))))
+        path = out / "parts" / f"{ins.name}.step"
+        doc.write(path)
+        parts.append((ins, left, right, names))
+        rows.append({"part": ins.name, "role": "insert", "faces": names,
+                     "file": f"parts/{ins.name}.step",
+                     "kB": round(os.path.getsize(path) / 1000.0, 1),
+                     "volume_err_pct": round(dv, 4)})
+
     # The tubes, in the flight frame: one a side, meeting at the centreline.
     tubes = []
     w = ps.extrusion_width_mm
     need = 0.5 * w + 0.5 * ps.spar_clearance_mm
-    right_wings = [(p, r, names) for p, _, r, names in parts if p.role == "wing"]
+    right_wings = [(p, r, names) for p, _, r, names in parts
+                   if getattr(p, "role", "insert") == "wing"]
     skins = brep.compound([f for _, r, names in right_wings
                            for (n, f) in zip(names, brep._shapes(r, brep.TopAbs_FACE))
                            if n == "skin"])
@@ -157,11 +190,12 @@ def export_step(ev, out_dir, every_mm: float = 3.0, tol_mm: float = 0.02,
 
     doc = brep.StepDocument(f"{name} assembly")
     for part, left, right, names in parts:
+        colour = "vase" if getattr(part, "role", "insert") in ("wing", "elevon") else "solid"
         for side, shape in (("left", left), ("right", right)):
             # a copying transform keeps the faces in order, so the names
             # the part's own file carries carry over by index
             faces = list(zip(names, brep._shapes(shape, brep.TopAbs_FACE)))
-            doc.add(f"{part.name} ({side})", shape, "vase", faces)
+            doc.add(f"{part.name} ({side})", shape, colour, faces)
     for f, left, right in tubes:
         od, idm = _tube_dims(ev, f)
         doc.add(f"{f.spec.name} {od:.0f}x{idm:.0f} (left)", left, "carbon")

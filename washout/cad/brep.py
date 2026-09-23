@@ -202,6 +202,127 @@ def print_to_flight_left(frame, origin_mm) -> gp_Trsf:
     return t
 
 
+def _plane_of(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(centroid, unit normal) of the plane through `points`, by SVD."""
+    c = points.mean(0)
+    n = np.linalg.svd(points - c)[2][-1]
+    return c, n / np.linalg.norm(n)
+
+
+def insert_solid(ins) -> tuple[object, dict]:
+    """A joint wedge insert (printing/inserts.py) as a clean solid, in the
+    flight frame (the right wing's).
+
+    Two wires -- face A's outline and face B's, each an interpolated arc
+    closed by the straight crest cut -- lofted RULED: the skin between the
+    arcs is one ruled B-spline face, exactly the straight rulings the STL
+    is built of, and the crest cut between the two lines is another. The
+    caps are planes. Each tube's bore is a true cylinder cut through it.
+    -> (solid, {"faces": [(name, face), ...]})."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Plane
+    from OCP.GeomAPI import GeomAPI_Interpolate
+    from OCP.collections import HArray1_gp_Pnt
+
+    # The outline is smooth except where it is not: a joint at the elevon's
+    # root runs round the hinge cut, two sharp corners, and ONE spline
+    # through them overshot and took 12% off the solid's volume. So the
+    # arc is split at its corners -- the same indices on both faces, which
+    # correspond point for point -- one spline per smooth run, a line for
+    # a straight one. The panel CAD learned this first (bspline.py).
+    a = ins.arc_a
+    d1 = np.diff(a, axis=0)
+    d1 /= np.maximum(np.linalg.norm(d1, axis=1, keepdims=True), 1e-12)
+    turn = np.degrees(np.arccos(np.clip((d1[:-1] * d1[1:]).sum(1), -1.0, 1.0)))
+    cuts = [0] + [int(i) + 1 for i in np.flatnonzero(turn > 25.0)] + [len(a) - 1]
+
+    def edge(run: np.ndarray):
+        if len(run) <= 2:
+            return BRepBuilderAPI_MakeEdge(gp_Pnt(*map(float, run[0])),
+                                           gp_Pnt(*map(float, run[-1]))).Edge()
+        pts = HArray1_gp_Pnt(1, len(run))
+        for i, (x, y, z) in enumerate(run, start=1):
+            pts.SetValue(i, gp_Pnt(float(x), float(y), float(z)))
+        it = GeomAPI_Interpolate(pts, False, 1e-7)
+        it.Perform()
+        return BRepBuilderAPI_MakeEdge(it.Curve()).Edge()
+
+    def wire(arc: np.ndarray):
+        w = BRepBuilderAPI_MakeWire()
+        for i0, i1 in zip(cuts, cuts[1:]):
+            w.Add(edge(arc[i0:i1 + 1]))
+        w.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(*map(float, arc[-1])),
+                                      gp_Pnt(*map(float, arc[0]))).Edge())
+        return w.Wire()
+
+    loft = BRepOffsetAPI_ThruSections(True, True, 1e-6)
+    loft.AddWire(wire(ins.arc_a))
+    loft.AddWire(wire(ins.arc_b))
+    loft.CheckCompatibility(False)
+    loft.Build()
+    solid = loft.Shape()
+    y_j = float(ins.arc_a[:, 1].mean())
+    for p, d, r in ins.bore_axes:
+        at = p + d * ((y_j - p[1]) / d[1]) - 40.0 * d
+        cyl = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(*map(float, at)),
+                                              gp_Dir(*map(float, d))), float(r), 80.0).Shape()
+        solid = BRepAlgoAPI_Cut(solid, cyl).Shape()
+    solids = _shapes(solid, TopAbs_SOLID)
+    if len(solids) == 1:
+        solid = solids[0]
+
+    ca, na = _plane_of(ins.arc_a)
+    cb, nb = _plane_of(ins.arc_b)
+    faces = _shapes(solid, TopAbs_FACE)
+    named, rest = [], []
+    for f in faces:
+        kind = BRepAdaptor_Surface(TopoDS.Face(f)).GetType()
+        c = _centre(f)
+        if kind == GeomAbs_Cylinder:
+            named.append(("bore", f))
+        elif kind == GeomAbs_Plane and abs((c - ca) @ na) < 1e-3:
+            named.append(("face A (outer panel root)", f))
+        elif kind == GeomAbs_Plane and abs((c - cb) @ nb) < 1e-3:
+            named.append(("face B (inner panel tip)", f))
+        else:
+            rest.append(f)
+
+    def area(f):
+        g = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(f, g)
+        return g.Mass()
+    # What is left is skin and two kinds of flat cut: the crest cut between
+    # the ends of the two arcs, and a hinge cut wherever the outline has a
+    # straight run. A ruled loft makes both as B-spline faces, not planes,
+    # so they are named by WHERE they are: the face whose centre is nearest
+    # a cut's own centre, within 2 mm.
+    b = ins.arc_b
+    targets = [("crest cut", 0.25 * (a[0] + a[-1] + b[0] + b[-1]))]
+    for i0, i1 in zip(cuts, cuts[1:]):
+        if i1 - i0 == 1:
+            targets.append(("hinge cut", 0.25 * (a[i0] + a[i1] + b[i0] + b[i1])))
+    left = list(rest)
+    for label, c_t in targets:
+        if not left:
+            break
+        k = min(range(len(left)), key=lambda i: np.linalg.norm(_centre(left[i]) - c_t))
+        if np.linalg.norm(_centre(left[k]) - c_t) < 2.0:
+            named.append((label, left.pop(k)))
+    left.sort(key=area, reverse=True)
+    named += [("skin", f) for f in left]
+    return solid, {"faces": named}
+
+
+def transform_rt(shape, R: np.ndarray, t: np.ndarray):
+    """A proper rigid motion p -> R p + t, as new geometry."""
+    tr = gp_Trsf()
+    tr.SetValues(*(float(v) for v in (R[0, 0], R[0, 1], R[0, 2], t[0],
+                                       R[1, 0], R[1, 1], R[1, 2], t[1],
+                                       R[2, 0], R[2, 1], R[2, 2], t[2])))
+    return BRepBuilderAPI_Transform(shape, tr, True).Shape()
+
+
 def transformed(shape, trsf: gp_Trsf):
     return BRepBuilderAPI_Transform(shape, trsf, True).Shape()
 

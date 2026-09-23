@@ -178,6 +178,13 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
           f"{p.mass_g():.1f} g | vase |")
     if getattr(ev, "fins", None) is not None:
         A(f"| `{plan.name}_tip_fin.stl` | tip fin, print TWO | — | — | solid |")
+    dens = settings.filament_density_gcc
+    for ins in getattr(ev, "inserts", None) or []:
+        if ins.glue_fill:
+            continue                         # filled, not printed: see Joints
+        w, d, h = ins.size_mm()
+        A(f"| `{ins.name}.stl` | joint {ins.joint} wedge insert | "
+          f"{h:.1f} mm | {ins.mass_g(dens):.1f} g | solid, face A down |")
     A("")
     A(f"Everything above is **one half wing**. Print two of each and mirror.")
     A("")
@@ -191,17 +198,21 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
         A("Each panel follows the wing's dihedral curve inside itself; the")
         A("joints are where it turns. Two end faces square to two different")
         A("axes cannot both be one plane, so each joint hinges about the skin")
-        A("named and opens as a wedge on the other one. **Fill the wedge when")
-        A("bonding** -- it is part of the wing's shape, not a gap to close by")
-        A("forcing the panels together.")
+        A("named and opens as a wedge on the other one. That wedge is a piece")
+        A("of the wing, and it is a PRINTED PART: the insert named below is")
+        A("exactly the loft between the two faces. Bond panel, insert, panel")
+        A("-- they share faces -- with the insert's face A (the flat face it")
+        A("prints on) against the OUTER panel's root.")
         A("")
-        A("| joint | where | turns | faces touch at | wedge opens to |")
-        A("|---|---|---|---|---|")
+        by_joint = {ins.joint: ins for ins in (getattr(ev, "inserts", None) or [])}
+        A("| joint | where | turns | faces touch at | wedge | filled by |")
+        A("|---|---|---|---|---|---|")
         A("| centre | the symmetry plane | 0 deg | the whole face | 0 mm: "
-          "the two `p0` root faces mate flat |")
+          "the two `p0` root faces mate flat | -- |")
         far = {"upper": "lower", "lower": "upper"}
-        for prev, p in zip(wing, wing[1:]):
+        for j, (prev, p) in enumerate(zip(wing, wing[1:]), start=1):
             f = p.frame
+            fill = "--"
             if f.pivot == "flat":
                 touch, opens = "the whole face", "0 mm: the faces mate flat"
             else:
@@ -209,10 +220,40 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
                          else "the chord line")
                 opens = (f"**{f.wedge_mm:.1f} mm** at the {far[f.pivot]} skin"
                          if f.pivot in far else f"{f.wedge_mm:.1f} mm, split")
+                ins = by_joint.get(j)
+                if ins is None:
+                    fill = "**glue** (no insert)"
+                elif ins.glue_fill:
+                    fill = (f"**microballoon epoxy**, about {ins.fill_g():.1f} g a "
+                            f"side: the spar runs through a wedge too thin to print "
+                            f"round it")
+                else:
+                    fill = (f"`{ins.name}.stl`, all but a {ins.crest_mm:.1f} mm "
+                            f"crest at the {f.pivot} skin (glue)")
             A(f"| `{prev.name}` / `{p.name}` | eta {f.eta0:.3f}, "
               f"{f.eta0 * H:.0f} mm out | **{f.kink_deg:+.1f} deg** | "
-              f"{touch} | {opens} |")
+              f"{touch} | {opens} | {fill} |")
         A("")
+        for ins in by_joint.values():
+            if ins.elevon_gap_mm > 0.0:
+                A(f"At joint {ins.joint} the elevon begins. The insert stops at "
+                  f"the hinge cut, because the elevon moves and must not be "
+                  f"bonded to it; the elevon's own root wedge, **"
+                  f"{ins.elevon_gap_mm:.1f} mm** open at the far skin, is its "
+                  f"root clearance. Leave it open.")
+                A("")
+            if ins.glue_fill:
+                continue                      # the Joints table says it
+            for b in ins.bores:
+                if b.get("kind") == "notch":
+                    A(f"`{ins.name}` is notched round {b['name']} ({b['d_mm']:.0f} mm, "
+                      f"seated against the skin): fit it over the tube.")
+                else:
+                    A(f"`{ins.name}` carries a {b['d_mm']:.0f} mm bore for "
+                      f"{b['name']} ({b['wall_mm']:.1f} mm of wall round it): "
+                      f"thread it on the tube between the two panels.")
+            if ins.bores:
+                A("")
 
     # ------------------------------------------------------------ slicer
     A("## Slicer")
@@ -331,7 +372,8 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("3. Slide the spars in and bond them, seated against the skin the cut")
     A("   list names.")
     A("4. Join the panels outboard, each at the angle the Joints table")
-    A("   gives, then the two halves at the centreline.")
+    A("   gives -- with its wedge insert between them where the table names")
+    A("   one -- then the two halves at the centreline.")
     A("5. Hinge the elevons, fit the horns and the pushrods.")
     A("6. Glue the tip fins on.")
     A("7. Balance to the CG window above. Then set the throws.")
@@ -411,8 +453,10 @@ def bom(ev, parts) -> str:
         # means eighteen grams of servo in the aeroplane, not thirty-six.
         # The name carries the count for the pairs, so it is stripped out
         # of the name and put in the column where it belongs.
-        qty = 2 if ("x2" in i.name or i.name == "tip fins") else 1
-        name = i.name.replace(" x2", "").rstrip("s") if qty == 2 else i.name
+        insert = i.name.startswith(("joint insert", "joint fill"))
+        qty = 2 if ("x2" in i.name or i.name == "tip fins" or insert) else 1
+        name = (i.name.replace(" x2", "").rstrip("s")
+                if qty == 2 and not insert else i.name)
         L.append(f"| {qty} | {name} | — | {i.mass_kg*1000:.0f} g | "
                  f"at {i.x_m*1000:.0f} mm aft of the root LE |")
     if ev.linkage is not None:
@@ -483,6 +527,21 @@ def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
         out["half_wing_parts"].append(
             {"file": f"{ev.plan.name}_tip_fin.stl", "profile": "solid",
              "role": "fin", "quantity_per_aircraft": 2})
+    for ins in getattr(ev, "inserts", None) or []:
+        if ins.glue_fill:
+            continue
+        w, d, h = ins.size_mm()
+        out["half_wing_parts"].append({
+            "file": f"{ins.name}.stl", "profile": "solid", "role": "insert",
+            "joint": ins.joint, "eta": round(ins.eta, 4),
+            "height_mm": round(float(h), 2),
+            "mass_g": round(ins.mass_g(settings.filament_density_gcc), 2),
+            "footprint_mm": [round(float(w), 1), round(float(d), 1)],
+            "bores": [{"tube": b["name"], "d_mm": b["d_mm"],
+                       "wall_mm": round(b["wall_mm"], 2)} for b in ins.bores],
+            # where it flies: the same solid in flight mm, right half
+            "flight_bbox_mm": [[round(float(v), 2) for v in ins.flight_verts.min(0)],
+                               [round(float(v), 2) for v in ins.flight_verts.max(0)]]})
     return out
 
 

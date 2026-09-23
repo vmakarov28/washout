@@ -177,3 +177,41 @@ def test_demon1s_elevons_are_valid_solids():
         assert rep["held_out_dev_mm"] <= 0.05, (part.name, rep)
         solid, _ = brep.part_solid(surfs)
         assert brep.is_valid(solid), (part.name, [x.name for x in surfs])
+
+
+def test_a_joint_insert_is_a_clean_solid_that_matches_its_stl(tmp_path):
+    """The joint wedge insert in CAD: two planar faces that ARE the panels'
+    end faces, a ruled skin, a crest cut, a true cylinder for each bore --
+    and the same volume as the STL that prints, to 1%.
+
+    The first version interpolated ONE spline round the whole outline, and
+    at the elevon's root the outline turns two sharp corners at the hinge
+    cut: the spline overshot them and the solid came out 12% light while
+    BRepCheck called it valid. The outline is split at its corners now,
+    one edge per smooth run, as the panel CAD does."""
+    pytest.importorskip("OCP")
+    from washout.cad import brep
+    index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
+    for name in ("micro_fpv", "trainer_v3"):
+        d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
+        m = getattr(Mission, name)()
+        ev = evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                      vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
+                      z_step_mm=2.0)
+        assert ev.inserts, name
+        for ins in ev.inserts:
+            solid, info = brep.insert_solid(ins)
+            names = [n for n, _ in info["faces"]]
+            assert brep.is_valid(solid), (ins.name, names)
+            assert brep.volume_mm3(solid) == pytest.approx(ins.volume_mm3, rel=0.01)
+            assert names.count("face A (outer panel root)") == 1, names
+            assert names.count("face B (inner panel tip)") == 1, names
+            assert names.count("crest cut") == 1, names
+            assert names.count("bore") == len(ins.bore_axes), names
+            assert len(names) <= 12
+            # the part file's placement is a proper motion of the left
+            # wing's solid onto the STL's print frame
+            My = np.diag([1.0, -1.0, 1.0])
+            placed = (ins.print_R @ (My @ ins.flight_verts.T)).T + ins.print_t
+            assert np.abs(placed - ins.verts).max() < 1e-9
+            assert np.linalg.det(ins.print_R) == pytest.approx(1.0)

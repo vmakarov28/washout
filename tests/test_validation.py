@@ -537,6 +537,161 @@ def test_a_winglet_reduces_induced_drag():
         f"vs winglet {eff_wing:.2f}")
 
 
+def _fin_on(p, h: float, below: float = 0.0, chord: float | None = None):
+    """A rectangular plate at each tip of `p`: full tip chord by default
+    (an END PLATE, the geometry Hoerner's rule was measured on), or
+    `chord` long."""
+    from washout.aero.fins import TipFins
+    c = p.at(1.0).chord_m if chord is None else chord
+    return TipFins(area_m2=h * c, height_m=h, root_chord_m=c,
+                   tip_chord_m=c, below_frac=below, sweep_deg=0.0,
+                   thickness_m=0.002, x_root_le_m=p.at(1.0).x_le_m,
+                   y_m=p.half_span_m, z_root_m=0.0)
+
+
+def test_the_branched_wake_reduces_to_the_chain_without_fins():
+    """Tip fins make the Trefftz wake a T at each tip, which the chain of
+    strips could not hold, so the sheet is solved as nodes and strips.
+    On a wing with nothing hanging from it the general form must be the
+    chain, to round-off -- otherwise every fin-less design in every
+    generation would move for no physical reason."""
+    from washout.aero.vlm import trefftz_cdi
+    p = rect(6.0, cst.naca4("0012"))
+    v = VLM(p, ns=40, nc=6)
+    a = np.radians(5.0)
+    gamma = v._lu @ (-(v.lat.normal @ np.array([np.cos(a), 0.0, np.sin(a)])))
+    g_strip = np.bincount(v.lat.strip, weights=gamma)
+    pts, edge, g = v._sheet(g_strip)
+    general = trefftz_cdi(pts, edge, g, None, None, None, v.lat.area)
+    assert general == pytest.approx(v.solve(5.0, 0.25).CDi, rel=1e-12)
+
+
+def test_tip_fins_are_winglets_in_the_lattice():
+    """The fins used to be flat plates for yaw stability ONLY, their
+    end-plate effect deliberately left unclaimed -- while a curled wing
+    tip, which IS in the lattice, got its full benefit. So the search
+    could compare a winglet against a curl only on an uneven field, and
+    micro_fpv's winner curled 27% of its semi-span and carried no fins.
+
+    In the lattice, a vertical plate at each tip of a planar wing must
+    (Munk: moving shed vorticity out of the plane of the wing):
+      * raise the span efficiency on the SAME projected span by what end
+        plates are measured to give: Hoerner's rule AR_eff = AR (1 + 1.9
+        h/b): x1.095, x1.19 and x1.38 at h/b = 0.05, 0.1 and 0.2. The
+        lattice gives 1.111, 1.226 and 1.401 -- within 3% -- and the band
+        here is 5%, the scatter of the measurements the rule was fitted
+        to;
+      * load a fin standing above the tip INBOARD -- the tip vortex
+        carries the flow round the tip from below, so above it the flow
+        runs inward -- and the two fins' side forces must cancel;
+      * load a fin split evenly above and below the tip antisymmetrically,
+        with no net side force at all."""
+    p = rect(6.0, cst.naca4("0012"))
+    bare = VLM(p, ns=40, nc=6).solve(5.0, 0.25)
+    for h_over_b, hoerner in ((0.05, 1.095), (0.10, 1.19), (0.20, 1.38)):
+        h = h_over_b * p.span_m
+        v = VLM(p, ns=40, nc=6, fins=_fin_on(p, h))
+        pt = v.solve(5.0, 0.25)
+        gain = (pt.CL ** 2 / pt.CDi) / (bare.CL ** 2 / bare.CDi)
+        assert 1.0 < gain, h_over_b
+        assert gain == pytest.approx(hoerner, rel=0.05), (h_over_b, gain)
+
+        a = np.radians(5.0)
+        vinf = np.array([np.cos(a), 0.0, np.sin(a)])
+        gam = v._lu @ (-(v.lat.normal @ vinf))
+        fin = v.lat.strip >= v.lat.n_wing_strips
+        dF = gam[:, None] * np.cross(vinf, v.lat.b - v.lat.a)
+        stbd = fin & (v.lat.cp[:, 1] > 0)
+        port = fin & (v.lat.cp[:, 1] < 0)
+        assert dF[stbd, 1].sum() < 0.0, "the starboard fin must pull inboard"
+        assert dF[stbd, 1].sum() == pytest.approx(-dF[port, 1].sum(), rel=1e-9)
+
+    v = VLM(p, ns=40, nc=6, fins=_fin_on(p, 0.1 * p.span_m, below=0.5))
+    a = np.radians(5.0)
+    vinf = np.array([np.cos(a), 0.0, np.sin(a)])
+    gam = v._lu @ (-(v.lat.normal @ vinf))
+    dF = gam[:, None] * np.cross(vinf, v.lat.b - v.lat.a)
+    fin = v.lat.strip >= v.lat.n_wing_strips
+    stbd = fin & (v.lat.cp[:, 1] > 0)
+    assert abs(dF[stbd, 1].sum()) < 1e-9
+
+
+def test_a_fin_on_a_curled_tip_converges_as_it_is_refined():
+    """On fpv_micro_fpv_s4 -- swept fins on a 35-degree curled tip -- the
+    first fin lattice's side-force slope went -0.24, -0.18, -0.05, +11.8
+    as the fin was refined, and span efficiency 1.20 to 0.001. Three
+    separate faults, each found by this refinement:
+      * strips clustered at the fin's free tip made 0.2 mm strips under
+        6 mm chordwise panels (the circulation alternated in sign);
+      * the wing's last cosine strip puts control points a fraction of a
+        millimetre from the fin's root vortices, uncored;
+      * a fin root that followed the tip's camber line climbed 3 mm along
+        the chord, and its own straight trailing legs fell through the
+        control points of the strips below.
+    Uniform strips, a flat root, and a core across the junction sized to
+    the spread of the wing's tip vortices about it: a refinement must now
+    move the answer by little and in one direction, and the fin's slope
+    must sit between the isolated-plate and reflection-plane closed forms.
+
+    (It does NOT land on the flat-plate model's 1.5x calibrated slope: on
+    this curled tip the lattice finds the fins about 20% less effective in
+    yaw. That calibration was made for a fin standing on a wing tip, and
+    this one stands on a winglet.)"""
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    from washout.aero import dynamics as dyn
+    m = Mission.micro_fpv()
+    d = _json.loads((ASSETS.parent / "results" / "fleet" / "fpv_micro_fpv_s4"
+                     / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55,
+                                     spar_d_mm=m.spar_d_mm),
+                  size_structure=False)
+    plan, fins, t = ev.plan, ev.fins, ev.trim
+    assert fins is not None and t is not None
+    _, _, _, z_cg = dyn.inertia(plan, ev.mass, t.alpha_deg, 0.5, fins)
+    ref = np.array([t.x_cg_m, 0.0, z_cg])
+    d0 = VLM(plan).lateral_derivatives(t.alpha_deg, ref)
+    got = []
+    for nf, ncf in ((8, 4), (12, 6), (16, 8), (24, 8)):
+        v = VLM(plan, fins=fins, nf=nf, ncf=ncf)
+        dd = v.lateral_derivatives(t.alpha_deg, ref) - d0
+        got.append((dd[0, 0], dd[2, 0], v.solve(t.alpha_deg, t.x_cg_m).e_oswald))
+    cy = np.array([g[0] for g in got])
+    cn = np.array([g[1] for g in got])
+    e = np.array([g[2] for g in got])
+    assert np.all(np.diff(cy) > 0.0), cy          # monotone, shrinking
+    assert abs(cy[-1] - cy[-2]) < 0.05 * abs(cy[-1]), cy
+    assert abs(cn[-1] - cn[-2]) < 0.05 * abs(cn[-1]), cn
+    assert np.ptp(e) < 0.03, e
+    from washout.aero.fins import lift_slope
+    per_fin = cy[-1] * plan.area_m2 / (2.0 * fins.area_m2)
+    ar = fins.height_m ** 2 / fins.area_m2
+    assert -lift_slope(2.0 * ar) < per_fin < -lift_slope(ar), (per_fin, ar)
+
+
+def test_a_fin_on_a_wing_tip_sits_between_the_two_closed_forms():
+    """The flat-plate fin model took Helmbold's slope on 1.5x the
+    geometric aspect ratio -- the CALIBRATED part, because a wing tip is a
+    partial reflection plane for the fin root. The lattice now solves the
+    fin with the wing, so its side-force slope has to fall between the
+    two closed forms that bracket it: the isolated plate (AR) and the fin
+    on an infinite reflection plane (2 AR)."""
+    from washout.aero.fins import lift_slope
+    p = rect(6.0, cst.naca4("0012"))
+    ref = np.array([0.25, 0.0, 0.0])
+    d0 = VLM(p, ns=40, nc=6).lateral_derivatives(0.0, ref)
+    for h_over_b in (0.05, 0.10):
+        h = h_over_b * p.span_m
+        f = _fin_on(p, h, chord=0.3 * h)       # a fin, not an end plate
+        d1 = VLM(p, ns=40, nc=6, fins=f).lateral_derivatives(0.0, ref)
+        per_fin = (d1[0, 0] - d0[0, 0]) * p.area_m2 / (2.0 * f.area_m2)
+        ar = f.height_m ** 2 / f.area_m2
+        assert -lift_slope(2.0 * ar) < per_fin < -lift_slope(ar), (
+            f"h/b {h_over_b}: {per_fin:+.3f} outside "
+            f"[{-lift_slope(2 * ar):+.3f}, {-lift_slope(ar):+.3f}]")
+
+
 def test_dihedral_effect_matches_its_own_closed_form():
     """Cl_beta by strip integration, checked against the textbook limit.
 
@@ -1276,3 +1431,190 @@ def test_a_corner_between_two_samples_is_given_a_vertex_before_fitting():
         assert turns[k - 2] < 1e-4 and turns[k] < 1e-4, off
         b = bs.piece_bounds(sharp, n, every_corner=True)
         assert (n, k) in b and any(q[0] == k for q in b), (off, b)
+
+
+# ------------------------------------------------- the joint wedge inserts
+
+
+def _fleet_eval(name, z_step_mm=2.0):
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    m = getattr(Mission, name)()
+    return evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                    vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
+                    want_panels=True, z_step_mm=z_step_mm)
+
+
+def test_a_single_layer_is_sliced_like_one_in_a_stack():
+    """`slice_layers` takes its span rates as differences ACROSS the layers
+    it is given. Asked for one layer, the rates were zero: every point slid
+    along y alone, and the first joint insert's face sat 4 mm aft of the
+    loft on micro_fpv's swept wing. The loft-conformance gate never saw it
+    -- a chordwise slide along a nearly flat crest barely leaves the
+    surface -- so it is pinned directly: one layer sliced alone must be
+    that layer as the stack slices it."""
+    from washout.printing import frames as fr
+    from washout.printing.inserts import _plain_unit_loop
+    plan, s = _fleet_design("micro_fpv")
+    pans = vase.build_panels(plan, s, z_step_mm=1.0)
+    loop = _plain_unit_loop(s, False)
+    for p in pans:
+        z = np.arange(0.0, min(p.frame.length_mm, 20.0), 0.5)
+        stack, _ = fr.slice_layers(plan, p.frame, z, loop)
+        for k in (0, 7):
+            one, _ = fr.slice_layers(plan, p.frame, z[k:k + 1], loop)
+            assert np.abs(one[0] - stack[k]).max() < 0.01, (p.name, k)
+
+
+def test_a_turning_joint_is_filled_by_a_printed_insert():
+    """The wedge a turning joint leaves -- 6 mm open at micro_fpv's lower
+    skin, the loft that belongs to neither panel -- was "fill with glue"
+    on the build sheet, a gap in CAD, and never weighed. It is a part now,
+    and these are the claims it has to meet:
+
+      * its two big faces LIE ON the two panels' end planes, so the three
+        parts share faces;
+      * it is watertight;
+      * its volume is the loft's own, to 1%: the loft sliced at 200
+        planes between the two faces, each slice clipped to the far side
+        of the inner panel's tip plane, areas summed -- none of which
+        uses the insert's two-face construction, whose side is a band of
+        straight rulings between the faces. (tan(k) times the first
+        moment of face A about the pivot line was tried as the closed
+        form and is 5% out: it assumes the skin rotates about the pivot,
+        and the loft's local dihedral moves it in height between the
+        planes instead.) Compared bore-less and cut at 0.05 mm, so the
+        two describe the same wedge;
+      * it is never thicker than the frame's own wedge estimate, and not
+        much thinner (the insert stops at the hinge; the estimate spans
+        the whole section);
+      * it is charged, both sides, in the mass budget."""
+    from washout.printing.stl import manifold_report
+    ev = _fleet_eval("micro_fpv")
+    assert ev.inserts, "micro_fpv's joint turns 17 degrees and must carry an insert"
+    ins = ev.inserts[0]
+    outer = next(p for p in ev.panels if abs(p.frame.eta0 - ins.eta) < 1e-9)
+    inner = next(p for p in ev.panels if abs(p.frame.eta1 - ins.eta) < 1e-9)
+    fo, fi = outer.frame, inner.frame
+    na = np.array([0.0, fo.cos, fo.sin])
+    qa = np.array([0.0, *fo.origin_yz_mm])
+    nb = np.array([0.0, fi.cos, fi.sin])
+    qb = np.array([0.0, *fi.origin_yz_mm]) + fi.length_mm * nb
+    V = ins.flight_verts
+    on_a = np.abs((V - qa) @ na) < 1e-6
+    on_b = np.abs((V - qb) @ nb) < 1e-6
+    assert on_a.sum() >= len(V) // 2 - 1 and on_b.sum() >= len(V) // 2 - 1
+    assert (on_a | on_b).all(), "every vertex is on one face or the other"
+    assert manifold_report(ins.tris)["watertight"]
+
+    # independent: the loft sliced between the planes, each slice clipped
+    from dataclasses import replace as _replace
+    from washout.printing import frames as fr
+    from washout.printing.inserts import _plain_unit_loop, joint_inserts
+    s0 = _replace(ev.print_settings, spar_lines=())
+    bare = next(i for i in joint_inserts(ev.plan, s0, ev.panels, min_thickness_mm=0.05)
+                if i.joint == ins.joint)
+    loop = _plain_unit_loop(s0, s0.elevon_chord > 1e-6
+                            and ins.eta >= s0.elevon_eta - 1e-9)
+    ss = np.linspace(-(bare.max_gap_mm + 0.5), 0.0, 201)
+    layers, _ = fr.slice_layers(ev.plan, fo, ss, loop)
+    areas = []
+    for s_k, c in zip(ss, layers):
+        P = fo.to_flight(c[:, 0], c[:, 1], np.full(len(c), s_k))
+        beyond = (P - qb) @ nb                  # > 0: past the inner tip face
+        poly, pts2 = [], c
+        for i in range(len(c)):                 # Sutherland-Hodgman, one plane
+            j = (i + 1) % len(c)
+            a_in, b_in = beyond[i] > 0.0, beyond[j] > 0.0
+            if a_in:
+                poly.append(pts2[i])
+            if a_in != b_in:
+                t = beyond[i] / (beyond[i] - beyond[j])
+                poly.append(pts2[i] + t * (pts2[j] - pts2[i]))
+        if len(poly) >= 3:
+            q = np.array(poly)
+            areas.append(0.5 * abs(np.dot(q[:, 0], np.roll(q[:, 1], -1))
+                                   - np.dot(q[:, 1], np.roll(q[:, 0], -1))))
+        else:
+            areas.append(0.0)
+    sliced = float(np.trapezoid(areas, ss))
+    assert bare.volume_mm3 == pytest.approx(sliced, rel=0.01), (bare.volume_mm3, sliced)
+    assert ins.volume_mm3 < bare.volume_mm3     # the bore and the crest come out
+
+    assert ins.max_gap_mm <= fo.wedge_mm + 1e-6
+    assert ins.max_gap_mm >= 0.8 * fo.wedge_mm
+    item = next(i for i in ev.mass.items if i.name == f"joint insert {ins.joint}")
+    assert item.mass_kg == pytest.approx(2.0 * ins.mass_g(0.55) / 1000.0, rel=1e-9)
+    assert item.y_m == pytest.approx(ins.eta * ev.plan.half_span_m, abs=0.01)
+
+
+def test_a_joint_that_mates_flat_gets_no_insert():
+    """gen7's trainer: its first joint does not turn (the faces mate flat)
+    and its second turns 22 degrees. One insert, at the second."""
+    ev = _fleet_eval("trainer_v3")
+    wing = [p for p in ev.panels if p.role == "wing"]
+    flat = [j for j, p in enumerate(wing[1:], start=1) if p.frame.pivot == "flat"]
+    assert flat and all(i.joint not in flat for i in ev.inserts)
+    turning = [j for j, p in enumerate(wing[1:], start=1)
+               if p.frame.pivot in ("upper", "lower")]
+    assert sorted(i.joint for i in ev.inserts) == turning
+    for i in ev.inserts:
+        chk = vase.check_insert(i, ev.print_settings)
+        assert chk.ok, chk.report()
+
+
+def test_a_tube_against_the_skin_notches_the_insert_or_fills_it():
+    """The spars are SEATED against a skin, so where a joint's wedge is
+    thin the tube's bore reaches the insert's outline -- and a closed hole
+    one sliver from the edge is not printable. The first insert gated that
+    as a failed bore and rejected every design of the flatter-winged gen8
+    family with it. Now:
+      * where the tube leaves a neck of two beads, the outline is NOTCHED
+        round it: a C-shaped channel, the outline area less exactly the
+        part of the (grown) disc inside it;
+      * where it severs the wedge, the joint is a declared glue fill,
+        charged by weight and not gated for print.
+    The notch is checked on a shape with a known answer: a 40 x 10
+    rectangle (open along its top edge, the crest cut) and a disc of
+    radius 3 centred 1 mm inside its bottom edge."""
+    from washout.printing.inserts import _notch_one, _points_in_polygon
+    rect = np.array([[40.0, 10.0], [40.0, 0.0], [0.0, 0.0], [0.0, 10.0]])
+    # open arc: from the top right, down, along the bottom, up to top left
+    open_arc = np.vstack([np.linspace(rect[0], rect[1], 11)[:-1],
+                          np.linspace(rect[1], rect[2], 41)[:-1],
+                          np.linspace(rect[2], rect[3], 11)])
+    th = np.linspace(0.0, 2 * np.pi, 400, endpoint=False)
+    hole = np.stack([20.0 + 3.0 * np.cos(th), 1.0 + 3.0 * np.sin(th)], 1)
+    res = _notch_one(open_arc, hole, grow=0.0)
+    assert res is not None
+    pre, arc, post, c, r = res
+    new = np.vstack([pre, arc[1:-1], post])
+    area = 0.5 * abs(np.dot(new[:, 0], np.roll(new[:, 1], -1))
+                     - np.dot(new[:, 1], np.roll(new[:, 0], -1)))
+    # the disc's part inside the rectangle: all of it above y = 0
+    d = 1.0                                        # centre above the edge
+    seg = r * r * np.arccos(-d / r) + d * np.sqrt(r * r - d * d)
+    assert area == pytest.approx(400.0 - seg, rel=2e-3)
+    # the channel runs INSIDE the part, round the tube's far side
+    assert arc[1:-1, 1].max() == pytest.approx(1.0 + 3.0, abs=0.05)
+    assert _points_in_polygon(np.array([[20.0, 4.5]]), new)[0]
+    assert not _points_in_polygon(np.array([[20.0, 2.0]]), new)[0]
+
+    # and a wedge the tube severs is filled, not printed
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    m = Mission.micro_fpv_winglet()
+    d = _json.loads((ASSETS.parent / "results" / "fleet" / "fpv_micro_fpv_s4"
+                     / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
+                  z_step_mm=2.0, size_structure=False)
+    ins = ev.inserts[0]
+    assert ins.glue_fill
+    assert vase.check_insert(ins, ev.print_settings).ok
+    item = next(i for i in ev.mass.items if i.name == f"joint fill {ins.joint}")
+    assert item.mass_kg == pytest.approx(2.0 * ins.fill_g() / 1000.0)
+    assert not any("insert" in r for r in ev.reasons)

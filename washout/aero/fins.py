@@ -28,9 +28,19 @@ What is modelled, and on what authority:
     for a printed plate; it also damps yaw, since it acts at the tips
   * mass -- plate volume at the filament density plus glue, at the centroid
 
-NOT modelled, deliberately: the fins' end-plate reduction of the wing's
-induced drag. The benefit is real and it is left unclaimed, so any fin
-the optimizer fits has to earn its place on stability alone.
+The end-plate effect is now CLAIMED, in the lattice. The fins used to
+be left out of the vortex lattice on purpose, so a fin had to earn its
+place on stability alone -- while a curled wing tip, which is part of
+the lattice, collected its full induced-drag benefit. That is not
+conservatism, it is an uneven field: micro_fpv's gen7 winner curled 27%
+of its semi-span and carried no fins. `vlm.build_lattice(fins=...)`
+panels both plates, and the Trefftz wake branches at each tip; the
+lattice reproduces Hoerner's measured end-plate rule to 2% and puts a
+fin's side-force slope between the isolated-plate and reflection-plane
+closed forms (tests/test_validation.py). With the fins in the lattice,
+`dynamics.analyse` takes their side force from it and the plate
+formula above is used only by the static proxy gate (`lateral.py`),
+which is closed-form throughout.
 """
 
 from __future__ import annotations

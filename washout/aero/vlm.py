@@ -35,14 +35,23 @@ FOURPI = 4.0 * np.pi
 # --------------------------------------------------------------- filaments
 
 
-def _bound(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _bound(p: np.ndarray, a: np.ndarray, b: np.ndarray,
+           core: float = 0.0) -> np.ndarray:
     """Biot-Savart for a finite filament a->b of unit strength.
 
-    p (M,3) field points, a/b (N,3) segment ends -> (M,N,3)."""
+    p (M,3) field points, a/b (N,3) segment ends -> (M,N,3).
+
+    `core` > 0 regularises the filament's line: the squared distance to it
+    becomes d^2 + core^2 (a Scully-type core). The wing never uses one --
+    core 0 is the classical kernel to the bit -- and the fin junction
+    does; see VLM.__init__."""
     r1 = p[:, None, :] - a[None, :, :]
     r2 = p[:, None, :] - b[None, :, :]
     cr = np.cross(r1, r2)
     den = np.einsum("mnk,mnk->mn", cr, cr)
+    if core > 0.0:
+        seg = b - a
+        den = den + core * core * np.einsum("nk,nk->n", seg, seg)[None, :]
     n1 = np.linalg.norm(r1, axis=2)
     n2 = np.linalg.norm(r2, axis=2)
     r0 = (b - a)[None, :, :]
@@ -56,11 +65,20 @@ def _bound(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return coef[..., None] * cr
 
 
-def _semi_infinite(p: np.ndarray, a: np.ndarray, d: np.ndarray) -> np.ndarray:
-    """Filament from a to infinity along unit vector d -> (M,N,3)."""
+def _semi_infinite(p: np.ndarray, a: np.ndarray, d: np.ndarray,
+                   core: float = 0.0) -> np.ndarray:
+    """Filament from a to infinity along unit vector d -> (M,N,3).
+
+    With a core, the same kernel in its (1 + cos)/d_perp^2 form -- equal to
+    1/(n (n - d.r)) identically -- with d_perp^2 + core^2 underneath."""
     r = p[:, None, :] - a[None, :, :]
     n = np.linalg.norm(r, axis=2)
     cr = np.cross(d[None, None, :], r)
+    if core > 0.0:
+        perp2 = np.einsum("mnk,mnk->mn", cr, cr)
+        cos = np.einsum("k,mnk->mn", d, r) / np.maximum(n, 1e-12)
+        coef = (1.0 + cos) / (perp2 + core * core) / FOURPI
+        return coef[..., None] * cr
     den = n * (n - np.einsum("k,mnk->mn", d, r))
     good = den > 1e-12
     coef = np.where(good, 1.0 / np.where(good, den, 1.0), 0.0) / FOURPI
@@ -68,9 +86,35 @@ def _semi_infinite(p: np.ndarray, a: np.ndarray, d: np.ndarray) -> np.ndarray:
 
 
 def horseshoe(p: np.ndarray, a: np.ndarray, b: np.ndarray,
-              d: np.ndarray) -> np.ndarray:
+              d: np.ndarray, core: float = 0.0) -> np.ndarray:
     """Bound segment a->b plus the two streamwise trailing legs."""
-    return (_bound(p, a, b) + _semi_infinite(p, b, d) - _semi_infinite(p, a, d))
+    return (_bound(p, a, b, core) + _semi_infinite(p, b, d, core)
+            - _semi_infinite(p, a, d, core))
+
+
+def _influence(p: np.ndarray, lat: "Lattice", d: np.ndarray) -> np.ndarray:
+    """(N, N, 3) velocity each of the lattice's horseshoes induces at `p`,
+    ONE POINT PER PANEL in panel order (control points, or bound-vortex
+    midpoints), so the first `n_wing_panels` rows are wing points.
+
+    Wing on wing and fin on fin are the classical kernel. ACROSS the
+    junction -- a fin's vortices at a wing point, a wing's at a fin point
+    -- the kernel is cored at `lat.fin_core`: the wing's last cosine strip
+    puts its control points a fraction of a millimetre from the fin's root
+    vortices, and the unregularised kernel there swung one design's fin
+    side-force slope from -0.24 to +11.8 as the fin was refined. Coring
+    the fin's influence on ITSELF as well was tried and is wrong: it
+    shrinks each panel's own induced velocity, which is the fin's aspect
+    ratio, and put a fin's slope past the reflection-plane limit."""
+    if not lat.n_fin_strips:
+        return horseshoe(p, lat.a, lat.b, d)
+    nw, c = lat.n_wing_panels, lat.fin_core
+    out = np.empty((len(p), lat.n_panels, 3))
+    out[:nw, :nw] = horseshoe(p[:nw], lat.a[:nw], lat.b[:nw], d)
+    out[:nw, nw:] = horseshoe(p[:nw], lat.a[nw:], lat.b[nw:], d, c)
+    out[nw:, :nw] = horseshoe(p[nw:], lat.a[:nw], lat.b[:nw], d, c)
+    out[nw:, nw:] = horseshoe(p[nw:], lat.a[nw:], lat.b[nw:], d)
+    return out
 
 
 # ------------------------------------------------------------------ lattice
@@ -98,18 +142,116 @@ class Lattice:
     area: float
     mac: float
     span: float
+    # Tip fins, when the lattice carries them. Their panels come AFTER
+    # every wing panel and their strips are numbered after every wing
+    # strip, so the wing's arrays above -- y_strip, dy_strip, z_strip --
+    # are exactly what they were without fins, and every consumer of the
+    # spanwise loading (tip-stall gate, strip-theory drag, structure)
+    # still reads the wing and only the wing.
+    fin_rel: np.ndarray | None = None
+    """(F, 2, 2): each fin strip's start and end in the Trefftz (y, z)
+    plane, RELATIVE to the wing-tip node it hangs from, ordered along its
+    bound vortex (a -> b). F counts both fins."""
+    fin_side: np.ndarray | None = None
+    """(F,): +1 starboard, -1 port -- which tip node the strip hangs from."""
+    fin_core: float = 0.0
+    """Vortex core for every interaction involving a fin: half a fin strip."""
 
     @property
     def n_panels(self) -> int:
         return len(self.a)
 
+    @property
+    def n_wing_panels(self) -> int:
+        return int((self.strip < len(self.y_strip)).sum())
 
-def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
+    @property
+    def n_wing_strips(self) -> int:
+        return len(self.y_strip)
+
+    @property
+    def n_fin_strips(self) -> int:
+        return 0 if self.fin_side is None else len(self.fin_side)
+
+
+def _fin_panels(fins, z_root: float, nf: int, nc: int):
+    """Starboard fin panels: vertical plates in the plane y = y_tip.
+
+    THE ROOT IS FLAT, at `z_root` (the tip's trailing-edge height, where
+    the wing's wake and the fin's meet). A fin's strips are stacked in z,
+    so its chordwise lines must run streamwise at constant z: its trailing
+    legs are straight and horizontal, and a chordwise line that climbs --
+    following the tip's camber line was tried -- carries the legs of its
+    forward panels down through the control points of the strips below.
+    On fpv_micro_fpv_s4's swept fins that put control points 0.0-0.2 mm
+    from a leg, and the fin's side-force slope went -0.19, -0.15, -0.01,
+    -0.34 as it was refined. (A wing can follow its camber: its strips are
+    stacked in y, and camber moves its legs out of the surface, not
+    across strips.)
+
+    The wing's own tip vortices leave at the tip camber heights, a few
+    millimetres around `z_root`, and pass through the fin's lowest strip;
+    that is what the junction core in `_influence` is sized to.
+
+    Strips are UNIFORM up each part. Clustering them at the free tip, as
+    the wing clusters its span, made tip strips 0.2 mm tall under 6 mm
+    chordwise panels, and the circulation there alternated in sign from
+    strip to strip.
+
+    Each part (above the chord line, and below it when `below_frac` > 0)
+    tapers from the root chord to the tip chord over its own height, with
+    the leading edge swept, exactly as `TipFins.outline` draws it; heights
+    are measured from the camber line.
+
+    Every bound vortex runs UP (a -> b along +z), bottom of the fin to
+    top, through the root; the port copy's is reversed by the mirror.
+    -> panel lists and the per-strip (h0, h1) heights, bottom to top."""
+    t = np.tan(np.radians(fins.sweep_deg))
+    hu = (1.0 - fins.below_frac) * fins.height_m
+    hd = fins.below_frac * fins.height_m
+    cr, ct, x0, y = fins.root_chord_m, fins.tip_chord_m, fins.x_root_le_m, fins.y_m
+    xc_edges = cosine_x(nc + 1)
+    parts = []
+    if hd > 1e-6:
+        n_lo = max(2, int(round(nf * hd / fins.height_m)))
+        parts.append((hd, n_lo, -1.0))
+    parts.append((hu, max(2, nf - (parts[0][1] if parts else 0)), +1.0))
+
+    def pt(h: float, frac: float, h_part: float) -> np.ndarray:
+        ah = abs(h)
+        c = cr + (ct - cr) * ah / h_part
+        return np.array([x0 + ah * t + frac * c, y, z_root + h])
+
+    A, B, CP, NRM, DY, XQC, strips = [], [], [], [], [], [], []
+    for h_part, n_s, sgn in parts:
+        e = np.linspace(0.0, 1.0, n_s + 1)
+        hs = sgn * e * h_part
+        if sgn < 0:
+            hs = hs[::-1]                    # bottom -> root, running up
+        for h0, h1 in zip(hs, hs[1:]):
+            hm = 0.5 * (h0 + h1)
+            strips.append((h0, h1))
+            for c0, c1 in zip(xc_edges, xc_edges[1:]):
+                q = c0 + 0.25 * (c1 - c0)
+                A.append(pt(h0, q, h_part))
+                B.append(pt(h1, q, h_part))
+                CP.append(pt(hm, c0 + 0.75 * (c1 - c0), h_part))
+                NRM.append(np.array([0.0, 1.0, 0.0]))
+                DY.append(abs(h1 - h0))
+                XQC.append(0.5 * (A[-1][0] + B[-1][0]))
+    return A, B, CP, NRM, DY, XQC, strips
+
+
+def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
+                  fins=None, nf: int = 12, ncf: int = 6) -> Lattice:
     """Cosine-spaced spanwise strips, cosine-spaced chordwise panels.
 
     Cosine spanwise clustering puts panels where the loading gradient is
     -- the tip, and the blend kink. Uniform spacing on a BWB underloads
-    the tip and quietly flatters the induced drag."""
+    the tip and quietly flatters the induced drag.
+
+    `fins` (aero/fins.py TipFins) adds a vertical plate at each tip: `nf`
+    strips up its height and `ncf` panels along its chord."""
     etas = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, ns + 1)))  # 0..1 edges
     xc_edges = cosine_x(nc + 1)
 
@@ -178,7 +320,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
     cp_m, nrm_m = cp * flip, nrm * flip
     ns_strips = len(y_strip)
 
-    return Lattice(
+    lat = Lattice(
         a=np.concatenate([a, a_m]), b=np.concatenate([b, b_m]),
         cp=np.concatenate([cp, cp_m]), normal=np.concatenate([nrm, nrm_m]),
         dy=np.concatenate([dy, dy]), x_qc=np.concatenate([xqc, xqc]),
@@ -188,6 +330,111 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6) -> Lattice:
         z_strip=np.concatenate([z_strip, z_strip]),
         area=plan.area_m2, mac=plan.mac_m, span=plan.span_m,
     )
+    if fins is None:
+        return lat
+
+    z_root = float(camber_point(1.0, 1.0)[2])
+    fa, fb, fcp, fn, fdy, fx, fstrips = _fin_panels(fins, z_root, nf, ncf)
+    fa, fb, fcp, fn = map(np.array, (fa, fb, fcp, fn))
+    fdy, fx = np.array(fdy), np.array(fx)
+    nfs = len(fstrips)
+    fstrip = np.repeat(np.arange(nfs), ncf) + 2 * ns_strips
+    # the port fin: y negated, ends swapped, so its vortices run DOWN
+    fa_m, fb_m = fb * flip, fa * flip
+    rel_s = np.array([[[0.0, h0], [0.0, h1]] for h0, h1 in fstrips])
+    rel_p = rel_s[:, ::-1, :]                 # port: top -> bottom
+    lat.a = np.concatenate([lat.a, fa, fa_m])
+    lat.b = np.concatenate([lat.b, fb, fb_m])
+    lat.cp = np.concatenate([lat.cp, fcp, fcp * flip])
+    lat.normal = np.concatenate([lat.normal, fn, fn * flip])
+    lat.dy = np.concatenate([lat.dy, fdy, fdy])
+    lat.x_qc = np.concatenate([lat.x_qc, fx, fx])
+    lat.strip = np.concatenate([lat.strip, fstrip, fstrip + nfs])
+    lat.fin_rel = np.concatenate([rel_s, rel_p])
+    lat.fin_side = np.concatenate([np.ones(nfs), -np.ones(nfs)])
+    # The junction core covers the two distances at which the lattices
+    # meet, and nothing more: the wing's last control points sit half a
+    # strip width inboard of the fin's plane, and the wing's tip vortices
+    # leave at the tip's camber heights, spread about the flat fin root.
+    # The spread does not shrink as either lattice is refined, so neither
+    # may the core. Sizing it to half a FIN strip instead was tried: on a
+    # planar end plate it cost 10% of the end-plate gain at h/b = 0.2,
+    # because the coupling it smears is the end-plate effect itself.
+    tip_b = b[np.abs(b[:, 1] - plan.half_span_m) < 1e-12]
+    spread = float(np.abs(tip_b[:, 2] - z_root).max()) if len(tip_b) else 0.0
+    lat.fin_core = max(0.5 * float(dy_strip.min()), spread)
+    return lat
+
+
+# ------------------------------------------------------------------ Trefftz
+
+
+def trefftz_cdi(pts: np.ndarray, edge: np.ndarray, g: np.ndarray,
+                fin_rel: np.ndarray | None, fin_side: np.ndarray | None,
+                g_fin: np.ndarray | None, area: float) -> float:
+    """Induced drag of a wake sheet that may branch, in the Trefftz plane.
+
+    `pts` (S,2) and `edge` (S+1,2) are the wing chain's strip centres and
+    nodes, port to starboard, with `g` (S,) its strip circulations; fins
+    hang from the chain's two END nodes. Each strip runs from a start node
+    to an end node along its bound vortex, and a node sheds the jump in
+    circulation across it,
+
+        shed(node) = sum(G of strips ending there) - sum(G starting there),
+
+    which on a plain chain is G[i-1] - G[i], the familiar sheet. The
+    downwash normal to each strip -- the +90 degree turn of its running
+    direction, the same convention the chain uses -- then gives
+
+        CDi = -sum(G w ds) / S
+
+    over every strip, wing and fin alike."""
+    S = len(g)
+    nodes = [p for p in edge]
+    starts = list(range(S))
+    ends = list(range(1, S + 1))
+    cent = [p for p in pts]
+    gam = list(g)
+    if fin_rel is not None and len(fin_rel):
+        junction = {+1.0: edge[-1], -1.0: edge[0]}     # starboard, port
+        for rel, side, gf in zip(fin_rel, fin_side, g_fin):
+            p0 = junction[float(side)] + rel[0]
+            p1 = junction[float(side)] + rel[1]
+            ids = []
+            for p in (p0, p1):
+                hit = next((i for i, q in enumerate(nodes)
+                            if abs(q[0] - p[0]) < 1e-12 and abs(q[1] - p[1]) < 1e-12),
+                           None)
+                if hit is None:
+                    nodes.append(np.asarray(p, dtype=float))
+                    hit = len(nodes) - 1
+                ids.append(hit)
+            starts.append(ids[0])
+            ends.append(ids[1])
+            cent.append(0.5 * (p0 + p1))
+            gam.append(float(gf))
+    nodes = np.array(nodes)
+    cent = np.array(cent)
+    gam = np.array(gam)
+    starts, ends = np.array(starts), np.array(ends)
+
+    shed = np.zeros(len(nodes))
+    np.add.at(shed, ends, gam)
+    np.add.at(shed, starts, -gam)
+
+    seg = nodes[ends] - nodes[starts]
+    ds = np.linalg.norm(seg, axis=1)
+    tang = seg / np.maximum(ds, 1e-12)[:, None]
+    nrm2 = np.stack([-tang[:, 1], tang[:, 0]], 1)
+
+    d = cent[:, None, :] - nodes[None, :, :]
+    r2 = (d ** 2).sum(-1)
+    r2 = np.where(r2 > 1e-18, r2, np.inf)
+    k = shed[None, :] / (2.0 * np.pi * r2)
+    v_y = (k * -d[:, :, 1]).sum(1)
+    v_z = (k * d[:, :, 0]).sum(1)
+    w = v_y * nrm2[:, 0] + v_z * nrm2[:, 1]
+    return float(-(gam * w * ds).sum() / area)
 
 
 # -------------------------------------------------------------------- solve
@@ -213,16 +460,39 @@ class VLM:
     every extra angle costs a triangular solve. A trim search that walks
     five angles therefore costs barely more than one."""
 
-    def __init__(self, plan: Planform, ns: int = 24, nc: int = 6):
+    def __init__(self, plan: Planform, ns: int = 24, nc: int = 6, fins=None,
+                 nf: int = 12, ncf: int = 6):
         self.plan = plan
-        self.lat = build_lattice(plan, ns, nc)
+        self.fins = fins
+        self.lat = build_lattice(plan, ns, nc, fins=fins, nf=nf, ncf=ncf)
         d = np.array([1.0, 0.0, 0.0])          # streamwise trailing legs
-        v = horseshoe(self.lat.cp, self.lat.a, self.lat.b, d)
+        v = _influence(self.lat.cp, self.lat, d)
         self.aic = np.einsum("mnk,mk->mn", v, self.lat.normal)
         self._lu = np.linalg.inv(self.aic)     # small and dense; invert once
         self._chord_strip = np.array(
             [plan.at(abs(y) / plan.half_span_m).chord_m
              for y in self.lat.y_strip])
+
+    def _sheet(self, g_strip: np.ndarray):
+        """The wing's wake in the Trefftz plane: strip centres (S,2), nodes
+        (S+1,2) and circulations, port to starboard.
+
+        Nodes are midpoints between centres, the two ends stepped out by
+        half a strip along the local run of the sheet."""
+        lat = self.lat
+        order = np.argsort(lat.y_strip)
+        pts = np.stack([lat.y_strip[order], lat.z_strip[order]], 1)
+        mid = 0.5 * (pts[:-1] + pts[1:])
+        first = pts[0] - 0.5 * (pts[1] - pts[0])
+        last = pts[-1] + 0.5 * (pts[-1] - pts[-2])
+        edge = np.concatenate([first[None, :], mid, last[None, :]], 0)
+        return pts, edge, g_strip[order]
+
+    @property
+    def has_fins(self) -> bool:
+        """The fins are IN this lattice: their side force, and what they do
+        to the wing's tip loading and its wake, come out of the solve."""
+        return self.lat.n_fin_strips > 0
 
     def solve(self, alpha_deg: float, x_ref_m: float) -> AeroPoint:
         lat = self.lat
@@ -233,7 +503,9 @@ class VLM:
 
         # --- strip totals ---
         n_strips = len(lat.y_strip)
-        g_strip = np.bincount(lat.strip, weights=gamma, minlength=n_strips)
+        g_all = np.bincount(lat.strip, weights=gamma,
+                            minlength=n_strips + lat.n_fin_strips)
+        g_strip = g_all[:n_strips]
 
         # --- lift and moment: Kutta-Joukowski on the bound segments ---
         # dF = rho * V x Gamma*dl ; with |V|=1 and rho=1 the coefficients
@@ -256,19 +528,7 @@ class VLM:
         # when the wing is planar (z = 0 makes the normal +z and the
         # kernel 1/dy), which is what keeps the elliptic-wing e = 0.99
         # calibration honest.
-        order = np.argsort(lat.y_strip)
-        y = lat.y_strip[order]
-        z = lat.z_strip[order]
-        g = g_strip[order]
-        dyv = lat.dy_strip[order]
-        pts = np.stack([y, z], 1)                       # (S,2) strip centres
-
-        # sheet edges: midpoints, with the two ends stepped out by half a
-        # strip along the local run of the sheet
-        mid = 0.5 * (pts[:-1] + pts[1:])
-        first = pts[0] - 0.5 * (pts[1] - pts[0])
-        last = pts[-1] + 0.5 * (pts[-1] - pts[-2])
-        edge = np.concatenate([first[None, :], mid, last[None, :]], 0)  # (S+1,2)
+        pts, edge, g = self._sheet(g_strip)
 
         seg = edge[1:] - edge[:-1]                      # (S,2) per-strip run
         ds = np.linalg.norm(seg, axis=1)
@@ -288,6 +548,15 @@ class VLM:
         v_z = (k * d[:, :, 0]).sum(1)
         w = v_y * nrm2[:, 0] + v_z * nrm2[:, 1]
         CDi = -(g * w * ds).sum() / lat.area
+        if lat.n_fin_strips:
+            # The fins make the sheet a branched curve -- a T at each tip --
+            # which the chain above cannot hold, so the whole sheet is
+            # redone as nodes and strips. The chain's own nodes and
+            # centres are kept exactly, so the planar part is the same
+            # geometry; test_validation pins that this general form
+            # reproduces the chain to round-off on a wing without fins.
+            CDi = trefftz_cdi(pts, edge, g, lat.fin_rel, lat.fin_side,
+                              g_all[n_strips:], lat.area)
         ar = lat.span**2 / lat.area
         e = (CL**2 / (np.pi * ar * CDi)) if CDi > 1e-12 else 1.0
 
@@ -337,7 +606,7 @@ class VLM:
         w = getattr(self, "_w_mid", None)
         if w is None:
             mid = 0.5 * (self.lat.a + self.lat.b)
-            w = horseshoe(mid, self.lat.a, self.lat.b, np.array([1.0, 0.0, 0.0]))
+            w = _influence(mid, self.lat, np.array([1.0, 0.0, 0.0]))
             self._w_mid = w
         return w
 

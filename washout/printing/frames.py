@@ -281,9 +281,22 @@ def slice_layers(plan: Planform, frame: PanelFrame, z_mm: np.ndarray,
     edge's minimum thickness has to be raised by in the `y = const`
     section so it survives the tilt into the layer plane.
 
-    -> (contours (L, N, 2) print X/Y before bed centring, eta (L,))."""
-    H = plan.half_span_m * 1000.0
+    -> (contours (L, N, 2) print X/Y before bed centring, eta (L,)).
+
+    The span rates are differences across the layers asked for, so a call
+    for fewer than three layers is padded with a symmetric stencil of
+    half-millimetre neighbours and only the requested layers returned. A
+    SINGLE layer used to get zero rates: every point then slid along y
+    alone, and a joint face cut that way sat 4 mm aft of the loft on
+    micro_fpv's swept wing -- invisible to a distance-to-surface check,
+    because a chordwise slide along a nearly flat crest barely leaves it."""
     z_mm = np.asarray(z_mm, dtype=float)
+    if len(z_mm) < 3:
+        pad = np.concatenate([z_mm[:1] - 1.0, z_mm[:1] - 0.5, z_mm,
+                              z_mm[-1:] + 0.5, z_mm[-1:] + 1.0])
+        c, e = slice_layers(plan, frame, pad, unit_loop)
+        return c[2:2 + len(z_mm)], e[2:2 + len(z_mm)]
+    H = plan.half_span_m * 1000.0
     etas = reference_etas(plan, frame, z_mm)
     st = [plan.at(float(np.clip(e, 0.0, 1.0))) for e in etas]
     y = etas * H

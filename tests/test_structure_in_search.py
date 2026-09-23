@@ -205,9 +205,12 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
     stopped being cut open for the payload bays, and to ~350 g when the
     tubes became straight (ROADMAP-CAD.md section 0.1): the fit had been
     charging two tubes that bent all the way to eta 1.00 and 0.76, and a
-    straight tube a side stops at 0.68 and 0.58. Both moves are the
-    aircraft changing, not an estimate drifting -- and it still misses
-    its wing loading.
+    straight tube a side stops at 0.68 and 0.58. It went to ~355 g when
+    the wedges its two turning joints leave were weighed (2026-09-23):
+    4.5 g of glue fill at the first, where the spar severs a thin wedge,
+    and a 1.1 g printed insert at the second. Every move is the aircraft
+    changing, not an estimate drifting -- and it still misses its wing
+    loading.
 
     This test exists so the mass can never quietly drift back down. The
     number it pins is the one a builder would put on a scale."""
@@ -220,8 +223,8 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
                                   bed_z_mm=250.0)
     ev = evaluate(np.array(d["u"]), m, base, settings)
 
-    assert ev.mass_kg * 1000 == pytest.approx(350.0, abs=4.0), (
-        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~350")
+    assert ev.mass_kg * 1000 == pytest.approx(355.0, abs=4.0), (
+        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~355")
     loading = ev.mass_kg * 1000.0 / (ev.plan.area_m2 * 100.0)
     assert loading > m.max_wing_loading_gdm2, (
         f"wing loading {loading:.1f} should now miss "

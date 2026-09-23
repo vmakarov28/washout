@@ -242,14 +242,49 @@ order beside it. The interesting output is not the winner, it is **how
 often tier 1 changes the order** - that number says whether the search's
 rankings can be trusted at all, which is currently an assumption.
 
-## 8. Finish a tier-2 run - P2
+## 8. Finish a tier-2 run - **DONE 2026-09-23, first results in**
 
-The 3D whole-aircraft LBM has never completed; the previous attempt hung
-the WSL VM. It has one job: check whether the VLM's induced drag plus
-strip-theory profile drag add up on a real blended wing body with a fat
-centre body, where the strip assumption is weakest. Run it detached, with
-a memory cap, and treat hanging that VM as a bot-killing failure rather
-than an inconvenience (see constraints).
+The 3D whole-aircraft LBM had never completed; the previous attempt hung
+the WSL VM. `scripts/tunnel3d.py` now writes a scene and calls the
+tunnel's `run3d.py` (no import), inside a systemd scope with a memory cap,
+at nice 10, with a CUDA allocator cap -- and that cap is what stopped the
+first full-resolution attempt cleanly (renderer OOM at its first frame)
+instead of spilling into the VM. It runs with a three-colour smoke rake,
+renders tunnel photographs, and exports a bundle for the tunnel repo's
+browser viewer (`python ../windtunnel/scripts/serve_viewer.py
+out/tunnel3d/<run>/tunnel/viewer`).
+
+gen7 micro_fpv at its trim angle (3.2 deg), Re 15,000 on the MAC -- TEN
+TIMES below flight -- 42.9 M cells, 68 per MAC, 31 min:
+
+| | tunnel | vortex lattice |
+|---|---|---|
+| CL (surface force) | 0.077 +/- 0.001 | 0.203 (inviscid) |
+| CL (circulation, KJ) | 0.067 (86% of the force; the check) | |
+| lift inboard of half semi-span | 103% | 67% |
+| lift outboard of 80% | -1% | 7% |
+
+And at 9 deg: tunnel CL 0.208 (circulation 0.189, 91% of it), lattice
+0.493; inboard half 80% against 61%, outer 20% 2.4% against 11%. The
+smoke agrees: strong downwash behind the centre body, and the tip smoke
+barely rolls up -- the tips are so lightly loaded that their vortex is
+weak. The "air slides out round the tips" worry is not what the tunnel
+shows; what it shows is an outer wing that hardly lifts at this Reynolds
+number.
+
+Neither level is a flight number. The SHAPE is the finding: at this
+Reynolds number the outer wing and the curled tips carry no lift at all,
+and the centre body carries everything. The outer sections see about
+Re 9k here and are thin and reflexed, and that combination is known to
+go to zero or negative lift at small angles. The design is optimised to
+fly SLOW, which is where the outer wing's Reynolds number is lowest, so
+tier 1 on the outer sections at their stall-speed Reynolds number
+(~5e4) is the next measurement worth making.
+
+The spanwise loading is read from the circulation round each section of
+the averaged flow, not from the momentum exchange binned by span: on a
+voxel staircase the per-bin force alternates from step to step
+(windtunnel NOTES 2026-09-23).
 
 ---
 
@@ -487,6 +522,20 @@ lateral lever available to the micro unavailable to the other two? Sweep
 distribution, dihedral staging, and the aft spar's mass as a yaw-inertia
 term are all reachable in principle. Understand that before buying more
 fin area, which is mass and drag at the longest arm on the aeroplane.
+
+**2026-09-23: part of the answer was the model.** The fins were not in
+the vortex lattice; a curled wing tip was. So a fin was charged its mass
+and drag and credited nothing for the tip loss it stops, while the curl
+collected its full induced-drag benefit -- an uneven field, and micro_fpv's
+gen7 winner duly curled 27% of its semi-span and carried no fins. The fins
+are lattice panels now (`vlm.build_lattice(fins=...)`), with a branched
+Trefftz wake, and the lattice reproduces Hoerner's measured end-plate rule
+to 3% and puts a fin's side-force slope between the isolated-plate and
+reflection-plane closed forms. Three numerical faults had to go first, all
+at the junction where the wing's tip vortices pass the fin root; each has
+a test. gen8 re-asks the question on micro_fpv with a variant mission,
+`micro_fpv_winglet`, whose tip rise is capped at 12% so the yaw stiffness
+has to come from fins (results/README.md).
 
 ## 21. `span_m` is an inert dimension on two of three missions - P4
 

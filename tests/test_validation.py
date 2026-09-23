@@ -1618,3 +1618,121 @@ def test_a_tube_against_the_skin_notches_the_insert_or_fills_it():
     item = next(i for i in ev.mass.items if i.name == f"joint fill {ins.joint}")
     assert item.mass_kg == pytest.approx(2.0 * ins.fill_g() / 1000.0)
     assert not any("insert" in r for r in ev.reasons)
+
+
+# ------------------------------------- the elevon in the lattice, and the stall
+
+
+@pytest.mark.parametrize("ef", [0.165, 0.25])
+def test_an_elevon_in_the_lattice_converges_to_thin_aerofoil_theory(ef):
+    """A deflection is one more right-hand side: the normals aft of the
+    hinge turned about it. In the 2D limit dCL/ddelta over dCL/dalpha must
+    approach the closed-form flap effectiveness tau = 1 - (th - sin th)/pi
+    (Glauert), and approach it MONOTONICALLY as the chord is refined --
+    the hinge is a log singularity in the loading, so the discrete answer
+    comes from below. At nc 8, the search's lattice, it is 8-10% low; the
+    minimum speed it feeds moves 0.4% from nc 8 to nc 32 (next test)."""
+    from washout.geom.cst import flap_effectiveness
+    tau = flap_effectiveness(ef)
+    ratios = []
+    for nc in (8, 16, 32):
+        v = VLM(rect(1000.0, cst.naca4("0012")), ns=40, nc=nc, hinge_xc=1.0 - ef)
+        dn = v.elevon_dn(0.0, ef)
+        c0, ca = v.solve(0.0, 0.0).CL, v.solve(4.0, 0.0).CL
+        cd = v.solve(0.0, 0.0, 4.0, dn).CL
+        ratios.append((cd - c0) / (ca - c0))
+    assert ratios[0] < ratios[1] < ratios[2] < tau
+    assert ratios[2] == pytest.approx(tau, rel=0.03)
+
+
+def test_an_elevon_deflection_is_symmetric_and_lifts_trailing_edge_down():
+    af = cst.naca4("0012")
+    plan = demo_bwb(af)
+    v = VLM(plan, ns=24, nc=8)
+    dn = v.elevon_dn(0.4, 0.2)
+    p0, p1 = v.solve(3.0, 0.1), v.solve(3.0, 0.1, 5.0, dn)
+    assert p1.CL > p0.CL                     # TE down adds lift
+    assert p1.Cm < p0.Cm                     # ...and pitches the nose down
+    n = len(v.lat.y_strip) // 2
+    dcl = p1.cl_local - p0.cl_local
+    assert np.allclose(dcl[:n], dcl[n:2 * n], atol=1e-10)   # port = starboard
+    eta = np.abs(v.lat.y_strip) / plan.half_span_m
+    assert dcl[eta > 0.45].min() > dcl[eta < 0.2].max()     # it is ON the elevon
+
+
+def test_the_stall_starts_where_the_textbook_says_it_does():
+    """Critical-section method against the classical stall patterns of
+    untwisted wings: a rectangular wing loads its root hardest and stalls
+    there first; a sharply tapered one stalls near the tip; washout on the
+    same tapered wing moves the start inboard. And no wing's CL_max can
+    exceed the section cl_max it is built from.
+
+    (An elliptic wing, uniform cl in closed form, was the first choice and
+    is not usable: the lattice cannot resolve a chord that goes to zero,
+    and its last strip reads 25% high however the planform is sampled.
+    Every design here has a finite tip chord.)"""
+    from washout.aero.performance import slow_flight
+    af = cst.naca4("0012")
+
+    def tapered(taper, twist_tip):
+        return planform.Planform(3.0, (
+            planform.Station(0.0, 1.0, 0.0, 0.0, 0.0, af),
+            planform.Station(1.0, taper, 0.25 * (1 - taper), 0.0, twist_tip, af)), "t")
+
+    got = {}
+    for name, plan in (("rect", rect(6.0, af)), ("pointed", tapered(0.2, 0.0)),
+                       ("washed", tapered(0.2, -6.0))):
+        v = VLM(plan, ns=40, nc=6)
+        no_elevon = np.zeros_like(v.lat.normal)
+        got[name] = slow_flight(v, 0.25, 6.0, no_elevon, 1.0, 1.0, 12.0, 1.0)
+        assert got[name].limit == "stall"
+        assert got[name].cl_max < 1.0
+    assert got["rect"].eta_critical < 0.1
+    assert got["pointed"].eta_critical > 0.6
+    assert got["washed"].eta_critical < got["pointed"].eta_critical - 0.2
+
+
+def test_the_minimum_speed_does_not_hang_on_the_chordwise_lattice():
+    """On the micro_fpv winner the minimum speed moves under 1% from the
+    search's nc 8 to nc 32. That is a statement about THIS wing: on the
+    demo BWB it moves 3%, most of it the base lattice's own trim angle
+    (1.5 deg at nc 8, 2.8 at nc 32 -- the reflex camber resolving),
+    which every tier-0 number already carries."""
+    from washout.aero.performance import slow_flight
+    ev = _fleet_eval("micro_fpv")
+    p = _fleet_physical("micro_fpv")
+    got = []
+    for nc in (8, 32):
+        v = VLM(ev.plan, ns=32, nc=nc, fins=ev.fins)
+        a = v.trim_alpha(ev.mass.x_cg_m, bounds=(-10.0, 18.0))
+        dn = v.elevon_dn(p["elevon_eta"], p["elevon_chord"])
+        got.append(slow_flight(v, ev.mass.x_cg_m, a, dn, p["elevon_eta"], 0.85,
+                               12.0, ev.mass.total_kg).v_min_ms)
+    assert got[0] == pytest.approx(got[1], rel=0.01)
+
+
+def _fleet_physical(name):
+    import json as _json
+    from washout.search.design import unit_to_physical
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    return unit_to_physical(np.array(d["u"]))
+
+
+def test_the_micro_fpv_stall_starts_behind_its_cg():
+    """Found 2026-09-23, pinned so the finding cannot be argued away.
+
+    Every micro_fpv design through gen8 passed the tip-stall gate -- its
+    outer 20% works at under 88% of the peak cl -- and every one still
+    starts to stall at mid-span, about 0.18 MAC BEHIND the CG, because
+    the whole outer wing is swept aft of it. Lift lost there pitches the
+    nose up, into a deeper stall: the swept wing's pitch-up, and the
+    opposite of what a beginner's aircraft must do. The flat stall speed
+    (every section at cl_max at once, nothing spent on trim) also called
+    this wing 6.40 m/s; trimmed, it is 7.38."""
+    ev = _fleet_eval("micro_fpv")
+    assert ev.slow is not None and ev.slow.limit == "stall"
+    assert 0.35 < ev.slow.eta_critical < 0.6
+    assert ev.slow.v_min_ms == pytest.approx(7.38, abs=0.05)
+    assert any("pitches UP at the stall" in r for r in ev.reasons)

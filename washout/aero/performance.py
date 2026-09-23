@@ -226,6 +226,76 @@ def stall_speed_ms(mass: MassBudget, plan: Planform, cl_max: float = 0.9) -> flo
                          / (RHO_AIR * plan.area_m2 * cl_max)))
 
 
+@dataclass
+class SlowFlight:
+    """The slowest the aircraft can be FLOWN, sticks and all.
+
+    `stall_speed_ms` above assumes the whole wing reaches the section's
+    cl_max at once, with nothing spent on trim. A tailless wing gets
+    neither: some section reaches cl_max first, and every bit of extra
+    lift has to be trimmed with up-elevon, which takes lift away. This is
+    the number the pilot meets."""
+    cl_max: float           # trimmed wing CL at the limit
+    alpha_deg: float
+    delta_deg: float        # elevon at the limit, TE down +
+    limit: str              # "stall" or "elevon"
+    eta_critical: float     # |y|/b/2 of the first section to reach cl_max
+    v_min_ms: float
+
+
+def slow_flight(vlm: VLM, x_cg_m: float, alpha_trim_deg: float,
+                dn: np.ndarray, elevon_eta: float, cl_max_section: float,
+                max_up_deg: float, mass_kg: float) -> SlowFlight:
+    """Trimmed CL_max by the critical-section method, with the elevon in
+    the lattice.
+
+    The lattice is linear in (alpha, delta), so three solves give every
+    strip's cl and the pitching moment everywhere: at trim, one degree
+    more alpha, one degree of elevon. Holding Cm = 0 makes delta a linear
+    function of alpha; the limit is the smallest alpha at which either
+    some strip reaches `cl_max_section` or the elevon reaches
+    `max_up_deg`.
+
+    On the elevon, the strip's cl is checked WITHOUT the up-elevon's own
+    unloading of it: the check treats an up-deflected section's cl_max as
+    lowered by the full flap increment. Plain-flap data put the true
+    change somewhat below the full increment, so this errs toward a higher
+    stall speed -- the safe side for an objective that rewards a low one.
+    Section cl_max is the mission's declared number, the same everywhere,
+    until a measured one exists."""
+    p0 = vlm.solve(alpha_trim_deg, x_cg_m)
+    pa = vlm.solve(alpha_trim_deg + 1.0, x_cg_m)
+    pd = vlm.solve(alpha_trim_deg, x_cg_m, 1.0, dn)
+    cm_a, cm_d = pa.Cm - p0.Cm, pd.Cm - p0.Cm
+    cl_a, cl_d = pa.CL - p0.CL, pd.CL - p0.CL
+    n = len(p0.y_strip)
+    s_a = pa.cl_local[:n] - p0.cl_local[:n]
+    s_d = pd.cl_local[:n] - p0.cl_local[:n]
+    eta = np.abs(p0.y_strip) / vlm.plan.half_span_m
+    on = eta > elevon_eta
+    # trimmed: delta = k * dalpha
+    k = -cm_a / cm_d if abs(cm_d) > 1e-12 else 0.0
+    base = p0.cl_local[:n]                    # hands-off: elevon neutral
+    slope = s_a + k * s_d
+    check = slope - np.where(on, k * s_d, 0.0)            # no unloading credit
+    head = cl_max_section - base
+    with np.errstate(divide="ignore", invalid="ignore"):
+        room = np.where(check > 1e-12, head / check, np.inf)
+    i = int(np.argmin(room))
+    da_stall = float(room[i])
+    da_elev = ((max_up_deg / -k) if k < -1e-12 else np.inf)
+    if da_elev < da_stall:
+        da, limit = da_elev, "elevon"
+    else:
+        da, limit = da_stall, "stall"
+    if not np.isfinite(da):
+        da, limit = 30.0, "stall"
+    cl = p0.CL + da * (cl_a + k * cl_d)
+    v = float(np.sqrt(2 * mass_kg * G / (RHO_AIR * vlm.plan.area_m2 * max(cl, 1e-6))))
+    return SlowFlight(float(cl), float(alpha_trim_deg + da), float(k * da),
+                      limit, float(eta[i]), v)
+
+
 def wing_loading_gm2(mass: MassBudget, plan: Planform) -> float:
     return mass.total_kg * 1000.0 / plan.area_m2
 

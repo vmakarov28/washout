@@ -105,6 +105,14 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.fins.report(), ""]
     if getattr(ev, "dynamics", None) is not None:
         lines += [ev.dynamics.report(), ""]
+    if getattr(ev, "slow", None) is not None:
+        s = ev.slow
+        why = ("the elevon runs out of up-travel" if s.limit == "elevon"
+               else f"the section at eta {s.eta_critical:.2f} reaches cl_max")
+        lines += [f"slowest trimmed flight: {s.v_min_ms:.2f} m/s at CL {s.cl_max:.3f}, "
+                  f"alpha {s.alpha_deg:.1f} deg, elevon {s.delta_deg:+.1f} deg -- {why}; "
+                  f"first section to reach cl_max at eta {s.eta_critical:.2f}; "
+                  f"hands-off {ev.v_cruise / s.v_min_ms:.2f}x it", ""]
     if getattr(ev, "fairness", None) is not None:
         lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
     if getattr(ev, "lateral", None) is not None:

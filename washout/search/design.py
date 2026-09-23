@@ -470,6 +470,23 @@ class Mission:
     makes, so the real GJ is higher. A large factor on a conservative
     model is two safety margins stacked, which rejects designs for
     arithmetic rather than for physics."""
+    min_hands_off_margin: float = 0.0
+    """Floor on (hands-off trim speed) / (slowest trimmed speed); 0 is off.
+
+    Sticks centred, the aircraft settles at its trim speed; the slowest it
+    can be flown is where the first section stalls or the up-elevon runs
+    out (`performance.slow_flight`). 1.3 is the classic approach-speed
+    margin over the stall. A trainer that trims closer than that is one
+    gust, or one nervous pull, from the stall."""
+    stall_onset_ahead_of_cg: bool = False
+    """The first section to stall must sit AHEAD of the centre of gravity.
+
+    A section that stops lifting behind the CG pitches the nose UP, which
+    deepens the stall and spreads it -- the swept wing's pitch-up. Ahead
+    of the CG, the nose drops and the aircraft recovers on its own. The
+    tip-stall gate cannot see this: on a swept wing the tips can be well
+    unloaded and the peak can still sit at mid-span, 30-50 mm aft of the
+    CG, which is where every micro_fpv design through gen8 put it."""
     min_spiral_t2_s: float = 0.0
     """Fastest acceptable spiral divergence, as time to double; 0 is off.
     Yaw stiffness -- fins especially -- pushes the spiral mode toward
@@ -796,6 +813,10 @@ class Mission:
             min_cn_beta=0.025, max_roll_yaw_ratio=8.5,
             min_aeroelastic_margin=1.5,
             min_dutch_roll_zeta=0.08, min_spiral_t2_s=20.0,
+            # For a first-time pilot, and measured on the aircraft as
+            # flown (performance.slow_flight): hands-off at least 1.3x
+            # the slowest trimmed speed, and a stall that drops the nose.
+            min_hands_off_margin=1.3, stall_onset_ahead_of_cg=True,
             fairness=fz.Limits(max_root_t_over_c=0.26,
                                max_tip_rise_frac=0.28),
             # 6 mm, not micro's 8. The bore gate rejected two of the
@@ -1252,6 +1273,8 @@ class Evaluation:
     fairness: object | None = None
     fairness_limits: object | None = None
     fins: object | None = None
+    slow: object | None = None
+    """performance.SlowFlight: the slowest trimmed flight, and what limits it."""
     inserts: list = field(default_factory=list)
     """The joint wedge inserts (printing/inserts.py): the loft a turning
     joint leaves between two panel faces, as its own printed part.
@@ -1857,6 +1880,37 @@ def _evaluate_once(
                        f"{mission.max_wing_loading_gdm2:.0f} g/dm2")
         penalty += 2.0 * (loading - mission.max_wing_loading_gdm2)
 
+    # --- the slowest it can be FLOWN, and how it stalls there ---
+    # The elevon is a second right-hand side of the same lattice, so this
+    # is three triangular solves, not a rebuild. On the micro_fpv winner
+    # the minimum speed moves 0.4% from nc 8 to nc 32 (test_validation).
+    slow = None
+    if (mission.objective == "docile" or mission.min_hands_off_margin > 0.0
+            or mission.stall_onset_ahead_of_cg):
+        dn = vlm.elevon_dn(p_vec["elevon_eta"], p_vec["elevon_chord"])
+        slow = perf.slow_flight(vlm, mass.x_cg_m, alpha, dn, p_vec["elevon_eta"],
+                                mission.cl_max_section,
+                                mission.max_elevon_deflect_deg, mass.total_kg)
+        if mission.min_hands_off_margin > 0.0:
+            ratio = v / slow.v_min_ms
+            if ratio < mission.min_hands_off_margin:
+                reasons.append(
+                    f"hands-off {v:.1f} m/s is only {ratio:.2f}x the slowest "
+                    f"trimmed {slow.v_min_ms:.1f} m/s "
+                    f"(need {mission.min_hands_off_margin:.2f}x)")
+                penalty += 30.0 * (mission.min_hands_off_margin - ratio)
+        # Checked even when the elevon runs out first: that stops the
+        # pilot holding the wing stalled, not a gust or a pull-out
+        # taking it there, and where it lets go is the same place.
+        if mission.stall_onset_ahead_of_cg:
+            st_c = plan.at(slow.eta_critical)
+            aft = (st_c.x_le_m + 0.25 * st_c.chord_m - mass.x_cg_m) / plan.mac_m
+            if aft > 0.0:
+                reasons.append(
+                    f"stall starts at eta {slow.eta_critical:.2f}, "
+                    f"{aft:.2f} MAC behind the CG -- pitches UP at the stall")
+                penalty += 20.0 * aft
+
     # stall progression: the tip must be working LESS hard than the peak,
     # so the root gives up first and the nose drops instead of a wing.
     if mission.tip_stall_margin > 0.0:
@@ -1948,7 +2002,14 @@ def _evaluate_once(
         # wing loading: it pushes mass DOWN and area UP at the same time,
         # which is why the 250 g ceiling is a gate rather than a target.
         # A design has no reason to spend mass it does not need.
-        merit = -perf.stall_speed_ms(mass, plan, mission.cl_max_section)
+        #
+        # It is the TRIMMED minimum speed: the first section to reach
+        # cl_max, or the up-elevon running out, whichever comes first. The
+        # flat version -- every section at cl_max at once, nothing spent
+        # on trim -- reported the gen8 winner at 6.40 m/s against 7.38 for
+        # the aircraft as flown, and it could not tell a wing whose lift
+        # was well spread from one whose peak stalled early.
+        merit = -slow.v_min_ms
     else:
         merit = ld
 
@@ -1991,7 +2052,7 @@ def _evaluate_once(
         horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
-        fins=fins, inserts=inserts, dynamics=modes,
+        fins=fins, slow=slow, inserts=inserts, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
         aeroelastic=aero_e,

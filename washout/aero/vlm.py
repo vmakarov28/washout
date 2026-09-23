@@ -156,6 +156,10 @@ class Lattice:
     """(F,): +1 starboard, -1 port -- which tip node the strip hangs from."""
     fin_core: float = 0.0
     """Vortex core for every interaction involving a fin: half a fin strip."""
+    patch: np.ndarray | None = None
+    """(n_wing_panels, 4): each wing panel's [eta0, eta1, xc0, xc1] -- the
+    piece of the surface it stands for, which is what says how much of it
+    lies on a control surface. Same order as the panels, both halves."""
 
     @property
     def n_panels(self) -> int:
@@ -243,7 +247,8 @@ def _fin_panels(fins, z_root: float, nf: int, nc: int):
 
 
 def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
-                  fins=None, nf: int = 12, ncf: int = 6) -> Lattice:
+                  fins=None, nf: int = 12, ncf: int = 6,
+                  hinge_xc: float | None = None) -> Lattice:
     """Cosine-spaced spanwise strips, cosine-spaced chordwise panels.
 
     Cosine spanwise clustering puts panels where the loading gradient is
@@ -254,6 +259,15 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
     strips up its height and `ncf` panels along its chord."""
     etas = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, ns + 1)))  # 0..1 edges
     xc_edges = cosine_x(nc + 1)
+    if hinge_xc is not None and 0.0 < hinge_xc < 1.0:
+        # The hinge is a panel EDGE: the nearest interior edge moves onto
+        # it, so the count -- and the cost -- is unchanged. A hinge cutting
+        # a panel is a kink in the camber that one flat panel cannot hold,
+        # and the flap increment then converges slowly with nc.
+        k = 1 + int(np.argmin(np.abs(xc_edges[1:-1] - hinge_xc)))
+        xc_edges = xc_edges.copy()
+        xc_edges[k] = hinge_xc
+        xc_edges = np.sort(xc_edges)
 
     # plan.at() blends two CST sections and allocates; build_lattice asks
     # for the same span station five times per chordwise panel, so at
@@ -277,7 +291,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
                          eta * plan.half_span_m,
                          st.z_le_m + rot[1] * st.chord_m])
 
-    A, B, CP, NRM, DY, XQC, STRIP = [], [], [], [], [], [], []
+    A, B, CP, NRM, DY, XQC, STRIP, PATCH = [], [], [], [], [], [], [], []
     y_strip, dy_strip, z_strip = [], [], []
     s_index = 0
     for e0, e1 in zip(etas, etas[1:]):
@@ -305,6 +319,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
                 n = -n
             A.append(xa); B.append(xb); CP.append(cpt); NRM.append(n)
             DY.append(width); XQC.append(0.5 * (xa[0] + xb[0])); STRIP.append(s_index)
+            PATCH.append((e0, e1, c0, c1))
         s_index += 1
 
     a = np.array(A); b = np.array(B); cp = np.array(CP); nrm = np.array(NRM)
@@ -329,6 +344,7 @@ def build_lattice(plan: Planform, ns: int = 24, nc: int = 6,
         dy_strip=np.concatenate([dy_strip, dy_strip]),
         z_strip=np.concatenate([z_strip, z_strip]),
         area=plan.area_m2, mac=plan.mac_m, span=plan.span_m,
+        patch=np.concatenate([np.array(PATCH)] * 2),
     )
     if fins is None:
         return lat
@@ -461,10 +477,11 @@ class VLM:
     five angles therefore costs barely more than one."""
 
     def __init__(self, plan: Planform, ns: int = 24, nc: int = 6, fins=None,
-                 nf: int = 12, ncf: int = 6):
+                 nf: int = 12, ncf: int = 6, hinge_xc: float | None = None):
         self.plan = plan
         self.fins = fins
-        self.lat = build_lattice(plan, ns, nc, fins=fins, nf=nf, ncf=ncf)
+        self.lat = build_lattice(plan, ns, nc, fins=fins, nf=nf, ncf=ncf,
+                                 hinge_xc=hinge_xc)
         d = np.array([1.0, 0.0, 0.0])          # streamwise trailing legs
         v = _influence(self.lat.cp, self.lat, d)
         self.aic = np.einsum("mnk,mk->mn", v, self.lat.normal)
@@ -494,11 +511,42 @@ class VLM:
         to the wing's tip loading and its wake, come out of the solve."""
         return self.lat.n_fin_strips > 0
 
-    def solve(self, alpha_deg: float, x_ref_m: float) -> AeroPoint:
+    def elevon_dn(self, eta0: float, chord_frac: float) -> np.ndarray:
+        """d(normal)/d(delta), per radian, for both elevons deflected
+        together, trailing edge down positive.
+
+        The classical linear treatment of a flap in a vortex lattice: the
+        geometry and the influence matrix stay put, and a panel on the
+        flap has its normal turned about the hinge -- so a deflection is
+        one more right-hand side, not a rebuild. The hinge is at a fixed
+        chord fraction, parallel to the panels' bound legs; a panel the
+        hinge line (or the elevon's inboard end) cuts is turned by the
+        fraction of it that lies on the surface.
+
+        Turning n through d about the hinge axis h moves it by d (h x n).
+        The port half needs no special case: its legs are mirrored AND
+        reversed, and for a reflection M, (-Mh) x (Mn) = M (h x n), so the
+        port increment is the mirror of the starboard one."""
+        lat = self.lat
+        nw = lat.n_wing_panels
+        e0, e1, c0, c1 = lat.patch.T
+        span_w = np.clip((e1 - max(eta0, 0.0)) / np.maximum(e1 - e0, 1e-12), 0.0, 1.0)
+        hinge = 1.0 - chord_frac
+        chord_w = np.clip((c1 - hinge) / np.maximum(c1 - c0, 1e-12), 0.0, 1.0)
+        h = lat.b[:nw] - lat.a[:nw]
+        h /= np.maximum(np.linalg.norm(h, axis=1), 1e-12)[:, None]
+        dn = np.zeros_like(lat.normal)
+        dn[:nw] = (span_w * chord_w)[:, None] * np.cross(h, lat.normal[:nw])
+        return dn
+
+    def solve(self, alpha_deg: float, x_ref_m: float,
+              delta_deg: float = 0.0, dn: np.ndarray | None = None) -> AeroPoint:
+        """`dn` from `elevon_dn`; `delta_deg` the deflection, TE down +."""
         lat = self.lat
         a = np.radians(alpha_deg)
         vinf = np.array([np.cos(a), 0.0, np.sin(a)])       # |V| = 1
-        rhs = -(lat.normal @ vinf)
+        normal = lat.normal if dn is None else lat.normal + np.radians(delta_deg) * dn
+        rhs = -(normal @ vinf)
         gamma = self._lu @ rhs
 
         # --- strip totals ---

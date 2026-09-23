@@ -92,12 +92,13 @@ def export_step(ev, out_dir, every_mm: float = 3.0, tol_mm: float = 0.02,
         dv = 100.0 * (v_occ / v_mesh - 1.0)
         n_faces = len(info["faces"])
         dev = max(rep["fit_dev_mm"], rep["held_out_dev_mm"])
+        valid = brep.is_valid(solid)
         gates += [
             Gate(f"{part.name} loft fidelity", dev <= FIDELITY_MM, dev,
                  FIDELITY_MM, "mm", f"{rep['sections']} sections, held-out layers"),
             Gate(f"{part.name} volume", abs(dv) <= VOLUME_PCT, abs(dv),
                  VOLUME_PCT, "%", f"{v_occ / 1000:.2f} cm3 vs the layers' {v_mesh / 1000:.2f}"),
-            Gate(f"{part.name} valid solid", brep.is_valid(solid), 1.0, 1.0, "",
+            Gate(f"{part.name} valid solid", valid, float(valid), 1.0, "",
                  "closed, sewn, BRepCheck"),
             Gate(f"{part.name} faces", n_faces <= FACES_PER_PART, n_faces,
                  FACES_PER_PART, "", ", ".join(n for n, _ in info["faces"])),

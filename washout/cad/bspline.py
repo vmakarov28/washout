@@ -116,6 +116,23 @@ def _param(points: np.ndarray, by_index: bool) -> np.ndarray:
     return s / max(s[-1], 1e-12)
 
 
+def _chord_dev(points: np.ndarray) -> float:
+    """Largest distance from a point to the chord between the ends."""
+    if len(points) <= 2:
+        return 0.0
+    a, b = points[0], points[-1]
+    d = b - a
+    L2 = float(np.dot(d, d))
+    if L2 < 1e-24:
+        return float("inf")
+    t = np.clip((points - a) @ d / L2, 0.0, 1.0)
+    return float(np.linalg.norm(a + np.outer(t, d) - points, axis=1).max())
+
+
+def _straight(points: np.ndarray, tol_mm: float) -> bool:
+    return _chord_dev(points) <= tol_mm
+
+
 def fit_piece(name: str, sections: list[np.ndarray], v: np.ndarray,
               tol_mm: float = 0.01, deg: int = 3,
               counts=(8, 12, 16, 24, 32, 48, 64, 96, 128)) -> Surface:
@@ -128,10 +145,15 @@ def fit_piece(name: str, sections: list[np.ndarray], v: np.ndarray,
     station on every section and dense where the nose curves -- anything
     else centripetally."""
     same = len({len(s) for s in sections}) == 1
-    if all(len(s) == 2 for s in sections):
+    if all(_straight(s, tol_mm) for s in sections):
+        # A straight piece is ruled: its two ends ARE its poles. The
+        # elevon's floor and chamfer are straight; fitted as cubics, a
+        # chamfer whose sections were sampled differently escalated to
+        # interpolating every point and zigzagged 2.5 mm between them --
+        # demon1's elevon0 tip cap crossed itself.
         u_deg, knots = 1, np.array([0.0, 0.0, 1.0, 1.0])
         poles_u = [np.array([s[0], s[-1]]) for s in sections]
-        dev = 0.0
+        dev = max(_chord_dev(s) for s in sections)
     else:
         u_deg = deg
         ts = [_param(s, same) for s in sections]
@@ -169,7 +191,8 @@ def _turns_deg(pts: np.ndarray) -> np.ndarray:
 
 
 def piece_bounds(loop: np.ndarray, n_upper: int | None,
-                 kink_deg: float = 30.0) -> list[tuple[int, int]] | None:
+                 kink_deg: float = 30.0,
+                 every_corner: bool = False) -> list[tuple[int, int]] | None:
     """Where one closed layer loop breaks into smooth pieces, as inclusive
     index runs, the last wrapping back to 0.
 
@@ -177,7 +200,11 @@ def piece_bounds(loop: np.ndarray, n_upper: int | None,
     hinge cut to hinge cut -- and the closing segment, which is the blunt
     trailing edge or the cut face. An elevon's is its upper skin, its nose
     flat, its lower surface -- broken again wherever the chamfer or the
-    nozzle's floor puts a corner in it -- and its trailing edge."""
+    nozzle's floor puts a corner in it -- and its trailing edge.
+
+    `every_corner` breaks the lower surface at EVERY corner of `kink_deg`
+    or more, not only the chamfer's; `fit_part` uses it when every section
+    agrees on how many there are."""
     N = len(loop)
     if n_upper is None:
         return [(0, N - 1), (N - 1, 0)]
@@ -197,8 +224,76 @@ def piece_bounds(loop: np.ndarray, n_upper: int | None,
     big = np.flatnonzero(turns >= kink_deg)
     if big.size == 0:
         return [(0, n - 1), (n - 1, n), (n, N - 1), (N - 1, 0)]
-    c = n + 1 + int(big[-1])
-    return [(0, n - 1), (n - 1, n), (n, c), (c, N - 1), (N - 1, 0)]
+    if every_corner:
+        # A corner can fall between two vertices one short segment apart,
+        # and then its turn is split between them -- demon1's elevon floor
+        # turns 28.5 + 28.2 degrees on seven layers and 45 + 12 on the
+        # rest. So a corner is a run of adjacent vertices each turning a
+        # quarter of the kink or more, whose turns SUM to the kink; it is
+        # cut at the sharpest vertex of the run.
+        cuts, i = [], 0
+        while i < len(turns):
+            if turns[i] < 0.25 * kink_deg:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(turns) and turns[j + 1] >= 0.25 * kink_deg:
+                j += 1
+            if turns[i:j + 1].sum() >= kink_deg:
+                cuts.append(n + 1 + i + int(np.argmax(turns[i:j + 1])))
+            i = j + 1
+    else:
+        cuts = [n + 1 + int(big[-1])]
+    ends = [n] + cuts + [N - 1]
+    return ([(0, n - 1), (n - 1, n)] + list(zip(ends, ends[1:])) + [(N - 1, 0)])
+
+
+def sharpen(loop: np.ndarray, n_upper: int | None, kink_deg: float = 30.0) -> np.ndarray:
+    """The loop with a vertex put ON every lower-surface corner that falls
+    between two grid points.
+
+    The elevon's nose floor meets its chamfer at a corner no grid point is
+    placed on, so along the part it slides from one vertex to the next,
+    splitting its turn between two of them in between. A piece boundary
+    that hops a grid point from section to section skins a surface that
+    misses the held-out layers by 0.08 mm on demon1. The true corner is
+    where the straight run into the pair meets the straight run out of
+    it; it is INSERTED between them, so every printed point is kept and
+    the corner is one vertex on every section -- the chamfer's own fix
+    (elevons.py), made here for a corner the print does not place."""
+    if n_upper is None:
+        return loop
+    n = int(n_upper)
+    turns = _turns_deg(loop[n:])
+    big = np.flatnonzero(turns >= kink_deg)
+    # the chamfer's junction -- the furthest corner -- is a vertex already
+    last = int(big[-1]) if big.size else len(turns)
+    out, done = [loop[:n + 1]], n
+    pairs = []
+    for i in range(last - 1):
+        if turns[i] < 0.25 * kink_deg or turns[i] < max(turns[max(i - 1, 0)], turns[i + 1]):
+            continue                      # not the sharper vertex of a corner
+        j = i - 1 if i > 0 and turns[i - 1] > turns[i + 1] else i + 1
+        if j >= last or turns[j] < 0.5 or turns[i] + turns[j] < kink_deg:
+            continue                      # on a vertex already, or no corner
+        pairs.append(min(i, j))
+    for i in pairs:
+        a, b = n + 1 + i, n + 2 + i
+        d1, d2 = loop[a, :2] - loop[a - 1, :2], loop[b + 1, :2] - loop[b, :2]
+        M = np.array([d1, -d2]).T
+        if abs(np.linalg.det(M)) < 1e-12:
+            continue
+        s, _ = np.linalg.solve(M, loop[b, :2] - loop[a - 1, :2])
+        p = loop[a - 1].copy()
+        p[:2] = loop[a - 1, :2] + s * d1
+        seg = loop[b, :2] - loop[a, :2]
+        t = float(np.dot(p[:2] - loop[a, :2], seg) / max(np.dot(seg, seg), 1e-24))
+        if not 0.0 < t < 1.0:
+            continue
+        out += [loop[done + 1:a + 1], p[None, :]]
+        done = a
+    out.append(loop[done + 1:])
+    return np.vstack(out)
 
 
 def section_runs(loop3: np.ndarray, bounds) -> list[np.ndarray]:
@@ -227,7 +322,13 @@ def _dist_to_iso(surf: Surface, pts: np.ndarray, v: float,
 def piece_names(n_upper: int | None, n_pieces: int, truncated: bool) -> list[str]:
     if n_upper is None:
         return ["skin", "hinge cut" if truncated else "trailing edge"]
-    lower = ["hinge chamfer", "lower skin"] if n_pieces == 5 else ["lower skin"]
+    # the lower surface, nose to trailing edge: any floor pieces, then the
+    # chamfer, then the skin
+    n_lower = n_pieces - 3
+    lower = ["lower skin"] if n_lower == 1 else ["hinge chamfer", "lower skin"]
+    floors = n_lower - len(lower)
+    lower = [("nose floor" if i == 0 else f"nose floor {i + 1}")
+             for i in range(floors)] + lower
     return ["upper skin", "nose"] + lower + ["trailing edge"]
 
 
@@ -249,17 +350,27 @@ def fit_part(stack, every_mm: float = 6.0, tol_mm: float = 0.02,
     misses such a jump by a quarter of a millimetre on micro_fpv's centre
     body, while 3 mm holds it to 0.05. Where the wing is plain the coarse
     spacing is kept, and the file stays small."""
-    every = float(every_mm)
     floor = 2.0 * (stack.z_step_mm or 0.25)
-    while True:
-        surfs, rep = _fit_part_once(stack, every, tol_mm, truncated)
-        if rep["held_out_dev_mm"] <= target_mm or every <= floor:
-            rep["every_mm"] = every
+    # Which corners to split at is decided by the same measurement: every
+    # corner first, then the chamfer's only (see _fit_part_once). The
+    # first that holds the target is kept; if none does, the closest.
+    best = None
+    for every_corner in ((True, False) if stack.n_upper is not None else (False,)):
+        every = float(every_mm)
+        while True:
+            surfs, rep = _fit_part_once(stack, every, tol_mm, truncated, every_corner)
+            if rep["held_out_dev_mm"] <= target_mm or every <= floor:
+                break
+            every = max(0.5 * every, floor)
+        rep["every_mm"] = every
+        if rep["held_out_dev_mm"] <= target_mm:
             return surfs, rep
-        every = max(0.5 * every, floor)
+        if best is None or rep["held_out_dev_mm"] < best[1]["held_out_dev_mm"]:
+            best = (surfs, rep)
+    return best
 
 
-def _fit_part_once(stack, every_mm, tol_mm, truncated):
+def _fit_part_once(stack, every_mm, tol_mm, truncated, every_corner=True):
     z = stack.z_mm
     L = len(z)
     k_step = max(int(round(every_mm / max(stack.z_step_mm or 0.25, 1e-9))), 1)
@@ -270,11 +381,28 @@ def _fit_part_once(stack, every_mm, tol_mm, truncated):
         idx = sorted(set(np.linspace(0, L - 1, min(L, 4)).round().astype(int)))
     loops3 = [np.column_stack([stack.contours[k], np.full(len(stack.contours[k]), z[k])])
               for k in range(L)]
-    bounds = [piece_bounds(loops3[k], stack.n_upper) for k in idx]
-    if len({len(b) for b in bounds}) != 1:
-        # the chamfer's corner came and went along the part: fit the lower
-        # surface whole rather than pair up pieces that are not the same
-        bounds = [piece_bounds(loops3[k], stack.n_upper, kink_deg=1e9) for k in idx]
+    if every_corner:
+        loops3 = [sharpen(lp, stack.n_upper) for lp in loops3]
+    # Split at every corner when every section has the same ones: a cubic
+    # fitted ACROSS a corner rings, and demon1's elevon has a 45-degree
+    # floor corner inside its chamfer piece on all 225 layers -- the fit
+    # folded back over the nose flat and the root cap came out an invalid,
+    # self-intersecting face. (micro_fpv's has the same corner and its
+    # fit across it holds 0.05 mm where the split one does not; fit_part
+    # keeps whichever measures inside the target.) Where the floor's
+    # corners come and go, split at the chamfer only; where the chamfer's
+    # does too, fit the lower surface whole rather than pair up pieces
+    # that are not the same.
+    held = [(a + b) // 2 for a, b in zip(idx, idx[1:]) if b - a > 1]
+    # (the held-out layers must agree too before splitting at every corner,
+    # so the gate measures every piece on them)
+    modes = ((30.0, True),) if every_corner else ()
+    for kink, every in modes + ((30.0, False), (1e9, False)):
+        check = idx + held if every else idx
+        bounds = [piece_bounds(loops3[k], stack.n_upper, kink, every) for k in check]
+        if len({len(b) for b in bounds}) == 1:
+            break
+    bounds = bounds[:len(idx)]
     runs = [section_runs(loops3[k], b) for k, b in zip(idx, bounds)]
     n_pieces = len(runs[0])
     v = (z[idx] - z[0]) / max(z[-1] - z[0], 1e-12)
@@ -286,12 +414,10 @@ def _fit_part_once(stack, every_mm, tol_mm, truncated):
     # iso-curve at that layer's own v -- found by a fine search around the
     # point's own parameter, not by the nearest of a few hundred samples,
     # whose spacing alone would read 0.2 mm on a 450 mm skin
-    held = [(a + b) // 2 for a, b in zip(idx, idx[1:]) if b - a > 1]
     worst_held = 0.0
-    kink = 30.0 if len({len(bb) for bb in bounds}) == 1 else 1e9
     for k in held:
         vk = (z[k] - z[0]) / max(z[-1] - z[0], 1e-12)
-        rr = section_runs(loops3[k], piece_bounds(loops3[k], stack.n_upper, kink))
+        rr = section_runs(loops3[k], piece_bounds(loops3[k], stack.n_upper, kink, every))
         if len(rr) != n_pieces:
             continue
         for s_, pts in zip(surfs, rr):

@@ -1240,3 +1240,39 @@ def test_the_elevon_chamfer_corner_is_a_vertex_on_every_layer():
             turn = np.degrees(np.arccos(np.clip((a[:-1] * a[1:]).sum(1), -1, 1)))
             corner.add(int(np.flatnonzero(turn >= 30.0)[-1]))
         assert len(corner) == 1, (part.name, sorted(corner))
+
+
+def test_a_corner_between_two_samples_is_given_a_vertex_before_fitting():
+    """demon1's elevon has a second corner the chamfer fix does not place:
+    the nose floor meets the chamfer at 45 degrees between two grid
+    points, its turn split 28.5 + 28.2 on some layers and 45 + 12 on
+    others. Fitted across it, the chamfer's cubic folded back over the
+    nose flat and the root cap came out a self-intersecting face -- an
+    invalid solid in the gen7 export. Split at it without a vertex there,
+    the boundary hopped a grid point along the part and the surface missed
+    the held-out layers by 0.08 mm. `sharpen` inserts the true corner, the
+    meeting of the two straight runs, and keeps every printed point.
+
+    Here a floor and a 45-degree chamfer sampled so the corner falls
+    between two samples, each taking a quarter of the kink or more: the
+    inserted point is the exact intersection, the whole turn is then at
+    that one vertex, and the pieces split there."""
+    from washout.cad import bspline as bs
+    upper = np.array([[10.0, 1.0], [5.0, 2.0], [0.5, 2.0], [0.0, 2.0]])
+    n = len(upper)                            # loop[n - 1 : n + 1] is the nose flat
+    for off in (0.04, 0.08, 0.32):     # 35+10, 31+14 and 16+29 degrees
+        # floor along y = 1 to the corner at x = 1, then y = 2 - x
+        xs = np.arange(off, 6.0, 0.4)
+        lower = np.array([[x, min(1.0, 2.0 - x)] for x in xs])
+        loop = np.vstack([upper, [[0.0, 1.0]], lower, [[10.0, 0.0]]])
+        loop = np.column_stack([loop, np.zeros(len(loop))])
+        sharp = bs.sharpen(loop, n)
+        assert len(sharp) == len(loop) + 1, off
+        k = int(np.flatnonzero(np.all(np.isclose(sharp[:, :2], [1.0, 1.0]), axis=1))[0])
+        for p in loop:
+            assert any(np.array_equal(p, q) for q in sharp), "a printed point was dropped"
+        turns = bs._turns_deg(sharp[:, :2])   # turns[i] is at vertex i + 1
+        assert np.isclose(turns[k - 1], 45.0), off
+        assert turns[k - 2] < 1e-4 and turns[k] < 1e-4, off
+        b = bs.piece_bounds(sharp, n, every_corner=True)
+        assert (n, k) in b and any(q[0] == k for q in b), (off, b)

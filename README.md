@@ -167,6 +167,38 @@ while the search runs anywhere. Polars are cached by a content hash of
 the CST coefficients and Reynolds number, so a repeat section is free and
 a miss is a deliberate spend.
 
+### Tier 2, with smoke, and a viewer
+
+```bash
+python scripts/tunnel3d.py --mission micro_fpv --design results/fleet/<folder>/design.json --alpha trim
+```
+
+This voxelises the aircraft and writes a scene, then runs the tunnel's
+`run3d.py` in WSL. It runs under a memory cap and a CUDA allocator cap,
+because the VM is shared. A three-colour smoke rake runs upstream of the
+wing. The result has four parts:
+- tunnel photographs from three cameras (`tunnel/frames/`);
+- the spanwise lift from the circulation of the averaged flow, against the
+  vortex lattice (`span_loading.png`, `report.json`);
+- the same lift from the momentum-exchange total, as a check;
+- a bundle for the tunnel repo's browser viewer.
+
+To walk around the flow:
+
+```bash
+python ../windtunnel/scripts/serve_viewer.py out/tunnel3d/<run>/tunnel/viewer
+```
+
+Then open http://localhost:8765. The viewer shows:
+- the animated smoke;
+- the vortex cores;
+- a movable crossflow plane of speed;
+- streamlines;
+- the aircraft coloured by surface pressure.
+
+At 68 cells on the mean chord a run is about 30 min, at Re 15k: ten times
+below flight. Read the shape of the flow, not the coefficients.
+
 ## Why the design vector looks like this
 
 **CST (Kulfan) sections.** The optimizer needs a small, always-valid

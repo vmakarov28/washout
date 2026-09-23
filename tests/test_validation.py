@@ -1736,3 +1736,19 @@ def test_the_micro_fpv_stall_starts_behind_its_cg():
     assert 0.35 < ev.slow.eta_critical < 0.6
     assert ev.slow.v_min_ms == pytest.approx(7.38, abs=0.05)
     assert any("pitches UP at the stall" in r for r in ev.reasons)
+
+
+def test_the_motor_mount_is_built_for_the_prop_the_design_chose():
+    """The search scores prop clearance with the design vector's own
+    propeller; the export built the mount from the MISSION's default
+    powertrain. On gen9's micro_fpv that was a 5.04 in disc the search
+    never chose, and the build sheet failed a clearance the search had
+    passed (9.83 mm against 10). The mount must see the scored prop, and
+    its clearance must be the score's, to the hundredth of a millimetre."""
+    from washout.printing import parts as pm
+    ev = _fleet_eval("micro_fpv")
+    p = _fleet_physical("micro_fpv")
+    assert ev.powertrain.prop.diameter_in == pytest.approx(p["prop_diam_in"])
+    _, gates = pm.mount_for(ev.plan, ev.print_settings, ev.powertrain, "m")
+    gap = next(g for g in gates if g.name == "prop to trailing edge").value
+    assert gap == pytest.approx(pm.prop_clearance_mm(ev.plan, p["prop_diam_in"]), abs=0.01)

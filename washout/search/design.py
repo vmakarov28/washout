@@ -1275,6 +1275,12 @@ class Evaluation:
     fins: object | None = None
     slow: object | None = None
     """performance.SlowFlight: the slowest trimmed flight, and what limits it."""
+    powertrain: object | None = None
+    """The powertrain this design was SCORED with -- the mission's motor
+    and pack, with the design's own propeller. The mission's powertrain
+    is a default the design vector overrides, and the export built the
+    motor mount from that default: gen9's build sheet checked a 5.04 in
+    disc the search never chose, and failed prop clearance by 0.17 mm."""
     inserts: list = field(default_factory=list)
     """The joint wedge inserts (printing/inserts.py): the loft a turning
     joint leaves between two panel faces, as its own printed part.
@@ -2052,7 +2058,8 @@ def _evaluate_once(
         horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
-        fins=fins, slow=slow, inserts=inserts, dynamics=modes,
+        fins=fins, slow=slow, powertrain=mission.powertrain,
+        inserts=inserts, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
         aeroelastic=aero_e,

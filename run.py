@@ -156,10 +156,12 @@ def export_companions(ev, settings: vase.PrintSettings, out: Path,
             made.append((horn, []))
         except Exception as e:                       # noqa: BLE001
             print(f"  control horn skipped ({type(e).__name__}: {e})")
-    if mission is not None and mission.powertrain is not None:
+    # the design's own propeller, as scored -- not the mission's default
+    powertrain = getattr(ev, "powertrain", None) or (
+        mission.powertrain if mission is not None else None)
+    if powertrain is not None:
         try:
-            part, gates = _parts.mount_for(ev.plan, settings,
-                                           mission.powertrain,
+            part, gates = _parts.mount_for(ev.plan, settings, powertrain,
                                            f"{ev.plan.name}_motor_mount")
             made.append((part, gates))
         except Exception as e:                       # noqa: BLE001

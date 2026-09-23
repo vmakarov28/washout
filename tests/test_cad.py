@@ -154,3 +154,26 @@ def test_the_export_puts_the_tubes_inside_the_wing(tmp_path):
     assert "CYLINDRICAL_SURFACE" in asm
     saved = json.loads((tmp_path / "cad" / "micro_fpv_cad.json").read_text())
     assert saved["gates"] and all("value" in g for g in saved["gates"])
+
+
+def test_demon1s_elevons_are_valid_solids():
+    """gen7's demon1 winner exported an elevon whose root cap was an
+    invalid, self-intersecting face: a 45-degree corner where the nose
+    floor meets the chamfer sat inside the chamfer's piece, and the cubic
+    fitted across it folded back over the nose flat. Split at that corner,
+    with a vertex put on it, every elevon is one valid solid and follows
+    the print to the gate. (The design itself is infeasible -- its servo
+    shaft sits inboard of its elevon -- and is kept for its geometry.)"""
+    pytest.importorskip("OCP")
+    from washout.cad import brep
+    d = json.loads((RESULTS / "gen7_demon1_v120" / "design.json").read_text(encoding="utf-8"))
+    u = np.array(d["u"])
+    plan = build(u, Mission.demon1(), cst.load_selig(ASSETS / "mh45.dat"))
+    p = unit_to_physical(u)
+    s = vase.PrintSettings(elevon_chord=p["elevon_chord"], elevon_eta=p["elevon_eta"])
+    spans = vase.panel_etas(plan, s)
+    for part in elv.build_elevons(plan, s, spans, 16.0, z_step_mm=1.0):
+        surfs, rep = bs.fit_part(part, every_mm=3.0)
+        assert rep["held_out_dev_mm"] <= 0.05, (part.name, rep)
+        solid, _ = brep.part_solid(surfs)
+        assert brep.is_valid(solid), (part.name, [x.name for x in surfs])

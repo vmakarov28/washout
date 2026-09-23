@@ -17,6 +17,51 @@ Pass the same `--polar` the search used. Without it the export falls back
 to the flat tier-0 drag model and reports a different, flattering L/D for
 the same aeroplane — the mistake commit `f3b61a9` exists to prevent.
 
+## gen7, 2026-09-22: the fleet re-searched against the aircraft as built
+
+After the straight spars and the sliced panels (below), twelve searches
+(`scripts/fleet/gen7.py`, four missions by three seeds, each seeded from
+its tracked design, 40 generations, pooled workers) ran for 5.0 h.
+Winners were exported with `--step`; every CAD gate passes on all four.
+
+| | mission | mass | span | headline | trim | SM | ζ Dutch roll | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `gen7_trainer_v3_v121` | trainer_v3 | 374 g | 900 mm | L/D 7.21 at 10.0 m/s | +7.35°, CL 0.416 | +0.165 | +0.094 | feasible, **indexed** |
+| `gen7_micro_v120` | micro | 161 g | 588 mm | L/D 6.48 at 11.5 m/s | +5.47°, CL 0.304 | +0.119 | +0.086 | feasible, **indexed** |
+| `gen7_micro_fpv_v120` | micro_fpv | 163 g | 480 mm | cruise 13.5 m/s, stall 6.49 m/s | +3.09°, CL 0.196 | +0.135 | +0.100 | feasible, **indexed** |
+| `gen7_demon1_v120` | demon1 | 368 g | 800 mm | 16.6 m/s cruise | +3.57°, CL 0.162 | +0.100 | +0.085 | **infeasible**, kept, not indexed |
+
+L/D is tier 0: the rankings hold, the levels are not quotable.
+
+**demon1 found no feasible design.** All three seeds end on the same
+gate: the servo shaft at eta 0.28 lands 10 mm inboard of the elevon it
+drives (elevon from eta 0.30). `gen5_demon1_v102` stays in the index as
+the last design that met the mission under the gates of its day; it does
+not meet today's. The gen7 folder is kept as the next search's seed.
+
+**The trainer's build sheet fails a check the search does not make**:
+prop to trailing edge 6.76 mm against 10 (disc plane at x = 261 mm, radius
+64 mm). Prop clearance is `ROADMAP-BUILD.md` item 12 and is not yet a
+search gate, so the search calls the design feasible and the build
+sheet does not. Resolve that before printing it.
+
+**The trainer's first print joint was wrong as searched.** Its pivot
+rule fell back to the chord line when the joint's turn changed sign, and
+that put a 10° turn about the chord line back: p0 and p1 shared 4.3 mm
+of material above it. That joint now sits at the height where it does not
+turn, so p1 prints level and the faces mate flat. The outer joint takes the whole
+21.9° and a 9.4 mm glue wedge. Re-checked under the fixed frames, the
+design still passes every search gate (L/D 7.20). The search that found
+it scored the old frames.
+
+The export itself found a CAD defect: demon1's elevons came out as
+invalid solids. The elevon's nose floor meets its chamfer at a 45° corner
+that falls between grid points; the cubic fitted across it folded back
+over the nose flat and the end cap crossed itself. Such corners now get
+a vertex, straight pieces are fitted as ruled faces, and a
+split is kept only where it holds the held-out gate
+(`tests/test_validation.py`, `tests/test_cad.py`).
+
 ## Re-exported 2026-09-15, under today's gates
 
 | | mission | mass | span | headline | trim | ζ Dutch roll | gates |

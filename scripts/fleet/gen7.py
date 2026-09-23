@@ -4,6 +4,12 @@
     python scripts/fleet/gen7.py launch      # start every search, detached
     python scripts/fleet/gen7.py status      # progress, and how busy the machine is
     python scripts/fleet/gen7.py pick        # each mission's winner, feasible first
+    python scripts/fleet/gen7.py export      # the winners as STLs, build sheets and STEP
+    python scripts/fleet/gen7.py track       # the winners into results/fleet
+
+`status` shows each run's latest IMPROVEMENT and the evaluation it came
+at, which is a lower bound on how far the run has got: a search that has
+stopped improving keeps evaluating and prints nothing.
 
 ## Why a re-search
 
@@ -156,5 +162,67 @@ def pick() -> None:
             print(f"{m:<11} no finished run")
 
 
+def export() -> None:
+    """Each mission's winner, exported the way it would be built: STLs,
+    the build sheet, and cad/ with its 3D gates. Serial, at below-normal
+    priority -- by the time this runs the machine is free anyway."""
+    best = {}
+    for m, s, tag in runs():
+        f = OUT / tag / "design.json"
+        if not f.exists():
+            continue
+        d = json.loads(f.read_text(encoding="utf-8"))
+        key = (bool(d.get("feasible")), float(d.get("score", -1e18)))
+        if m not in best or key > best[m][0]:
+            best[m] = (key, tag)
+    flags = BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+    for m, (_, tag) in best.items():
+        out = OUT / "final" / m
+        out.mkdir(parents=True, exist_ok=True)
+        cmd = [sys.executable, "run.py", "export", "--mission", m,
+               "--design", str(OUT / tag / "design.json"), "--polar", POLAR,
+               "--out", str(out), "--step"]
+        with open(out / "export.log", "w", encoding="utf-8") as log:
+            rc = subprocess.run(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                                creationflags=flags,
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8"}).returncode
+        print(f"{m:<11} {tag:<16} -> {out}  (exit {rc})")
+
+
+def track() -> None:
+    """Each mission's winner into results/fleet, after `export`.
+
+    A FEASIBLE winner becomes the tracked answer for its mission in
+    index.json. An infeasible one is kept as a folder -- it is the best
+    starting point the next search has -- but not indexed: the index
+    names designs that meet their mission, or the last one that did."""
+    import shutil
+    fleet = ROOT / "results" / "fleet"
+    index_path = fleet / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    best = {}
+    for m, s, tag in runs():
+        f = OUT / tag / "design.json"
+        if not f.exists():
+            continue
+        d = json.loads(f.read_text(encoding="utf-8"))
+        key = (bool(d.get("feasible")), float(d.get("score", -1e18)))
+        if m not in best or key > best[m][0]:
+            best[m] = (key, tag)
+    for m, ((ok, score), tag) in best.items():
+        dest = fleet / f"gen7_{tag}"
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(OUT / tag / "design.json", dest / "design.json")
+        shutil.copy2(OUT / tag / "search_log.json", dest / "search_log.json")
+        png = OUT / "final" / m / "design.png"
+        if png.exists():
+            shutil.copy2(png, dest / "design.png")
+        if ok:
+            index[m] = dest.name
+        print(f"{m:<11} -> {dest.name}{'  (indexed)' if ok else '  (kept, not indexed: infeasible)'}")
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+
+
 if __name__ == "__main__":
-    {"launch": launch, "status": status, "pick": pick}[sys.argv[1]]()
+    {"launch": launch, "status": status, "pick": pick,
+     "export": export, "track": track}[sys.argv[1]]()

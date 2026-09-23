@@ -31,9 +31,9 @@ RESULTS = Path(__file__).resolve().parent.parent / "results" / "fleet"
 WALL = 0.45
 
 
-def _fleet(name):
+def _fleet(name, folder=None):
     index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
-    d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
+    d = json.loads((RESULTS / (folder or index[name]) / "design.json").read_text(encoding="utf-8"))
     base = cst.load_selig(ASSETS / "mh45.dat")
     mission = getattr(Mission, name)()
     u = np.array(d["u"])
@@ -47,8 +47,8 @@ def _fleet(name):
 # time re-deriving the same three aircraft: 24 calls across the files,
 # each a full two-pass evaluation that now builds cut panels.
 @lru_cache(maxsize=None)
-def _built(name):
-    u, mission, base, plan = _fleet(name)
+def _built(name, folder=None):
+    u, mission, base, plan = _fleet(name, folder)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     return evaluate(u, mission, base, settings), mission
@@ -302,8 +302,11 @@ def test_the_build_sheet_never_says_one_bottom_layer():
 def test_the_build_sheet_reports_the_failures_it_has():
     """A sheet for a design that misses its mission must say so. Handing
     someone printable parts and a clean-looking sheet for an aeroplane
-    that does not meet its own gates is the worst of both."""
-    ev, mission = _built("trainer_v3")
+    that does not meet its own gates is the worst of both.
+
+    The failing design is named explicitly: the tracked trainer is gen7's
+    now, which passes, and gen5's no longer does (results/README.md)."""
+    ev, mission = _built("trainer_v3", "gen5_trainer_v3_v101")
     parts = vase.build_panels(ev.plan, ev.print_settings)
     text = build_sheet.render(ev, parts, ev.print_settings)
     assert ev.reasons, "this test needs a failing design"

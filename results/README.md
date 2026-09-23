@@ -17,7 +17,81 @@ Pass the same `--polar` the search used. Without it the export falls back
 to the flat tier-0 drag model and reports a different, flattering L/D for
 the same aeroplane — the mistake commit `f3b61a9` exists to prevent.
 
+## gen9, 2026-09-23: micro_fpv for a beginner
+
+Before this generation, the search changed in two ways (commit `18b9f37`):
+
+- **The objective is the slowest TRIMMED speed** (`performance.slow_flight`).
+  It is limited by whichever comes first: the first section reaching
+  cl_max, or the up-elevon running out. The old stall speed put every
+  section at the declared cl_max at once and spent nothing on trim.
+  Under the new objective, gen8's curl is 7.38 m/s, not 6.40.
+- **Two beginner gates.**
+  - Hands-off speed must be at least 1.3× the slowest trimmed speed.
+  - The first section to stall must sit ahead of the CG, so the nose
+    drops at the stall.
+
+  Every micro_fpv design through gen8 started its stall at mid-span,
+  0.18–0.31 MAC behind the CG. That pitches the nose up into the stall.
+
+Eight searches ran (`scripts/fleet/gen9.py`, 4.25 h): five of the curl
+family and three of the winglet family, each seeded from its gen8 winner.
+**One found feasible designs**: v144, with 11 feasible out of 8,610
+evaluations. The other seven stopped early on differential evolution's
+tolerance with nothing feasible. The winglet family came closest at
+0.08 MAC behind the CG.
+
+| | mass | area | slowest trimmed | hands-off | stall starts | SM | ζ Dutch roll | fins |
+|---|---|---|---|---|---|---|---|---|
+| `gen9_micro_fpv_v144` | 166 g | 628 cm² | **8.04 m/s** (CL 0.654) | 11.7 m/s, 1.45× | eta 0.38, **0.013 MAC ahead of the CG** | +0.139 | +0.083 | 2 × 11 cm², 41 mm |
+| gen8 curl, for comparison | 165 g | 757 cm² | 7.38 m/s | 12.3 m/s | eta 0.48, 0.18 MAC behind | +0.124 | +0.086 | 2 × 5 cm² |
+
+The nose-down stall costs 0.7 m/s. The search paid for it by moving the
+CG forward (139 mm against 172) and giving up wing area. L/D is 6.30 at
+tier 0, a ranking only.
+
+**The stall margin is thin: 0.013 MAC, about 2 mm.** Balance the
+aircraft a few millimetres nose-heavy of the design CG, never aft of it.
+A battery a little aft of its bay position is enough to put the stall
+back behind the CG.
+
+The export passes every gate except one, on the build sheet: propeller
+to trailing edge is 9.83 mm against 10. The horn socket passes at 2.58×,
+and the CAD loft fidelity passes on every part (worst 0.04 mm). Both had
+failed on gen8. Section cl_max is still the declared 0.85, the same
+everywhere. A measured section would move every number above, so the
+tier-1 polar at flight Re is the next thing worth doing.
+
+### In the tunnel
+
+The runs are at Re 15,000, against about 105,000 in flight. The grid is
+48.5 M cells, 68 cells per MAC.
+
+| run | α | tunnel CL | VLM CL | inner half, tunnel / VLM | outer 20%, tunnel / VLM |
+|---|---|---|---|---|---|
+| gen9 micro_fpv | 6.71° (trim) | 0.112 | 0.317 | 89% / 63% | −0.7% / 9.9% |
+| gen9 micro_fpv | 9° | 0.147 | 0.438 | 90% / 61% | 1.8% / 11% |
+
+The result matches every earlier run. At this Re the centre body carries
+the lift and the outer wing carries almost none, and the tunnel CL is a
+third of the lattice's. The circulation split recovers 85–86% of the
+force total. The low-Re result neither confirms nor contradicts the stall
+prediction, which is made at flight Re with a declared cl_max.
+
+The first attempt at this run died at the first time-average, out of GPU
+memory under the 11 GB cap. `scripts/tunnel3d.py` now asks for
+expandable segments, and these runs used a 12.5 GB cap.
+
+Viewer:
+
+```bash
+python ../windtunnel/scripts/serve_viewer.py out/tunnel3d/gen9_micro_fpv_a9/tunnel/viewer
+```
+
 ## gen8, 2026-09-23: micro_fpv, curled tips against real winglets
+
+**Superseded by gen9.** Neither design passes today's nose-down-stall gate.
+The numbers below are as they were searched, under the flat stall speed.
 
 Two families on the same gates and objective (stall speed), four seeds
 each (`scripts/fleet/gen8.py`, 5.0 h). `micro_fpv_winglet` is micro_fpv

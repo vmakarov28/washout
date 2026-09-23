@@ -366,6 +366,9 @@ def main() -> int:
     tun = out / "tunnel"
     cmd = (f"cd {WSL_TUNNEL} && systemd-run --user --scope -q "
            f"-p MemoryMax={a.mem_gb}G -p MemorySwapMax=0 "
+           # Expandable segments: the gen9 micro_fpv (48.5 Mcells) died
+           # at the first average with 0.7 GB reserved but unusable.
+           f"env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
            f"nice -n 10 {WSL_PY} run3d.py --scene {wsl_path(out / 'scene.yaml')} "
            f"--seed 0 --steps {steps} --solver fused --preset dye "
            f"--frame-every {a.frame_every} --guard-every 100 --measure-force "

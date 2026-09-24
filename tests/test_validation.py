@@ -1902,3 +1902,22 @@ def test_no_printed_wall_runs_through_the_payload():
                 z_in = D[inx, 1]
                 assert not np.any((z_in > bot + 0.3) & (z_in < top - 0.3)), (
                     f"{p.name} layer {k}: a web inside the {b.name} box")
+
+
+def test_an_infeasible_population_is_not_converged():
+    """scipy's differential evolution stops when std(energies) <= atol +
+    tol * |mean(energies)|. With tol = 0.01 and infeasible designs scored
+    at about -1000, a population with NOTHING feasible and penalties
+    still falling was 'converged' -- gen8 to gen11 stopped searches that
+    way, gen11's best 0.4 degrees of overhang from feasible. Pinned on the
+    rule itself: such a population must not stop, and a feasible one
+    agreeing to under a millimetre per second must."""
+    from washout.search.optimize import DE_ATOL, DE_TOL
+
+    def converged(e):
+        e = np.asarray(e, dtype=float)
+        return np.std(e) <= DE_ATOL + DE_TOL * abs(np.mean(e))
+
+    assert not converged([1000.06, 1000.5, 1000.9, 1002.1, 1003.0])
+    assert not converged([1000.06, 1000.07, 1000.08])
+    assert converged([7.6121, 7.6122, 7.6120, 7.6121])

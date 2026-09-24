@@ -42,6 +42,23 @@ SEED_PHYSICAL: dict = {}
 TRAINER_SEED: dict = {}
 
 
+DE_TOL = 0.0
+DE_ATOL = 1e-3
+"""When differential evolution stops early: the spread of the population's
+scores at or under DE_ATOL + DE_TOL * |mean score|.
+
+It was tol = 0.01 -- RELATIVE to the mean. An infeasible design scores
+about -1000 minus its penalty, so a population with nothing feasible yet
+"converged" once its penalties were within ~10 of each other, which is
+long before they stopped improving. That is how every generation from
+gen8 to gen11 had searches "stop early on the tolerance with nothing
+feasible": gen11's best was 0.4 degrees of overhang from feasible when
+its search was stopped. The tolerance is absolute now, in the units of
+the score -- a millimetre per second of slowest trimmed speed -- so a
+feasible population stops when it has actually converged and an
+infeasible one runs its generations."""
+
+
 @dataclass
 class SearchLog:
     geometry_failures: int = 0
@@ -232,7 +249,7 @@ def run_search(
     try:
         res = differential_evolution(
             objective, bounds=[(0.0, 1.0)] * N_DIM, init=init, maxiter=maxiter,
-            tol=0.01, mutation=(0.4, 1.0), recombination=0.85, seed=seed,
+            tol=DE_TOL, atol=DE_ATOL, mutation=(0.4, 1.0), recombination=0.85, seed=seed,
             polish=False, workers=de_workers,
             updating="deferred" if workers != 1 else "immediate",
         )

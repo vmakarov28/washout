@@ -107,8 +107,11 @@ aircraft a few millimetres nose-heavy of the design CG, never aft of it.
 A battery a little aft of its bay position is enough to put the stall
 back behind the CG.
 
-The export passes every gate except one, on the build sheet: propeller
-to trailing edge is 9.83 mm against 10. The horn socket passes at 2.58×,
+The first export failed one build-sheet gate, prop to trailing edge at
+9.83 mm against 10. That was an export bug: the mount was built for the
+mission's default prop, not the one the design chose (fixed in
+`1bd6942`). With the chosen prop the clearance is 13.2 mm, and every
+gate passes. The horn socket passes at 2.58×,
 and the CAD loft fidelity passes on every part (worst 0.04 mm). Both had
 failed on gen8. Section cl_max is still the declared 0.85, the same
 everywhere. A measured section would move every number above, so the

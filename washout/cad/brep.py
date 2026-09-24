@@ -151,6 +151,78 @@ def part_solid(surfs: list[Surface]) -> tuple[object, dict]:
     return solid, {"faces": list(zip(names, faces))}
 
 
+def wall_solid(outer: list[Surface], inner: list[Surface]) -> tuple[object, dict]:
+    """The printed WALL of a vase part: between its outer mould line and
+    the surface one bead inside it, closed at each end by the flat ring
+    the wall's own cross-section makes there.
+
+    Built face by face and sewn, like `part_solid`, not by cutting one
+    solid from the other: a Boolean between two fitted surfaces 0.45 mm
+    apart returned the uncut solid on one panel and an empty one on the
+    next. Each ring is one planar face, bounded by the outer surface's end
+    curves with the inner surface's as a hole, from the same poles the
+    skins carry, so every edge is shared exactly."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace as _MF
+
+    named = [(s.name, BRepBuilderAPI_MakeFace(occ_surface(s), 1e-6).Face())
+             for s in outer]
+    named += [(f"inner {s.name}",
+               BRepBuilderAPI_MakeFace(occ_surface(s), 1e-6).Face().Reversed())
+              for s in inner]
+    for end, label in ((0, "root ring"), (-1, "tip ring")):
+        wires = []
+        for group in (outer, inner):
+            wb = BRepBuilderAPI_MakeWire()
+            for s in group:
+                wb.Add(BRepBuilderAPI_MakeEdge(
+                    occ_curve(s.poles[:, end, :], s.u_knots, s.u_deg)).Edge())
+            wires.append(wb.Wire())
+        # A hole's wire must run opposite to the outer one. Which way the
+        # fitted curves run is read off their poles: the Newell normal of
+        # the outer ring, and the sign of each ring's area about it.
+        rings = [np.concatenate([sf.poles[:, end, :] for sf in grp], 0)
+                 for grp in (outer, inner)]
+        nrm = np.zeros(3)
+        q = rings[0]
+        for i in range(len(q)):
+            a_, b_ = q[i], q[(i + 1) % len(q)]
+            nrm += np.cross(a_, b_)
+        def turn(r):
+            return float(sum(np.dot(np.cross(r[i], r[(i + 1) % len(r)]), nrm)
+                             for i in range(len(r))))
+        hole = wires[1]
+        if turn(rings[1]) * turn(rings[0]) > 0.0:
+            hole = TopoDS.Wire(wires[1].Reversed())
+        mf = _MF(wires[0], True)
+        mf.Add(hole)
+        named.append((label, mf.Face()))
+    sew = BRepBuilderAPI_Sewing(1e-3)
+    for _, f in named:
+        sew.Add(f)
+    sew.Perform()
+    shells = _shapes(sew.SewedShape(), TopAbs_SHELL)
+    if len(shells) != 1:
+        raise RuntimeError(f"sewing the wall gave {len(shells)} shells, not one")
+    solid = BRepBuilderAPI_MakeSolid(TopoDS.Shell(shells[0])).Solid()
+    fix = ShapeFix_Solid(solid)
+    fix.Perform()
+    solid = _shapes(fix.Shape(), TopAbs_SOLID)[0]
+    if not is_valid(solid):
+        # the general fixer: on an elevon's thin tip the ring face's hole
+        # comes within a few hundredths of a tolerance of its outline
+        from OCP.ShapeFix import ShapeFix_Shape
+        sf = ShapeFix_Shape(solid)
+        sf.Perform()
+        fixed = _shapes(sf.Shape(), TopAbs_SOLID)
+        if fixed and is_valid(fixed[0]):
+            solid = fixed[0]
+    faces = _shapes(solid, TopAbs_FACE)
+    ref = [(n, _centre(f)) for n, f in named]
+    names = [min(ref, key=lambda r: float(np.linalg.norm(r[1] - _centre(f))))[0]
+             for f in faces]
+    return solid, {"faces": list(zip(names, faces))}
+
+
 def _centre(face) -> np.ndarray:
     g = GProp_GProps()
     BRepGProp.SurfaceProperties_s(face, g)

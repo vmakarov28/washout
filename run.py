@@ -339,6 +339,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="export: also write cad/ -- the aircraft as STEP, "
                          "every part as a clean solid, and the 3D gates. "
                          "Needs the OpenCASCADE bindings: pip install -e .[cad]")
+    ap.add_argument("--step-full", action="store_true", dest="step_full",
+                    help="export: also write cad/<name>_full.step -- the aircraft "
+                         "as built: printed walls, rib webs, the battery hatch "
+                         "and lid, every companion part, the tubes and the "
+                         "payload volumes (needs the OpenCASCADE bindings)")
     ap.add_argument("--seed-design", type=Path, default=None, dest="seed_design",
                     help="design.json from an earlier run to put in the starting "
                          "population, so the search cannot finish behind it")
@@ -423,9 +428,19 @@ def main(argv=None) -> int:
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons), "\n")
         do_export(ev, ev.print_settings or settings, a.out, mission)
-        if a.step:
-            return do_step(ev, a.out)
-        return 0
+        rc = do_step(ev, a.out) if a.step else 0
+        if a.step_full:
+            from washout.cad.full import export_full
+            print("\nfull CAD, as built:")
+            rep = export_full(ev, a.out, mission)
+            for g in rep["_gates"]:
+                print("  " + g.line())
+            for n in rep["notes"]:
+                print("  note: " + n)
+            print(f"  -> {a.out / 'cad' / rep['file']} ({rep['MB']} MB, "
+                  f"{len(rep['bodies'])} bodies)")
+            rc = rc or (0 if all(g.passed for g in rep["_gates"]) else 1)
+        return rc
 
     seed_phys = (load_seed_physical(a.seed_design) if a.seed_design
                  else SEEDS.get(a.mission))

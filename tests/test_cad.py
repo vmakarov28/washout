@@ -215,3 +215,51 @@ def test_a_joint_insert_is_a_clean_solid_that_matches_its_stl(tmp_path):
             placed = (ins.print_R @ (My @ ins.flight_verts.T)).T + ins.print_t
             assert np.abs(placed - ins.verts).max() < 1e-9
             assert np.linalg.det(ins.print_R) == pytest.approx(1.0)
+
+
+# ------------------------------------------- the as-built model (full.py)
+
+
+def test_the_wall_offset_is_one_bead_everywhere_and_keeps_the_corners():
+    """The inside of a printed wall is each layer's outline offset one
+    bead in (cad/offset.py). Against the closed form: every point of the
+    inner loop is one bead from the outline, the loop keeps the outline's
+    point count and its aft corners as points 0 and N-1, and where the
+    section is thinner than two beads it is SOLID and the loop stops
+    short of it -- which a hand-written vertex offset did not do: it made
+    loops at the leading edge and pushed points through each other at the
+    hinge corners."""
+    pytest.importorskip("OCP")
+    from washout.cad.offset import offset_loop
+    _, s, wing, _ = _parts()
+    w = s.extrusion_width_mm
+    for part in wing:
+        P = part.contours[len(part.contours) // 2]
+        Q = offset_loop(P, w)
+        assert Q.shape == P.shape
+        # distance from every inner point to the outline's segments
+        a = P
+        ab = np.roll(P, -1, 0) - a
+        den = np.maximum((ab * ab).sum(1), 1e-12)
+        t = np.clip(((Q[:, None, :] - a[None]) * ab[None]).sum(2) / den[None], 0, 1)
+        d = np.linalg.norm(Q[:, None, :] - (a[None] + t[..., None] * ab[None]), axis=2).min(1)
+        assert d.min() >= 0.95 * w, part.name
+        # interior points sit one bead in; the ends may sit further, where
+        # the thin trailing edge is solid
+        mid = d[len(d) // 8: -len(d) // 8]
+        assert np.median(mid) == pytest.approx(w, abs=0.02), part.name
+        assert Q[0, 0] <= P[0, 0] and Q[-1, 0] <= P[-1, 0]     # aft corners forward
+
+
+def test_the_rib_webs_are_found_on_every_layer_of_a_ribbed_panel():
+    """The truss is a detour of the upper skin: two floor vertices per rib.
+    Every layer of a ribbed panel must show the same number of webs, or
+    the lofted webs would skip layers."""
+    from washout.cad.full import rib_sections
+    plan, s, _, _ = _parts()
+    ribbed = vase.build_panels(plan, replace(s, ribs=True), z_step_mm=2.0)
+    for part in ribbed:
+        if not part.has_ribs:
+            continue
+        counts = {len(q) for q in rib_sections(part, s.extrusion_width_mm)}
+        assert len(counts) == 1 and counts.pop() > 0, part.name

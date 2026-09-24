@@ -17,6 +17,58 @@ Pass the same `--polar` the search used. Without it the export falls back
 to the flat tier-0 drag model and reports a different, flattering L/D for
 the same aeroplane — the mistake commit `f3b61a9` exists to prevent.
 
+## gen10, 2026-09-24: the nose-down stall, and most of the speed back
+
+Eight micro_fpv searches ran (`scripts/fleet/gen10.py`), all seeded from
+gen9's v144, the one design found inside the nose-down-stall region, for
+50 generations. **All eight finished feasible**, between 7.61 and 7.83
+m/s. The first launch died 2.2 h in when WSL had to be restarted, and
+its best, 7.88 m/s, died with it. Searches now write
+`best_so_far.json` every time they improve.
+
+The top three were within 0.003 m/s of each other. The search's own top
+score, v155, also has the widest stall margin, so it is the pick:
+
+| | gen8 curl | gen9 v144 | **gen10 v155** |
+|---|---|---|---|
+| slowest trimmed | 7.38 m/s | 8.04 | **7.61** |
+| stall starts | 0.18 MAC **behind** the CG (pitches up) | 1.7 mm ahead | **6.6 mm ahead** (0.044 MAC) |
+| hands-off | 12.3 m/s (1.67×) | 11.7 (1.45×) | 12.3 (1.61×) |
+| area / mass | 757 cm² / 165 g | 628 / 166 | 693 / 172 |
+| SM / ζ Dutch roll | 0.124 / 0.086 | 0.139 / 0.083 | 0.126 / 0.089 |
+| prop to TE | passes | 13.2 mm | 12.4 mm |
+
+gen10 gets back most of the 0.7 m/s the nose-down stall cost in gen9: it
+is 0.23 m/s behind gen8, and stalls the right way. The export passes
+every gate, build sheet and CAD, with no exceptions. The stall margin is
+6.6 mm of CG: better than gen9's, and still a reason to balance at or
+ahead of the design CG.
+
+The minimum speed and the stall location use a declared section cl_max
+of 0.85. Nothing on this machine passed validation as a cl_max predictor
+(`data/validation/README.md`): NeuralFoil is 13% high on E387 at Re
+100k, and the 2D LBM is 25% low before the stall. So these are rankings
+of how evenly the lift is spread and what trim costs, not a measured
+stall.
+
+### In the tunnel
+
+The runs are at Re 15,000, against about 122,000 in flight, on a
+44.5 Mcell grid.
+
+| run | α | tunnel CL | VLM CL | inner half, tunnel / VLM | outer 20%, tunnel / VLM |
+|---|---|---|---|---|---|
+| gen10 micro_fpv | 4.01° (trim) | 0.080 | 0.269 | 95% / 60% | −0.2% / 12% |
+| gen10 micro_fpv | 9° | 0.222 | 0.537 | 87% / 58% | 4.0% / 13.5% |
+
+This is the same low-Re picture as every earlier run, with the centre
+body carrying the lift. At 9° the tunnel CL of 0.222 matches gen8's
+curl (0.223) and is well above gen9 (0.147).
+
+```bash
+python ../windtunnel/scripts/serve_viewer.py out/tunnel3d/gen10_micro_fpv_a9/tunnel/viewer
+```
+
 ## gen9, 2026-09-23: micro_fpv for a beginner
 
 Before this generation, the search changed in two ways (commit `18b9f37`):

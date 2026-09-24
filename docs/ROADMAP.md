@@ -227,6 +227,20 @@ washed out, and at a third of the root's Re, so its real margin is worse
 than any single constant can say. This is the gate most likely to be
 quietly optimistic today.
 
+**2026-09-24: blocked on the tool, not the plan.** Items 5 and 6 assumed
+the 2D LBM could find cl_max. It was validated against NASA TM 4062's
+measured E387 at Re 100 000 (`data/validation/`), with the criterion
+written down before the runs, and it fails before the stall: cl is 25%
+low at 9 deg. NeuralFoil fails too, 13% high on cl_max. Neither is
+used. What would unblock this:
+
+- a tier-1 tunnel at a resolution that holds the boundary layer, with a
+  transition model;
+- published measured sections;
+- or a physical test.
+
+Tuning either tool until it matches the reference is not an option.
+
 ## 7. A `refine` command: make the ladder climb itself - P1
 
 The fidelity ladder is documented as the architecture, and its top two

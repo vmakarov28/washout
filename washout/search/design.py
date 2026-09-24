@@ -1007,6 +1007,24 @@ SECTION_BOUNDS = (
     Bound("fin_below", 0.0, 0.4, ""),
 )
 BATTERY_NAME = "battery"
+HATCH_MARGIN_MM = 2.0
+"""Clearance round the pack on each side of the hand-cut battery hatch:
+the hatch is the pack's footprint plus this, so the pack goes in without
+being forced past the cut edge."""
+
+
+def hatch_eta(mission, plan) -> float:
+    """Half-span fraction the battery hatch reaches from the centreline, or
+    0 with no hatch. The hatch is over the battery -- the bay the optimizer
+    places (`x_var`), which is the one reopened every flight -- and the
+    battery sits on the centreline, so the cut straddles the centre joint."""
+    for bay in mission.bays:
+        if bay.x_var == "batt_x" and bay.lidded and bay.eta_frac is None:
+            half = 0.5 * bay.box_mm[1] + HATCH_MARGIN_MM
+            return float(half / (plan.half_span_m * 1000.0))
+    return 0.0
+
+
 PROP_CLEARANCE_MM = 10.0
 """Clearance the propeller disc keeps from the trailing edge.
 
@@ -1275,6 +1293,9 @@ class Evaluation:
     fins: object | None = None
     slow: object | None = None
     """performance.SlowFlight: the slowest trimmed flight, and what limits it."""
+    bays: tuple = ()
+    """The payload volumes as SEATED (geom.interior.Volume): where the pack
+    and the electronics actually are, which the hatch template is cut from."""
     powertrain: object | None = None
     """The powertrain this design was SCORED with -- the mission's motor
     and pack, with the design's own propeller. The mission's powertrain
@@ -2038,7 +2059,8 @@ def _evaluate_once(
             plan, spar_fits, cl_a, p_vec["elevon_chord"], p_vec["elevon_eta"],
             v_design, settings.extrusion_width_mm,
             min_margin=mission.min_aeroelastic_margin,
-            n_ribs=settings.rib_count if settings.ribs else 0)
+            n_ribs=settings.rib_count if settings.ribs else 0,
+            hatch_eta=hatch_eta(mission, plan))
         if not aero_e.ok:
             worst = min(aero_e.v_div_ms, aero_e.v_rev_ms)
             which = ("reversal" if aero_e.v_rev_ms <= aero_e.v_div_ms
@@ -2059,6 +2081,7 @@ def _evaluate_once(
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
         fins=fins, slow=slow, powertrain=mission.powertrain,
+        bays=tuple(bay_vols),
         inserts=inserts, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,

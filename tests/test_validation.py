@@ -1779,6 +1779,61 @@ def test_the_balance_window_stops_at_the_stall_onset():
     onset = build_sheet.stall_onset_x_mm(ev)
     assert why == "stall onset" and lo == pytest.approx(onset)
     assert sm_lo < lo < ev.mass.x_cg_m * 1000.0 <= hi == pytest.approx(sm_hi)
-    card = build_sheet.flight_test(ev, 0.85)
+    from washout.search.design import Mission
+    card = build_sheet.flight_test(ev, Mission.micro_fpv())
     assert "Do not balance nose-heavy" in card and f"{lo:.1f} mm" in card
-    assert f"{ev.slow.v_min_ms:.2f} m/s" in card
+    # predicted at the balance TARGET, the middle of the window
+    tgt = build_sheet.balance_target_mm(ev)
+    assert f"Balance at **{tgt:.1f} mm**" in card
+
+
+def test_a_root_hatch_is_charged_as_the_exact_twist_integral_says():
+    """The battery hatch opens the torsion box over |y| < f L at the root.
+    Under a torque t per unit span, the section at y carries t (L - y), so
+    the tip twist is t * integral (L - y) / GJ(y) dy. For a uniform GJ0
+    with GJ1 over the first f L that is exactly
+
+        1/GJ_eq = 1/GJ0 + (1/GJ1 - 1/GJ0) (2 f - f^2)
+
+    `hatch_gj_nmm2` uses 2 f -- the root weighted twice its span fraction,
+    dropping the f^2 -- which is never less compliant than the exact
+    answer, and within f^2 of it. Zero hatch must return the closed value
+    exactly, and a bigger hatch must never be stiffer."""
+    from washout import aeroelastic as ae
+    plan = demo_bwb(cst.load_selig(ASSETS / "mh45.dat"))
+    gj0 = 3.0e6
+    assert ae.hatch_gj_nmm2(plan, [], 0.45, gj0, 0.0) == gj0
+    prev = gj0
+    for f in (0.02, 0.05, 0.1):
+        got = ae.hatch_gj_nmm2(plan, [], 0.45, gj0, f)
+        area, per, _ = ae.cell_properties(plan, 0.5 * f, 0.45)
+        closed = ae.gj_closed_nmm2(area, per, 0.45)
+        opened = ae.gj_open_nmm2(per, 0.45)
+        exact = 1.0 / (1.0 / gj0 + (1.0 / opened - 1.0 / closed) * (2 * f - f * f))
+        assert got <= exact                   # conservative
+        assert got == pytest.approx(exact, rel=f)
+        assert got < prev
+        prev = got
+
+
+def test_the_battery_hatch_fits_the_pack_and_passes_its_stiffness_gate():
+    """micro_fpv's battery is loaded through a hand-cut hatch (2026-09-24):
+    the printer cannot leave an opening, and a pack sealed inside a foamed
+    PLA shell cannot be charged or changed. The hatch must clear the
+    seated pack's footprint on every side, and the torsion box it opens
+    must still clear the aeroelastic margin."""
+    from washout import build_sheet
+    from washout.search.design import HATCH_MARGIN_MM, Mission
+    ev = _fleet_eval("micro_fpv")
+    h = build_sheet.hatch_template(ev)
+    pack = ev.bays[0]
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    assert h["x0"] == pytest.approx(pack.x0 * root_c - HATCH_MARGIN_MM)
+    assert h["x1"] - h["x0"] >= 55.0 + 2 * HATCH_MARGIN_MM - 1e-6
+    assert 2 * h["y"] >= 30.0 + 2 * HATCH_MARGIN_MM - 1e-6
+    a = ev.aeroelastic
+    assert a.hatch_eta > 0 and a.gj_hatch_nmm2 < a.gj_nmm2
+    assert a.margin_hatch >= Mission.micro_fpv().min_aeroelastic_margin
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings,
+                              Mission.micro_fpv())
+    assert "Battery hatch" in text and "PASS" in text

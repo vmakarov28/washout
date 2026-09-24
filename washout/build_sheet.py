@@ -87,6 +87,72 @@ def balance_window_mm(ev) -> tuple[float, float, str]:
     return lo, hi, "static margin"
 
 
+def balance_target_mm(ev) -> float:
+    """Where to aim the CG: the middle of the balance window. The search
+    puts the CG wherever the score is best, which is usually an EDGE of the
+    window -- gen10's micro_fpv sits 0.8 mm from the aft limit -- and the
+    few grams of glue this program cannot weigh land wherever the joints
+    are. The middle leaves that error room on both sides."""
+    lo, hi, _ = balance_window_mm(ev)
+    return 0.5 * (lo + hi)
+
+
+def ballast_g(ev, target_mm: float, x_ballast_mm: float) -> float:
+    """Grams at `x_ballast_mm` that move the CG to `target_mm`: exactly,
+    from (M cg + n x) / (M + n) = target. 0 when the target is aft of the
+    CG (that is moved with the pack, not with lead)."""
+    M = ev.mass.total_kg * 1000.0
+    cg = ev.mass.x_cg_m * 1000.0
+    if target_mm >= cg or target_mm <= x_ballast_mm:
+        return 0.0
+    return float(M * (cg - target_mm) / (target_mm - x_ballast_mm))
+
+
+def slow_at(ev, x_cg_mm: float, mass_g: float, cl_max_section: float,
+            max_up_deg: float):
+    """The slowest trimmed flight at another CG and mass, from the same
+    lattice the score used. -> (SlowFlight, hands-off speed m/s) or None."""
+    from .aero import performance as perf
+    from .aero.vlm import VLM
+    ps = ev.print_settings
+    if ps is None or not elv.has_elevon(ps):
+        return None
+    v = VLM(ev.plan, ns=32, nc=8, fins=getattr(ev, "fins", None))
+    x = x_cg_mm / 1000.0
+    a = v.trim_alpha(x, bounds=(-10.0, 18.0))
+    if a is None:
+        return None
+    dn = v.elevon_dn(ps.elevon_eta, ps.elevon_chord)
+    m = mass_g / 1000.0
+    sf = perf.slow_flight(v, x, a, dn, ps.elevon_eta, cl_max_section,
+                          max_up_deg, m)
+    cl = v.solve(a, x).CL
+    v_trim = float(np.sqrt(2 * m * G / (RHO_AIR * ev.plan.area_m2 * max(cl, 1e-6))))
+    return sf, v_trim
+
+
+def hatch_template(ev) -> dict | None:
+    """The hand-cut battery hatch, in plan-view mm from the root leading
+    edge and the centreline: the seated pack's footprint plus
+    HATCH_MARGIN_MM, cut through the UPPER skin (the pack's box is
+    anchored under it). None when there is no pack bay on the centreline."""
+    from .search.design import HATCH_MARGIN_MM
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    # The optimizer-placed bays are seated FIRST (search.design.seat_bays),
+    # and the pack is the one the optimizer places: it is bays[0]. It must
+    # also be the centreline box under the upper skin for a top hatch.
+    bays = getattr(ev, "bays", ())
+    pack = bays[0] if bays else None
+    if pack is None or pack.eta0 > 1e-9 or pack.anchor != "upper":
+        return None
+    half_mm = ev.plan.half_span_m * 1000.0
+    return {"name": pack.name,
+            "x0": pack.x0 * root_c - HATCH_MARGIN_MM,
+            "x1": pack.x1 * root_c + HATCH_MARGIN_MM,
+            "y": pack.eta1 * half_mm + HATCH_MARGIN_MM,
+            "depth": pack.height_mm}
+
+
 def pack_travel_mm(ev) -> float:
     """How far the battery may shift before the CG leaves that window.
 
@@ -153,7 +219,7 @@ def tight_gates(ev, within: float = 0.15) -> list[str]:
     return out
 
 
-def render(ev, parts, settings: vase.PrintSettings) -> str:
+def render(ev, parts, settings: vase.PrintSettings, mission=None) -> str:
     """The build sheet, as Markdown."""
     plan, t, m = ev.plan, ev.trim, ev.mass
     root_c = plan.stations[0].chord_m * 1000.0
@@ -188,6 +254,29 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
         A(f"    section to stall has its quarter chord at {b_lo:.1f} mm. With the")
         A(f"    CG forward of that, the lift it loses is behind the CG and the")
         A(f"    nose pitches UP at the stall. **Nose-heavy is not safer here.**")
+    if why == "stall onset" and mission is not None:
+        tgt = balance_target_mm(ev)
+        cam = next((i for i in m.items if "cam" in i.name), None)
+        A(f"- **Aim for {tgt:.1f} mm**, the middle of that window. The design")
+        A(f"  CG is {b_hi - m.x_cg_m*1000:.1f} mm from the aft limit, and glue this program")
+        A(f"  cannot weigh lands wherever the joints are.")
+        if cam is not None:
+            n = ballast_g(ev, tgt, cam.x_m * 1000.0)
+            at = slow_at(ev, (m.x_cg_m * 1000.0 * m.total_kg * 1000.0
+                              + n * cam.x_m * 1000.0) / (m.total_kg * 1000.0 + n),
+                         m.total_kg * 1000.0 + n, mission.cl_max_section,
+                         mission.max_elevon_deflect_deg)
+            if n > 0.0:
+                A(f"  - If the pack cannot move far enough forward in its bay,")
+                A(f"    **{n:.1f} g** of nose weight at the camera "
+                  f"({cam.x_m*1000:.0f} mm) gets there.")
+            if at is not None:
+                sf, vt = at
+                A(f"  - There the model gives a slowest trimmed speed of "
+                  f"**{sf.v_min_ms:.2f} m/s** (at the design CG it is {ev.slow.v_min_ms:.2f}),")
+                A(f"    with a hands-off speed of {vt:.1f} m/s.")
+        A(f"- Mark {tgt:.0f} mm on the belly in pencil: balancing is then a")
+        A(f"  fingertip check.")
     travel = pack_travel_mm(ev)
     if travel > 0.0:
         A(f"- The pack may sit **{travel:.0f} mm** either side of its drawn")
@@ -198,6 +287,62 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("area, which this program does not yet compute, so expect a few grams")
     A("more and check the CG after assembly rather than before.")
     A("")
+
+    # ------------------------------------------------ the hatch and exits
+    h = hatch_template(ev)
+    ae = getattr(ev, "aeroelastic", None)
+    if h is not None:
+        A("## Cut by hand after bonding: the battery hatch and the exits")
+        A("")
+        A("Nothing is cut through the skin by the printer (vase mode). These")
+        A("are cut with a sharp blade after the halves are bonded, and the")
+        A("numbers are plan-view mm from the root leading edge (x, aft) and")
+        A("from the centreline (y).")
+        A("")
+        A(f"**Battery hatch ({h['name']}):** a rectangle in the UPPER skin, "
+          f"x **{h['x0']:.0f} to {h['x1']:.0f} mm**, y **-{h['y']:.0f} to "
+          f"+{h['y']:.0f} mm**. It straddles the centre joint, so bond the "
+          f"halves first. The piece that comes out is the lid: hinge its front "
+          f"edge with tape and hold the rear edge with tape. It carries no "
+          f"load in the model.")
+        A("")
+        if ae is not None and ae.hatch_eta > 0.0:
+            lim = mission.min_aeroelastic_margin if mission is not None else None
+            ok = lim is not None and ae.margin_hatch >= lim
+            A(f"The cut opens the torsion box where it is most loaded, at the root.")
+            A(f"The model charges it: GJ {ae.gj_nmm2/1e6:.2f} -> "
+              f"{ae.gj_hatch_nmm2/1e6:.2f} N.m^2, and control reversal "
+              f"{ae.v_rev_ms:.0f} -> **{ae.v_rev_hatch_ms:.0f} m/s**. That is")
+            verdict = ("" if lim is None else
+                       f", against a {lim:.2f}x limit: **{'PASS' if ok else 'FAIL -- do not cut it'}**")
+            A(f"**{ae.margin_hatch:.2f}x** the {ae.design_v_ms:.0f} m/s it is scored "
+              f"at{verdict}. Do not make the hatch bigger than drawn.")
+            A("")
+        rows = []
+        k = ev.linkage
+        if k is not None and ev.horn_eta > 0.0:
+            st = ev.plan.at(ev.horn_eta)
+            y = ev.horn_eta * ev.plan.half_span_m * 1000.0
+            x_le = st.x_le_m * 1000.0
+            face = "upper" if k.side > 0 else "lower"
+            rows.append(("servo arm and pushrod", f"{face} skin, y {y:.0f} mm, x "
+                         f"{x_le + k.servo_x_mm - k.servo_arm_mm - 2:.0f} to "
+                         f"{x_le + k.servo_x_mm + k.servo_arm_mm + 2:.0f} mm, 4 mm wide",
+                         "the arm swings through it; both halves"))
+        rows.append(("motor wires", "the trailing edge on the centreline, under "
+                     "the mount's wire channel", "one hole, 5 mm"))
+        spar = ev.spar_fits[0] if ev.spar_fits else None
+        if spar is not None:
+            rows.append(("receiver antennas", "NOT SOLVED: two exits at 90 deg to "
+                         "each other, at least 30 mm from carbon",
+                         f"the tube starts at x {spar.root_xz_mm[0]:.0f} mm on the "
+                         f"centreline and runs aft-outboard at "
+                         f"{spar.sweep_deg:.0f} deg"))
+        A("| exit | where | note |")
+        A("|---|---|---|")
+        for r in rows:
+            A(f"| {r[0]} | {r[1]} | {r[2]} |")
+        A("")
 
     # ------------------------------------------------------------- parts
     A("## Parts")
@@ -523,7 +668,7 @@ RHO_AIR = 1.225       # the same sea-level density the score used
 G = 9.80665
 
 
-def flight_test(ev, cl_max_section: float | None = None) -> str | None:
+def flight_test(ev, mission=None) -> str | None:
     """A flight-test card: what the model predicts, and how to check it.
 
     Every prediction on it rests on a section cl_max that nothing on this
@@ -536,8 +681,8 @@ def flight_test(ev, cl_max_section: float | None = None) -> str | None:
     slow = getattr(ev, "slow", None)
     if slow is None or ev.trim is None:
         return None
+    cl_max_section = mission.cl_max_section if mission is not None else None
     plan, m = ev.plan, ev.mass
-    W = m.total_kg * G
     S = plan.area_m2
     half = plan.half_span_m * 1000.0
     y_on = slow.eta_critical * half
@@ -545,6 +690,24 @@ def flight_test(ev, cl_max_section: float | None = None) -> str | None:
     b_lo, b_hi, why = balance_window_mm(ev)
     cg = m.x_cg_m * 1000.0
     v_trim = ev.v_cruise
+    mass_g = m.total_kg * 1000.0
+    alpha_trim = ev.trim.alpha_deg
+    ballast = 0.0
+    # Predict what will be FLOWN: the build sheet's balance target, with
+    # its nose weight, not the design CG at the edge of the window.
+    if why == "stall onset" and mission is not None:
+        tgt = balance_target_mm(ev)
+        cam = next((i for i in m.items if "cam" in i.name), None)
+        if cam is not None:
+            ballast = ballast_g(ev, tgt, cam.x_m * 1000.0)
+            new_cg = (cg * mass_g + ballast * cam.x_m * 1000.0) / (mass_g + ballast)
+            at = slow_at(ev, new_cg, mass_g + ballast, mission.cl_max_section,
+                         mission.max_elevon_deflect_deg)
+            if at is not None:
+                slow, v_trim = at
+                cg, mass_g = new_cg, mass_g + ballast
+                alpha_trim = None
+    W = mass_g / 1000.0 * G
     clm = (f"a section cl_max of {cl_max_section:.2f}, the same everywhere"
            if cl_max_section is not None else
            "one declared section cl_max, the same everywhere")
@@ -562,13 +725,16 @@ def flight_test(ev, cl_max_section: float | None = None) -> str | None:
     A("")
     A("## Before the first flight")
     A("")
-    A(f"- Balance at **{cg:.1f} mm** aft of the root leading edge. Stay inside")
-    A(f"  **{b_lo:.1f} to {b_hi:.1f} mm**.")
+    A(f"- Balance at **{cg:.1f} mm** aft of the root leading edge"
+      + (f", with **{ballast:.1f} g** of nose weight at the camera if the pack "
+         f"cannot get it there" if ballast > 0 else "") + ".")
+    A(f"  Stay inside **{b_lo:.1f} to {b_hi:.1f} mm**. The predictions below are")
+    A("  at this balance point and this mass.")
     if why == "stall onset":
         A(f"  - **Do not balance nose-heavy past {b_lo:.1f} mm.** The stall starts")
         A("    at that station. Forward of it, the lift lost at the stall is")
         A("    behind the CG and pitches the nose UP.")
-    A(f"- Weigh it ready to fly. It was designed at **{m.total_kg*1000:.0f} g**.")
+    A(f"- Weigh it ready to fly: the predictions assume **{mass_g:.0f} g**.")
     A("  Every gram of glue or GPS moves the numbers below. Re-balance after")
     A("  adding anything.")
     A("- If the receiver has stabilisation (the AR630 has AS3X), switch it")
@@ -599,8 +765,8 @@ def flight_test(ev, cl_max_section: float | None = None) -> str | None:
     A("")
     A("| quantity | predicted |")
     A("|---|---|")
-    A(f"| hands-off speed, sticks centred | **{v_trim:.1f} m/s** "
-      f"({ev.trim.alpha_deg:.1f} deg) |")
+    A(f"| hands-off speed, sticks centred | **{v_trim:.1f} m/s**"
+      + (f" ({alpha_trim:.1f} deg)" if alpha_trim is not None else "") + " |")
     A(f"| slowest trimmed speed | **{slow.v_min_ms:.2f} m/s**, at wing CL "
       f"{slow.cl_max:.3f} |")
     if slow.limit == "elevon":
@@ -737,13 +903,13 @@ def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
 
 
 def write(ev, parts, settings: vase.PrintSettings, path,
-          cl_max_section: float | None = None) -> Path:
+          mission=None) -> Path:
     import json as _json
 
     path = Path(path)
-    path.write_text(render(ev, parts, settings), encoding="utf-8")
+    path.write_text(render(ev, parts, settings, mission), encoding="utf-8")
     (path.parent / "BOM.md").write_text(bom(ev, parts), encoding="utf-8")
-    card = flight_test(ev, cl_max_section)
+    card = flight_test(ev, mission)
     if card is not None:
         (path.parent / "FLIGHT_TEST.md").write_text(card, encoding="utf-8")
     (path.parent / "MANIFEST.json").write_text(

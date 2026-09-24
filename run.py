@@ -254,9 +254,7 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
             print(f"      {n}")
         for g in list(part.gates) + list(gates):
             print("    " + g.line())
-    sheet = build_sheet.write(
-        ev, panels, settings, out / "BUILD.md",
-        cl_max_section=mission.cl_max_section if mission is not None else None)
+    sheet = build_sheet.write(ev, panels, settings, out / "BUILD.md", mission)
     print(f"\n  build sheet: {sheet}")
     # The slicer settings are in BUILD.md and nowhere else now. The
     # prose here said "1 bottom layer" while spars.report said the root

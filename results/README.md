@@ -40,9 +40,27 @@ score, v155, also has the widest stall margin, so it is the pick:
 
 gen10 gets back most of the 0.7 m/s the nose-down stall cost in gen9: it
 is 0.23 m/s behind gen8, and stalls the right way. The export passes
-every gate, build sheet and CAD, with no exceptions. The stall margin is
-6.6 mm of CG: better than gen9's, and still a reason to balance at or
-ahead of the design CG.
+every gate, build sheet and CAD, with no exceptions.
+
+**Balance between 137.1 and 144.5 mm, and not nose-heavy.** An earlier
+version of this README said to balance at or ahead of the design CG.
+That was backwards. The stall starts at a fixed station (quarter chord
+137.1 mm), and the gate asks whether that station is AHEAD of the CG. A
+CG moved forward past it puts the onset behind the CG, into a stall
+that pitches up. A CG sweep through the model gives:
+
+| CG from design | SM | stall starts | slowest |
+|---|---|---|---|
+| −10 mm | 0.193 | 3.4 mm **behind** the CG | 8.08 (elevon-limited) |
+| −7 mm | 0.172 | 0.4 mm **behind** | 7.89 |
+| −5 mm | 0.159 | 1.6 mm ahead | 7.81 |
+| 0 | 0.126 | 6.6 mm ahead | 7.61 |
+| +3 mm | 0.105, below the 0.12 floor | 9.6 mm ahead | 7.49 |
+
+The build sheet's balance window now stops at the stall onset, and the
+export writes `FLIGHT_TEST.md`: tuft stations, the predictions, and the
+table that turns a measured stall speed into the wing CL_max the model
+should have used.
 
 The minimum speed and the stall location use a declared section cl_max
 of 0.85. Nothing on this machine passed validation as a cl_max predictor
@@ -102,10 +120,9 @@ The nose-down stall costs 0.7 m/s. The search paid for it by moving the
 CG forward (139 mm against 172) and giving up wing area. L/D is 6.30 at
 tier 0, a ranking only.
 
-**The stall margin is thin: 0.013 MAC, about 2 mm.** Balance the
-aircraft a few millimetres nose-heavy of the design CG, never aft of it.
-A battery a little aft of its bay position is enough to put the stall
-back behind the CG.
+**The stall margin is thin: 0.013 MAC, about 2 mm.** The advice first
+given here -- balance nose-heavy -- was backwards (see gen10): a CG more
+than about 2 mm FORWARD of the design puts the stall onset behind it.
 
 The first export failed one build-sheet gate, prop to trailing edge at
 9.83 mm against 10. That was an export bug: the mount was built for the

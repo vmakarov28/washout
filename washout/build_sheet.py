@@ -59,6 +59,34 @@ def neutral_point_mm(ev) -> float:
     return (ev.mass.x_cg_m + ev.static_margin * ev.plan.mac_m) * 1000.0
 
 
+def stall_onset_x_mm(ev) -> float | None:
+    """Where the first section to reach cl_max has its quarter chord, mm aft
+    of the root leading edge -- or None where slow flight was not solved.
+
+    The CG must stay AFT of this. Lift lost at a station behind the CG
+    pitches the nose up, and this station is fixed by the wing, not by the
+    balance: moving the CG FORWARD walks it past the onset. The build sheet
+    printed only the static-margin window, so on gen10's micro_fpv a
+    builder told "balance nose-heavy" -- as the results README said until
+    2026-09-24 -- could have balanced 10 mm forward, well inside that
+    window, and 3.4 mm into a stall that pitches up."""
+    slow = getattr(ev, "slow", None)
+    if slow is None:
+        return None
+    st = ev.plan.at(slow.eta_critical)
+    return float((st.x_le_m + 0.25 * st.chord_m) * 1000.0)
+
+
+def balance_window_mm(ev) -> tuple[float, float, str]:
+    """The CG stations to balance within: the static-margin band, cut at the
+    front by the stall onset where there is one. -> (lo, hi, what sets lo)."""
+    lo, hi = cg_window_mm(ev)
+    onset = stall_onset_x_mm(ev)
+    if onset is not None and onset > lo:
+        return float(onset), hi, "stall onset"
+    return lo, hi, "static margin"
+
+
 def pack_travel_mm(ev) -> float:
     """How far the battery may shift before the CG leaves that window.
 
@@ -69,7 +97,7 @@ def pack_travel_mm(ev) -> float:
     pack = next((i for i in ev.mass.items if i.name == "battery"), None)
     if pack is None or pack.mass_kg <= 0.0:
         return 0.0
-    lo, hi = cg_window_mm(ev)
+    lo, hi, _ = balance_window_mm(ev)
     cg = ev.mass.x_cg_m * 1000.0
     slack = min(cg - lo, hi - cg)
     return float(max(slack, 0.0) * ev.mass.total_kg / pack.mass_kg)
@@ -151,9 +179,15 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
         A("  balances it, so it cannot be flown as drawn; the misses are listed")
         A("  at the end. The numbers below are what it is, not what it needs.")
     A(f"- **CG: {m.x_cg_m*1000:.1f} mm aft of the root leading edge.**")
-    A(f"- Acceptable window **{lo:.1f} to {hi:.1f} mm** — that is the static")
-    A(f"  margin band {ev.sm_band[0]:.2f} to {ev.sm_band[1]:.2f} expressed as a")
-    A(f"  position, with the neutral point at {neutral_point_mm(ev):.1f} mm.")
+    b_lo, b_hi, why = balance_window_mm(ev)
+    A(f"- Acceptable window **{b_lo:.1f} to {b_hi:.1f} mm**.")
+    A(f"  - The static margin band {ev.sm_band[0]:.2f} to {ev.sm_band[1]:.2f} is")
+    A(f"    {lo:.1f} to {hi:.1f} mm, with the neutral point at {neutral_point_mm(ev):.1f} mm.")
+    if why == "stall onset":
+        A(f"  - **The front limit is the stall, not the margin.** The first")
+        A(f"    section to stall has its quarter chord at {b_lo:.1f} mm. With the")
+        A(f"    CG forward of that, the lift it loses is behind the CG and the")
+        A(f"    nose pitches UP at the stall. **Nose-heavy is not safer here.**")
     travel = pack_travel_mm(ev)
     if travel > 0.0:
         A(f"- The pack may sit **{travel:.0f} mm** either side of its drawn")
@@ -459,6 +493,14 @@ def bom(ev, parts) -> str:
                 if qty == 2 and not insert else i.name)
         L.append(f"| {qty} | {name} | — | {i.mass_kg*1000:.0f} g | "
                  f"at {i.x_m*1000:.0f} mm aft of the root LE |")
+    pt = getattr(ev, "powertrain", None)
+    if pt is not None:
+        pr = pt.prop
+        L.append(f"| 1 | propeller, pusher | **{pr.diameter_in:.1f} x "
+                 f"{pr.pitch_in:.1f} in** as scored | — | a design variable, not a "
+                 f"stock size: take the nearest stock prop NO LARGER in "
+                 f"diameter -- prop clearance was passed at "
+                 f"{pr.diameter_in:.2f} in |")
     if ev.linkage is not None:
         k = ev.linkage
         face = "upper" if k.side > 0 else "lower"
@@ -474,6 +516,155 @@ def bom(ev, parts) -> str:
     L += ["", f"Filament: about **{ev.mass.shell_kg*1000:.0f} g** of shell at "
           f"the declared {ev.print_settings.filament_density_gcc:.2f} g/cc, "
           f"plus adhesive.", ""]
+    return "\n".join(L) + "\n"
+
+
+RHO_AIR = 1.225       # the same sea-level density the score used
+G = 9.80665
+
+
+def flight_test(ev, cl_max_section: float | None = None) -> str | None:
+    """A flight-test card: what the model predicts, and how to check it.
+
+    Every prediction on it rests on a section cl_max that nothing on this
+    machine could validate (data/validation/README.md), so the card is
+    written as a measurement of that number, not a confirmation of it:
+    the first stall shows where the wing really lets go and how slowly it
+    really flies, and the table turns a measured speed back into the wing
+    CL_max the model should have used. None where slow flight was not
+    solved (missions without the docile objective or its gates)."""
+    slow = getattr(ev, "slow", None)
+    if slow is None or ev.trim is None:
+        return None
+    plan, m = ev.plan, ev.mass
+    W = m.total_kg * G
+    S = plan.area_m2
+    half = plan.half_span_m * 1000.0
+    y_on = slow.eta_critical * half
+    x_on = stall_onset_x_mm(ev)
+    b_lo, b_hi, why = balance_window_mm(ev)
+    cg = m.x_cg_m * 1000.0
+    v_trim = ev.v_cruise
+    clm = (f"a section cl_max of {cl_max_section:.2f}, the same everywhere"
+           if cl_max_section is not None else
+           "one declared section cl_max, the same everywhere")
+    L: list[str] = []
+    A = L.append
+    A(f"# {plan.name}: flight-test card")
+    A("")
+    A("Generated with the build sheet, from the design that was scored.")
+    A("Every number is computed; none is typed in.")
+    A("")
+    A("**What this test is for.** The slowest speed and the place the stall")
+    A(f"starts are predicted with {clm}. That is a declared number that no")
+    A("tool on this machine could validate (`data/validation/README.md`).")
+    A("This flight MEASURES it.")
+    A("")
+    A("## Before the first flight")
+    A("")
+    A(f"- Balance at **{cg:.1f} mm** aft of the root leading edge. Stay inside")
+    A(f"  **{b_lo:.1f} to {b_hi:.1f} mm**.")
+    if why == "stall onset":
+        A(f"  - **Do not balance nose-heavy past {b_lo:.1f} mm.** The stall starts")
+        A("    at that station. Forward of it, the lift lost at the stall is")
+        A("    behind the CG and pitches the nose UP.")
+    A(f"- Weigh it ready to fly. It was designed at **{m.total_kg*1000:.0f} g**.")
+    A("  Every gram of glue or GPS moves the numbers below. Re-balance after")
+    A("  adding anything.")
+    A("- If the receiver has stabilisation (the AR630 has AS3X), switch it")
+    A("  **off** for the stall tests. It fights the stall and hides exactly")
+    A("  what is being measured.")
+    A("")
+    A("## Tufts: where the stall starts")
+    A("")
+    A("Tape 30-40 mm lengths of wool to the UPPER surface. Attach each one at")
+    A("its front end, at half chord, at these stations, and do both halves:")
+    A("")
+    A("| from the centreline | leading edge at | chord | tuft at (half chord) |")
+    A("|---|---|---|---|")
+    grid = [int(round(y)) for y in np.linspace(0.1, 0.95, 7) * half]
+    # the onset row replaces any grid row within 8 mm of it, not beside it
+    ys = sorted([y for y in grid if abs(y - y_on) > 8.0] + [int(round(y_on))])
+    for y in ys:
+        st = plan.at(min(y / half, 1.0))
+        x_le = st.x_le_m * 1000.0
+        c = st.chord_m * 1000.0
+        mark = "  **<- predicted stall onset**" if y == int(round(y_on)) else ""
+        A(f"| {y} mm | {x_le:.0f} mm aft | {c:.0f} mm | {x_le + 0.5*c:.0f} mm aft{mark} |")
+    A("")
+    A("Mount a camera looking back along one wing, or film from a chase")
+    A("position. A tuft that reverses or thrashes marks separated flow.")
+    A("")
+    A("## What the model predicts")
+    A("")
+    A("| quantity | predicted |")
+    A("|---|---|")
+    A(f"| hands-off speed, sticks centred | **{v_trim:.1f} m/s** "
+      f"({ev.trim.alpha_deg:.1f} deg) |")
+    A(f"| slowest trimmed speed | **{slow.v_min_ms:.2f} m/s**, at wing CL "
+      f"{slow.cl_max:.3f} |")
+    if slow.limit == "elevon":
+        lim = ("the up-elevon runs out first: holding full up, it should mush "
+               "nose-high rather than stall")
+    else:
+        lim = (f"the wing stalls, holding {abs(slow.delta_deg):.0f} deg of "
+               f"up-elevon: there is more travel left, so it CAN be stalled")
+    A(f"| what ends it | {lim} |")
+    A(f"| where the stall starts | {y_on:.0f} mm from the centreline, both sides |")
+    if x_on is not None and x_on < cg:
+        nose = f"drops: the onset is {cg - x_on:.1f} mm ahead of the CG"
+    else:
+        nose = "RISES: the onset is behind the CG"
+    A(f"| what the nose does | {nose} |")
+    A("")
+    A("## The test")
+    A("")
+    A("1. Trim for hands-off level flight. Record the speed: this checks the")
+    A("   trim and the hands-off prediction.")
+    A("2. At a height you could recover from twice, at least 30 m, fly")
+    A("   straight into wind and bring the speed down slowly: about one")
+    A("   second per 1 m/s. Keep the wings level with small inputs.")
+    A("3. Hold up-elevon until the nose drops, a wing drops, or full up is")
+    A("   reached. Recover by releasing the up-elevon; add power as the nose")
+    A("   comes down.")
+    A("4. Repeat three times into wind and three times downwind. The airspeed")
+    A("   is the mean of the two groundspeeds.")
+    A("")
+    A("Measuring speed with no GPS: two markers 20 m apart, filmed from the")
+    A("side, gives 20 m divided by the crossing time. Do it both ways and")
+    A("average. A GPS logger works too, but weigh it and re-balance.")
+    A("")
+    A("## Reading the result")
+    A("")
+    A("**The stall.**")
+    A("")
+    A(f"- **As predicted:** the tufts near {y_on:.0f} mm go first and the nose")
+    A("  drops. The model's stall location holds.")
+    A("- **Not as predicted:** the tips go first, or the nose rises. The")
+    A("  declared cl_max is wrong in a way that matters. Stop slow flight,")
+    A("  and send back the tuft video.")
+    A("")
+    A("**The speed.** A measured slowest speed V gives the wing CL_max the")
+    A("model should have used: CL = 2W / (rho S V^2), with")
+    A(f"W = {W:.3f} N, S = {S:.4f} m2 and rho = {RHO_AIR} kg/m3.")
+    A("")
+    A("| measured V | implied wing CL_max | vs predicted |")
+    A("|---|---|---|")
+    for f in (0.85, 0.9, 1.0, 1.1, 1.2):
+        v = slow.v_min_ms * f
+        cl = 2 * W / (RHO_AIR * S * v * v)
+        A(f"| {v:.2f} m/s | {cl:.3f} | {100*(cl/slow.cl_max-1):+.0f}% |")
+    A("")
+    A("That ratio, measured against predicted, is what goes back into the")
+    A("program: it scales the declared section cl_max for this wing.")
+    A("")
+    A("## Record")
+    A("")
+    A("| run | into / down wind | groundspeed at the stall | first tufts to go (mm) | nose / wing | notes |")
+    A("|---|---|---|---|---|---|")
+    for i in range(1, 7):
+        A(f"| {i} | | | | | |")
+    A("")
     return "\n".join(L) + "\n"
 
 
@@ -545,12 +736,16 @@ def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
     return out
 
 
-def write(ev, parts, settings: vase.PrintSettings, path) -> Path:
+def write(ev, parts, settings: vase.PrintSettings, path,
+          cl_max_section: float | None = None) -> Path:
     import json as _json
 
     path = Path(path)
     path.write_text(render(ev, parts, settings), encoding="utf-8")
     (path.parent / "BOM.md").write_text(bom(ev, parts), encoding="utf-8")
+    card = flight_test(ev, cl_max_section)
+    if card is not None:
+        (path.parent / "FLIGHT_TEST.md").write_text(card, encoding="utf-8")
     (path.parent / "MANIFEST.json").write_text(
         _json.dumps(manifest(ev, parts, settings), indent=2), encoding="utf-8")
     return path

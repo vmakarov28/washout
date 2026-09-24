@@ -1436,12 +1436,17 @@ def test_a_corner_between_two_samples_is_given_a_vertex_before_fitting():
 # ------------------------------------------------- the joint wedge inserts
 
 
-def _fleet_eval(name, z_step_mm=2.0):
+def _fleet_eval(name, z_step_mm=2.0, folder=None):
+    """The TRACKED design for `name` -- or, with `folder`, that design. A
+    test about a particular aircraft must name it: the index moves every
+    generation, and a test pinned to "the tracked micro_fpv" silently
+    started checking gen9, then gen10, instead of the gen8 design it was
+    written about."""
     import json as _json
     from washout.search.design import Mission, evaluate
     root = ASSETS.parent / "results" / "fleet"
     index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
-    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / (folder or index[name]) / "design.json").read_text(encoding="utf-8"))
     m = getattr(Mission, name)()
     return evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
                     vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
@@ -1731,7 +1736,7 @@ def test_the_micro_fpv_stall_starts_behind_its_cg():
     opposite of what a beginner's aircraft must do. The flat stall speed
     (every section at cl_max at once, nothing spent on trim) also called
     this wing 6.40 m/s; trimmed, it is 7.38."""
-    ev = _fleet_eval("micro_fpv")
+    ev = _fleet_eval("micro_fpv", folder="gen8_micro_fpv_v132")
     assert ev.slow is not None and ev.slow.limit == "stall"
     assert 0.35 < ev.slow.eta_critical < 0.6
     assert ev.slow.v_min_ms == pytest.approx(7.38, abs=0.05)
@@ -1744,11 +1749,36 @@ def test_the_motor_mount_is_built_for_the_prop_the_design_chose():
     powertrain. On gen9's micro_fpv that was a 5.04 in disc the search
     never chose, and the build sheet failed a clearance the search had
     passed (9.83 mm against 10). The mount must see the scored prop, and
-    its clearance must be the score's, to the hundredth of a millimetre."""
+    its clearance must be the score's, to a tenth of a millimetre."""
     from washout.printing import parts as pm
     ev = _fleet_eval("micro_fpv")
     p = _fleet_physical("micro_fpv")
     assert ev.powertrain.prop.diameter_in == pytest.approx(p["prop_diam_in"])
     _, gates = pm.mount_for(ev.plan, ev.print_settings, ev.powertrain, "m")
     gap = next(g for g in gates if g.name == "prop to trailing edge").value
-    assert gap == pytest.approx(pm.prop_clearance_mm(ev.plan, p["prop_diam_in"]), abs=0.01)
+    # Not to the hundredth: the mount's web sits against the PRINTED
+    # trailing edge (thickened for the nozzle), the score measures from the
+    # lofted one. On gen10 they are 0.045 mm apart. The bug this pins was
+    # a different propeller -- millimetres, not hundredths.
+    assert gap == pytest.approx(pm.prop_clearance_mm(ev.plan, p["prop_diam_in"]), abs=0.1)
+
+
+def test_the_balance_window_stops_at_the_stall_onset():
+    """Found 2026-09-24, writing the flight-test card. The stall-onset gate
+    compares where the first section stalls with where the CG is, so it is
+    passed by an AFT CG, not a forward one: on gen10's micro_fpv the onset
+    is 6.6 mm ahead of the CG, and balancing 7 mm nose-heavy -- which is
+    what the results README advised -- puts it behind, into a stall that
+    pitches up. The build sheet printed only the static-margin window
+    (120.7-144.5 mm), which contains that mistake. Its window now stops
+    at the onset, and a CG just forward of it fails the gate."""
+    from washout import build_sheet
+    ev = _fleet_eval("micro_fpv")
+    lo, hi, why = build_sheet.balance_window_mm(ev)
+    sm_lo, sm_hi = build_sheet.cg_window_mm(ev)
+    onset = build_sheet.stall_onset_x_mm(ev)
+    assert why == "stall onset" and lo == pytest.approx(onset)
+    assert sm_lo < lo < ev.mass.x_cg_m * 1000.0 <= hi == pytest.approx(sm_hi)
+    card = build_sheet.flight_test(ev, 0.85)
+    assert "Do not balance nose-heavy" in card and f"{lo:.1f} mm" in card
+    assert f"{ev.slow.v_min_ms:.2f} m/s" in card

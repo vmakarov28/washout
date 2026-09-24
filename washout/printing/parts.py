@@ -871,8 +871,11 @@ def mount_for(plan, settings: PrintSettings, powertrain, name: str,
     torque_nm = p_shaft / max(omega, 1e-9)
     prop_r = 0.5 * powertrain.prop.diameter_in * 25.4
     belly = min(y_lo(x_te(0.0) - 5.0, 0.0), y_lo(0.5 * x_te(0.0), 0.0))
-    # the SAME trailing edge the score's clearance gate uses, so the two
-    # can never disagree about where the wing ends
+    # the SAME trailing edge the score's clearance gate uses for the
+    # blade path. The web itself sits against the PRINTED trailing edge,
+    # which the nozzle thickening puts up to a few hundredths of a mm aft
+    # of the lofted one: 0.045 mm on gen10's micro_fpv, so this gate and
+    # the score's differ by that much and no more (test_validation)
     gates = mount_gates(part, thrust_n, torque_nm, te_station(plan), prop_r,
                         belly, plan.half_span_m * 1000.0)
     return part, gates

@@ -134,6 +134,29 @@ def run_search(
     log = SearchLog()
     t0 = time.perf_counter()
 
+    def checkpoint(u: np.ndarray, score: float) -> None:
+        """The best feasible design so far, on disk, every time it improves.
+
+        It lived only in memory. gen10's eight searches died together 2.2 h
+        in when the machine's WSL had to be restarted, and the best design
+        any of them had found -- 7.88 m/s against the seed's 8.04 -- died
+        with them. The file has the keys a seed is read by (`physical`), so
+        a killed search can be resumed with --seed-design; the write is
+        atomic, so a kill mid-write leaves the previous one."""
+        if not out_dir:
+            return
+        d = Path(out_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "best_so_far.json.tmp"
+        tmp.write_text(json.dumps({
+            "u": list(map(float, u)), "physical": unit_to_physical(u),
+            "score": float(score), "feasible": True,
+            "evaluations": log.evaluations,
+            "elapsed_s": time.perf_counter() - t0,
+            "note": "a search in progress; design.json is written at the end",
+        }, indent=2), encoding="utf-8")
+        os.replace(tmp, d / "best_so_far.json")
+
     def record(u: np.ndarray, summary: dict | None, why: str | None) -> float:
         """The parent's bookkeeping for one evaluated design -> DE's value."""
         log.evaluations += 1
@@ -153,6 +176,7 @@ def run_search(
         if summary["ok"] and summary["score"] > log.best_feasible_score:
             log.best_feasible_score = summary["score"]
             log.best_feasible_u = list(map(float, u))
+            checkpoint(u, summary["score"])
         if summary["score"] > log.best_score:
             log.best_score = summary["score"]
             log.best_u = list(map(float, u))

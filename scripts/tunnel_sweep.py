@@ -167,6 +167,11 @@ def main() -> int:
                          "legibly and at a twentieth of the size.")
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "tunnel")
     ap.add_argument("--skip-polar", action="store_true")
+    ap.add_argument("--raw-dat", action="store_true", dest="raw_dat",
+                    help="hand --airfoil to the tunnel exactly as given, "
+                         "without the CST refit: for validation against a "
+                         "published shape, where the fit's error is not "
+                         "the question")
     ap.add_argument("--jobs", type=int, default=3,
                     help="concurrent tunnel runs; one does not "
                          "saturate the GPU")
@@ -183,7 +188,11 @@ def main() -> int:
     else:
         section, label = base, base.name
 
-    dat = write_dat(section, WIN_TUNNEL / "assets" / f"{a.tag}_section.dat")
+    if a.raw_dat and not a.design:
+        dat = WIN_TUNNEL / "assets" / f"{a.tag}_section.dat"
+        dat.write_text(a.airfoil.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        dat = write_dat(section, WIN_TUNNEL / "assets" / f"{a.tag}_section.dat")
     print(f"section: {label}\n  t/c {section.t_max:.4f}  camber "
           f"{section.camber_max:.4f}  te_camber {section.te_camber:+.5f}")
     print(f"  wrote {dat}")
@@ -211,7 +220,10 @@ def main() -> int:
                    f"--out /tmp/{name}")
             proc = wsl(cmd)
             if proc.returncode != 0:
-                return al, None, None, proc.stderr[-500:]
+                # a run can die with nothing on stderr (the OOM killer,
+                # a signal); an empty message must still read as failure
+                why = (proc.stderr or proc.stdout)[-500:].strip()
+                return al, None, None, why or f"exit {proc.returncode}, no output"
             try:
                 cl, cd = parse_forces(proc.stdout)
             except RuntimeError as e:

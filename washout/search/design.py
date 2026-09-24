@@ -203,16 +203,46 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
 
 
 def _box_outside_mm(plan, v, margin: float = det.BAND_MARGIN,
-                    n: int = 5) -> float:
+                    n: int = 5, hinge=None) -> float:
     """How far, in mm, a volume's band pokes out of the section anywhere
-    over its OWN span. 0.0 when the box is inside everywhere."""
+    over its OWN span. 0.0 when the box is inside everywhere.
+
+    `hinge` = (elevon_eta, hinge chord fraction, wall_mm): outboard of the
+    elevon's root the wing ENDS at the hinge line -- the panel forward of
+    the elevon is cut there and its aft wall is the cut face -- so a box
+    there must stop a wall short of it. The section used to be the whole
+    aerofoil everywhere, and gen9's servos reached 2.6 mm through the
+    hinge wall into the elevon gap with nothing to say so. The wall leans
+    in a printed layer as a rib's web does (vase._web_lean_mm): a layer
+    square to a tilted panel meets the swept wing obliquely, so the limit
+    is taken that much further forward, from the local dihedral and sweep
+    and the box's own depth."""
     worst = 0.0
     for e in np.linspace(v.eta0, v.eta1, n):
         st = plan.at(float(e))
         c_mm = st.chord_m * 1000.0
         x0, x1 = v.band(plan, float(e))
-        worst = max(worst, (margin - x0) * c_mm, (x1 - (1.0 - margin)) * c_mm)
+        aft = 1.0 - margin
+        if hinge is not None and e >= hinge[0] - 1e-9:
+            de = 1e-3
+            s0 = plan.at(float(max(e - de, 0.0)))
+            s1 = plan.at(float(min(e + de, 1.0)))
+            dy = (min(e + de, 1.0) - max(e - de, 0.0)) * plan.half_span_m
+            sweep = abs((s1.x_le_m - s0.x_le_m) / dy) if dy > 0 else 0.0
+            dihedral = abs((s1.z_le_m - s0.z_le_m) / dy) if dy > 0 else 0.0
+            lean = v.height_mm * dihedral * sweep
+            aft = min(aft, hinge[1] - (hinge[2] + lean) / c_mm)
+        worst = max(worst, (margin - x0) * c_mm, (x1 - aft) * c_mm)
     return float(worst)
+
+def hinge_limit(p_vec, wall_mm: float):
+    """(elevon_eta, hinge chord fraction, wall) for `_box_outside_mm`, or
+    None for a wing with no elevon."""
+    ec = float(p_vec.get("elevon_chord", 0.0))
+    if ec <= 1e-6:
+        return None
+    return (float(p_vec["elevon_eta"]), 1.0 - ec, float(wall_mm))
+
 
 def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
               n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
@@ -248,6 +278,7 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
     placed: list = []
     seats: dict = {}
     eta_seats: dict = {}
+    hinge = hinge_limit(p_vec, wall_mm)
 
     def volume(bay, x, eta=None):
         # A top-opening bay's box rests on a FLOOR that sits one box-depth
@@ -296,7 +327,7 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
                 # may narrow while it closes, but not while the box is in
                 # it. Millimetres of box outside the section count as
                 # interference.
-                room = _box_outside_mm(plan, vol)
+                room = _box_outside_mm(plan, vol, hinge=hinge)
                 # NOT a term for how far the servo's shaft falls short of
                 # the elevon. That was tried, in the key and as a clamp,
                 # and both are the same mistake: the seat that satisfies
@@ -1426,6 +1457,20 @@ def _evaluate_once(
     # through every pack in the fleet.
     bay_vols, bay_seats, bay_etas = seat_bays(
         plan, mission, p_vec, wall, joint_etas)
+    # A box that pokes out of the section -- or through the hinge wall --
+    # is priced here. The seat solver only PREFERS seats that fit; a bay
+    # with no fitting seat in its band is returned anyway, and nothing
+    # reported it.
+    for v in bay_vols:
+        out_mm = _box_outside_mm(plan, v, hinge=hinge_limit(p_vec, wall))
+        if out_mm > 0.0:
+            reasons.append(f"the {v.name} box pokes {out_mm:.1f} mm out of the "
+                           f"section (or through the hinge wall)")
+            penalty += 4.0 * out_mm
+    # ...and the truss keeps out of them (vase.PrintSettings.payload_boxes)
+    root_mm = plan.stations[0].chord_m * 1000.0
+    settings = replace(settings, payload_boxes=tuple(
+        (v.x0 * root_mm, v.x1 * root_mm, v.eta0, v.eta1) for v in bay_vols))
 
     # The spars must avoid the payload boxes: a tube seated where the
     # pack sits is a tube through the pack. Nothing else reserves space

@@ -208,9 +208,17 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
     straight tube a side stops at 0.68 and 0.58. It went to ~355 g when
     the wedges its two turning joints leave were weighed (2026-09-23):
     4.5 g of glue fill at the first, where the spar severs a thin wedge,
-    and a 1.1 g printed insert at the second. Every move is the aircraft
-    changing, not an estimate drifting -- and it still misses its wing
-    loading.
+    and a 1.1 g printed insert at the second. It went to ~334 g
+    (2026-09-24) when the rib truss stopped running through the payload
+    bays: since the bay cutter was removed nothing kept the webs out of
+    the pack and the electronics, and 21 g of truss that could never be
+    built round a battery was being weighed. Every move is the aircraft
+    changing, not an estimate drifting.
+
+    At 334 g its wing loading is 25.9 g/dm2 -- INSIDE the 26 gate by
+    0.1, the gate this test was first written about. It is still not a
+    feasible aircraft: its centre body has no chord left for a truss
+    once the payload is kept clear, and seven other gates miss.
 
     This test exists so the mass can never quietly drift back down. The
     number it pins is the one a builder would put on a scale."""
@@ -223,10 +231,7 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
                                   bed_z_mm=250.0)
     ev = evaluate(np.array(d["u"]), m, base, settings)
 
-    assert ev.mass_kg * 1000 == pytest.approx(355.0, abs=4.0), (
-        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~355")
-    loading = ev.mass_kg * 1000.0 / (ev.plan.area_m2 * 100.0)
-    assert loading > m.max_wing_loading_gdm2, (
-        f"wing loading {loading:.1f} should now miss "
-        f"{m.max_wing_loading_gdm2:.0f} g/dm2")
-    assert not ev.ok and any("wing loading" in r for r in ev.reasons)
+    assert ev.mass_kg * 1000 == pytest.approx(334.0, abs=4.0), (
+        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~334")
+    assert not ev.ok
+    assert any("carries no rib truss" in r for r in ev.reasons), ev.reasons

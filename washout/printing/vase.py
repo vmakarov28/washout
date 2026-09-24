@@ -96,6 +96,18 @@ class PrintSettings:
     its truss out of the chord band the tube actually sweeps through
     inside that panel, and the bore gate measures at the tube's actual
     centre in each layer, and only in the layers it reaches."""
+    payload_boxes: tuple = ()
+    """Every seated payload box as (x0_mm, x1_mm, eta0, eta1): absolute x
+    aft of the root leading edge, span fractions of the right half. The
+    rib truss keeps out of the chord band each one occupies in a panel.
+
+    Nothing did from 2026-09-21, when the bay cutter was removed: the
+    ribs' only exclusions were the spar corridors, and the pack's and the
+    servos' boxes went with the openings. Every design since then --
+    gen7 to gen10 -- printed diagonal webs straight through its battery
+    and its servos. The boxes still gated (a pack must fit its section),
+    so the searches called them feasible, and a pack that fits its section
+    does not fit a section with a web through it."""
     elevon_chord: float = 0.0
     elevon_eta: float = 1.0
     """The control surface, as the EXPORTER sees it. Zero chord means the
@@ -398,6 +410,18 @@ def build_stack(
     tubes = _tubes_in_panel(plan, frame, z, settings) if settings.spar_lines else None
     avoid = (tuple(b for b in (t["band"] for t in tubes) if b is not None)
              if tubes is not None else tuple(settings.spar_avoid))
+    avoid = avoid + _payload_bands(plan, frame, z, settings)
+    # Every band above is placed where its object meets the CHORD LINE, and
+    # a rib is placed by the station of its top. Neither is where a web
+    # is at depth: a layer is cut square to the panel's axis, tilted phi
+    # from the loft's stations, so a point h below the chord line lies
+    # h tan(phi) further along the span, where the swept leading edge is
+    # h tan(phi) dx_le/dy further aft. A web vertical in the aerofoil's
+    # frame leans that much in the layer. On gen10's outer panel (17 deg,
+    # 47 deg sweep, 17 mm deep) it is 5.6 mm, and a rib whose top cleared
+    # the spar's band put its foot 3.3 mm from the tube's centre.
+    if avoid:
+        avoid = tuple((c, half + _web_lean_mm(plan, frame)) for c, half in avoid)
     rib_spec = RibSpec(n_ribs=settings.rib_count,
                        pitch_mm=settings.rib_pitch_mm,
                        max_overhang_deg=settings.max_overhang_deg,
@@ -512,6 +536,49 @@ def build_stack(
                       origin_mm=(float(origin[0]), float(origin[1])),
                       spar_x_local=local, frame=frame,
                       spar_xy=spar_xy, spar_ellipse=ellipse)
+
+
+def _web_lean_mm(plan, frame, n: int = 9) -> float:
+    """How far a rib web leans chordwise, top to bottom, in this panel's
+    layers: the deepest section times tan(phi) times the steepest
+    leading-edge sweep. See build_stack where the bands are widened."""
+    t = abs(np.tan(np.radians(frame.phi_deg)))
+    if t < 1e-9:
+        return 0.0
+    e = np.linspace(frame.eta0, frame.eta1, n)
+    st = [plan.at(float(v)) for v in e]
+    y = e * plan.half_span_m
+    x_le = np.array([s_.x_le_m for s_ in st])
+    sweep = np.abs(np.gradient(x_le, y)).max() if np.ptp(y) > 0 else 0.0
+    depth = max(s_.airfoil.t_max * s_.chord_m for s_ in st) * 1000.0
+    return float(depth * t * sweep)
+
+
+def _payload_bands(plan, frame, z_mm, settings) -> tuple:
+    """The chord band each payload box occupies in this panel, as the
+    (centre fraction, half-width mm) the rib layout avoids -- the same form
+    as a spar's band. A vase-mode rib cannot stop half way up a panel (the
+    point count per layer is fixed), so the band holds for the WHOLE
+    panel; it is taken over the layers the box actually spans, plus the
+    width of a rib's web, so neither leg touches the box."""
+    if not settings.payload_boxes:
+        return ()
+    from .frames import reference_etas
+    etas = np.asarray(reference_etas(plan, frame, z_mm), dtype=float)
+    web = 2.0 * settings.extrusion_width_mm
+    out = []
+    for x0, x1, e0, e1 in settings.payload_boxes:
+        here = (etas >= e0 - 1e-9) & (etas <= e1 + 1e-9)
+        if not here.any():
+            continue
+        st = [plan.at(float(np.clip(e, 0.0, 1.0))) for e in etas[here]]
+        x_le = np.array([s_.x_le_m for s_ in st]) * 1000.0
+        chord = np.array([s_.chord_m for s_ in st]) * 1000.0
+        f0 = float(((x0 - x_le) / chord).min())
+        f1 = float(((x1 - x_le) / chord).max())
+        c_mid = float(np.median(chord))
+        out.append((0.5 * (f0 + f1), 0.5 * (f1 - f0) * c_mid + web))
+    return tuple(out)
 
 
 def _tubes_in_panel(plan, frame, z_mm, settings) -> list:

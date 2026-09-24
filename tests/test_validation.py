@@ -8,6 +8,8 @@ published data or closed-form theory, the source is named in the test.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -1735,11 +1737,13 @@ def test_the_micro_fpv_stall_starts_behind_its_cg():
     nose up, into a deeper stall: the swept wing's pitch-up, and the
     opposite of what a beginner's aircraft must do. The flat stall speed
     (every section at cl_max at once, nothing spent on trim) also called
-    this wing 6.40 m/s; trimmed, it is 7.38."""
+    this wing 6.40 m/s; trimmed, it was 7.38 -- and 7.29 once the rib
+    truss stopped running through its pack and servos (2026-09-24), the
+    webs that could never have been built round them no longer weighed."""
     ev = _fleet_eval("micro_fpv", folder="gen8_micro_fpv_v132")
     assert ev.slow is not None and ev.slow.limit == "stall"
     assert 0.35 < ev.slow.eta_critical < 0.6
-    assert ev.slow.v_min_ms == pytest.approx(7.38, abs=0.05)
+    assert ev.slow.v_min_ms == pytest.approx(7.29, abs=0.05)
     assert any("pitches UP at the stall" in r for r in ev.reasons)
 
 
@@ -1837,3 +1841,64 @@ def test_the_battery_hatch_fits_the_pack_and_passes_its_stiffness_gate():
     text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings,
                               Mission.micro_fpv())
     assert "Battery hatch" in text and "PASS" in text
+
+
+def test_no_printed_wall_runs_through_the_payload():
+    """Found 2026-09-24, building the full CAD. When the bay cutter was
+    removed (2026-09-21) the ribs' only exclusions left were the spar
+    corridors, and every design from gen7 to gen10 printed diagonal webs
+    through its battery and its servos: on gen10, 2,624 sampled points of
+    web inside the pack's box and 637 inside the servos'. The boxes
+    still gated, so the searches called them feasible.
+
+    Checked the way the first check was NOT: along every segment of every
+    sampled layer, not at the contour's vertices -- a web is two floor
+    vertices and two long straight legs, and a check of vertices only
+    reported a web through the battery as clear.
+
+    Any printed wall, not only a web: the first version of this test found
+    gen9's servo box reaching 2.6 mm through the outer panel's HINGE wall,
+    the cut face the elevon hinges from, which nothing checked either --
+    the payload fit used the whole aerofoil even where the wing ends at the
+    hinge. The seat solver now takes the hinge as the section's aft end
+    (`_box_outside_mm` with the hinge), so gen9's servos are re-seated
+    forward of it, and a seat that cannot be is gated."""
+    from washout.geom import interior as it
+    from washout.search.design import _box_outside_mm, hinge_limit, unit_to_physical
+    gen9 = _fleet_eval("micro_fpv", folder="gen9_micro_fpv_v144")
+    p9 = unit_to_physical(np.array(json.loads((ASSETS.parent / "results" / "fleet"
+        / "gen9_micro_fpv_v144" / "design.json").read_text())["u"]))
+    servo = next(v for v in gen9.bays if v.name == "servos")
+    assert _box_outside_mm(gen9.plan, servo, hinge=hinge_limit(p9, 0.45)) == 0.0
+    assert not any("pokes" in r for r in gen9.reasons), gen9.reasons
+    ev = _fleet_eval("micro_fpv")
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    half = ev.plan.half_span_m * 1000.0
+    for p in ev.panels:
+        f = p.frame
+        phi = np.radians(f.phi_deg)
+        y0, z0 = f.origin_yz_mm
+        ox, oy = p.origin_mm
+        for k in range(0, len(p.z_mm), 3):
+            C = p.contours[k]
+            X, Yp, s = C[:, 0] + ox, C[:, 1] + oy, p.z_mm[k]
+            fy = y0 + s * np.cos(phi) - Yp * np.sin(phi)
+            fz = z0 + s * np.sin(phi) + Yp * np.cos(phi)
+            ym = float(np.mean(fy))
+            P = np.stack([X, fz], 1)
+            Q = np.roll(P, -1, 0)
+            t = np.linspace(0.0, 1.0, 12, endpoint=False)[None, :, None]
+            D = (P[:, None, :] + t * (Q - P)[:, None, :]).reshape(-1, 2)
+            for b in ev.bays:
+                if not (b.eta0 * half <= ym <= b.eta1 * half):
+                    continue
+                inx = (D[:, 0] > b.x0 * root_c) & (D[:, 0] < b.x1 * root_c)
+                if not inx.any():
+                    continue
+                zu = np.array([it.skin_z_mm(ev.plan, ym / half, x, it.UPPER)
+                               for x in D[inx, 0]])
+                top = zu - b.offset_mm
+                bot = top - b.height_mm
+                z_in = D[inx, 1]
+                assert not np.any((z_in > bot + 0.3) & (z_in < top - 0.3)), (
+                    f"{p.name} layer {k}: a web inside the {b.name} box")

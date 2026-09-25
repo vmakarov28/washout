@@ -17,7 +17,59 @@ Pass the same `--polar` the search used. Without it the export falls back
 to the flat tier-0 drag model and reports a different, flattering L/D for
 the same aeroplane — the mistake commit `f3b61a9` exists to prevent.
 
+## gen12, 2026-09-24: the first micro_fpv buildable as drawn
+
+Three bugs were found building the full CAD (commit `a81e739`), and every
+design from gen7 to gen10 had at least one of them:
+- **Ribs through the payload.** The rib truss ran through the battery
+  and the servos: nothing had kept webs out of payload since the bay
+  cutter was removed on 2026-09-21.
+- **Webs lean.** The webs lean in a tilted panel's layers, so a rib
+  cleared the spar at its top and crowded it at its foot.
+- **Servos through the hinge wall.** A servo could reach through the
+  hinge wall.
+
+Under the corrected geometry, gen10 has no room for a truss in its outer
+panel and is infeasible. gen11 found nothing feasible. Its searches, and
+gen8's to gen10's, had also been stopped early by differential
+evolution's RELATIVE tolerance, which an all-infeasible population meets
+long before it stops improving (`683c9cb`, now absolute). gen12 seeded
+eight searches from gen11's near misses. They ended together at 3.1 h,
+cause unknown -- the machine did not reboot, and the logs say nothing.
+Four had found feasible designs, and the per-search checkpoints
+(`best_so_far.json`, added after gen10 lost 2.2 h the same way) kept
+them.
+
+| | gen10 v155 (old geometry) | **gen12 v171** |
+|---|---|---|
+| slowest trimmed | 7.61 m/s | **7.58 m/s** |
+| stall | nose-down, 6.6 mm | nose-down, 5.8 mm ahead of the CG |
+| hands-off | 12.3 m/s | 11.7 m/s (1.54x) |
+| Dutch roll zeta | 0.089 | **0.117** |
+| mass / area | 172 g / 693 cm2 | 167 g / 680 cm2 |
+| truss | through the pack and the servos | **clear of all payload**; 3 webs centre body, 2 outer panel |
+| prop | 4.4 x 3.5 in | 4.5 x 3.3 in, 13.5 mm clear |
+
+Every export gate passes (39 of 39). The full as-built STEP
+(`--step-full`) is 30 bodies, every one a valid solid:
+- printed walls within 0.9% of the bead;
+- rib webs;
+- the hatch (x 63-122, y +/-17 mm) and its lid, the stiffness margin
+  3.23x with it cut;
+- fins, mount, horns, inserts, tubes and payload volumes.
+
+The export writes the build sheet, the flight card and the BOM with it.
+Balance at 143.4 mm, the middle of the stall-onset-to-margin window,
+with 3.5 g of nose weight if the pack cannot reach it. There the model
+gives 7.77 m/s.
+
+The search log for v171 is not kept: the run was killed before it wrote
+one. `design.json` is its checkpoint.
+
 ## gen10, 2026-09-24: the nose-down stall, and most of the speed back
+
+**Superseded by gen12.** With the truss kept out of its payload its
+outer panel has no chord for a rib; it is infeasible as drawn.
 
 Eight micro_fpv searches ran (`scripts/fleet/gen10.py`), all seeded from
 gen9's v144, the one design found inside the nose-down-stall region, for

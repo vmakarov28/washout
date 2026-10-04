@@ -32,7 +32,10 @@ from ..geom.planform import Planform, Segment, bwb, faired, lofted
 from ..geom import fairness as fz
 from ..geom import interior as it
 from ..printing import vase
+from ..printing import detours as det
+from ..printing import parts as pmod
 from ..printing import elevons as elv
+from ..printing import inserts as ins_
 from ..aero import performance as perf
 from ..aero import lateral
 from ..aero import dynamics as dyn
@@ -42,6 +45,7 @@ from .. import spars as sp
 from .. import linkage as lkg
 from .. import aeroelastic as ael
 from .. import structure as struct
+from .. import joints as jnt
 from collections import OrderedDict
 from ..aero.vlm import VLM
 
@@ -110,6 +114,44 @@ class Bay:
     `[eta_lo, eta_hi]` along with its chordwise seat. A zero-width band
     means "not spanwise-solved", which keeps every existing bay exactly
     where it was."""
+    open_from: str = "upper"
+    """Which skin the opening is cut in.
+
+    Every bay in the fleet opens from the UPPER skin, and that is not a
+    styling choice. In vase mode an opening is a recess: exterior space,
+    sealed from the wing's interior and from every other recess by one
+    bead. A wire cannot pass from the receiver's pocket to a servo's
+    through the wing -- there is no through. It runs in a channel cut
+    into the surface, and a channel lives on one skin, so every pocket
+    it joins has to be on that skin too. The servo therefore sits in the
+    top of the wing with its arm up through the opening, the horn stands
+    on the elevon's upper surface, and the belly stays clean for the
+    landing and the CG mark. The lower skin is still a legal choice for
+    a bay that needs no wiring."""
+    drives_elevon: bool = False
+    """Whether this bay holds the servos for the control surface.
+
+    If it does, its output shaft must lie outboard of the hinge
+    station, and that is GATED rather than imposed. On every aircraft in
+    the fleet the solver put the servos inboard of the elevon they drive
+    -- the trainer's at eta 0.30 with the elevon starting at 0.49 -- and
+    `linkage.for_station` then built a hinge and a horn at a station
+    where the trailing edge is not cut, so the four-bar that proves the
+    deflection demon1's whole speed objective is scored from was solved
+    on a surface that does not exist there. The pushrod runs chordwise
+    from the shaft to a horn on the elevon; both ends have to be at the
+    same station.
+
+    Clamping the seat instead was tried, and it is the wrong shape of
+    fix: it moved the trainer's servos a fifth of the span outboard, into
+    the thin outer panels and through the TE spar's corridor, and the CG,
+    the trim, the spar seats and the rib corridors all moved with them --
+    silently, because a solver that relocates a part reports nothing.
+    Penalties rank the infeasible; they do not rearrange the aircraft."""
+    lidded: bool = True
+    """Whether the opening gets a ledge and a printed lid. Payload does;
+    a servo pocket does not -- the servo's arm comes up through the
+    opening and the servo is taped in."""
     holds: tuple[str, ...] = ()
     """Payload item names that physically live inside this bay.
 
@@ -160,6 +202,48 @@ def bay_fits(plan: Planform, bay: Bay, wall_mm: float,
     return bool(worst >= height), float(worst), float(height)
 
 
+def _box_outside_mm(plan, v, margin: float = det.BAND_MARGIN,
+                    n: int = 5, hinge=None) -> float:
+    """How far, in mm, a volume's band pokes out of the section anywhere
+    over its OWN span. 0.0 when the box is inside everywhere.
+
+    `hinge` = (elevon_eta, hinge chord fraction, wall_mm): outboard of the
+    elevon's root the wing ENDS at the hinge line -- the panel forward of
+    the elevon is cut there and its aft wall is the cut face -- so a box
+    there must stop a wall short of it. The section used to be the whole
+    aerofoil everywhere, and gen9's servos reached 2.6 mm through the
+    hinge wall into the elevon gap with nothing to say so. The wall leans
+    in a printed layer as a rib's web does (vase._web_lean_mm): a layer
+    square to a tilted panel meets the swept wing obliquely, so the limit
+    is taken that much further forward, from the local dihedral and sweep
+    and the box's own depth."""
+    worst = 0.0
+    for e in np.linspace(v.eta0, v.eta1, n):
+        st = plan.at(float(e))
+        c_mm = st.chord_m * 1000.0
+        x0, x1 = v.band(plan, float(e))
+        aft = 1.0 - margin
+        if hinge is not None and e >= hinge[0] - 1e-9:
+            de = 1e-3
+            s0 = plan.at(float(max(e - de, 0.0)))
+            s1 = plan.at(float(min(e + de, 1.0)))
+            dy = (min(e + de, 1.0) - max(e - de, 0.0)) * plan.half_span_m
+            sweep = abs((s1.x_le_m - s0.x_le_m) / dy) if dy > 0 else 0.0
+            dihedral = abs((s1.z_le_m - s0.z_le_m) / dy) if dy > 0 else 0.0
+            lean = v.height_mm * dihedral * sweep
+            aft = min(aft, hinge[1] - (hinge[2] + lean) / c_mm)
+        worst = max(worst, (margin - x0) * c_mm, (x1 - aft) * c_mm)
+    return float(worst)
+
+def hinge_limit(p_vec, wall_mm: float):
+    """(elevon_eta, hinge chord fraction, wall) for `_box_outside_mm`, or
+    None for a wing with no elevon."""
+    ec = float(p_vec.get("elevon_chord", 0.0))
+    if ec <= 1e-6:
+        return None
+    return (float(p_vec["elevon_eta"]), 1.0 - ec, float(wall_mm))
+
+
 def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
               n_x: int = 33, n_eta: int = 13) -> tuple[list, dict, dict]:
     """Where every bay actually goes.
@@ -194,10 +278,21 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
     placed: list = []
     seats: dict = {}
     eta_seats: dict = {}
+    hinge = hinge_limit(p_vec, wall_mm)
 
     def volume(bay, x, eta=None):
+        # A top-opening bay's box rests on a FLOOR that sits one box-depth
+        # below the upper skin, so the box occupies the TOP of the section
+        # and is anchored there. Anchoring every box to the lower skin --
+        # the first version -- reserved the bottom of the section for
+        # nothing, which is exactly where the spar seat solver wanted to
+        # put the TE spar under the pack; it pushed the tube out to 0.61c
+        # instead. A pocket that opens downward really does sit against
+        # the lower skin.
         return it.bay_volume(bay.name, x, bay.box_mm, plan,
                              offset_mm=wall_mm,
+                             anchor=(it.UPPER if bay.open_from == "upper"
+                                     else it.LOWER),
                              eta_frac=bay.eta_frac if eta is None else eta)
 
     for bay in mission.bays:
@@ -226,12 +321,41 @@ def seat_bays(plan, mission, p_vec, wall_mm: float, joint_etas=(),
                 # band to choose from and should not need telling twice.
                 first, last = it.straddles(vol, joint_etas)
                 split = 0.0 if last <= first else 20.0
+                # The BOX's own span must be inside the section: a rigid
+                # box at an absolute station on a swept body is overtaken
+                # by the leading edge some way outboard, and the opening
+                # may narrow while it closes, but not while the box is in
+                # it. Millimetres of box outside the section count as
+                # interference.
+                room = _box_outside_mm(plan, vol, hinge=hinge)
+                # NOT a term for how far the servo's shaft falls short of
+                # the elevon. That was tried, in the key and as a clamp,
+                # and both are the same mistake: the seat that satisfies
+                # it is 20% of the span outboard, in thinner section and
+                # through the TE spar's corridor, and the CG, the trim,
+                # the spar seats, the rib corridors and one panel's wall
+                # clearance all move with it -- sixteen tests failed and
+                # none of them was about servos. The shortfall is a GATE,
+                # reported in millimetres. What satisfies it is the
+                # elevon's own station, which the search owns.
+                # And two openings side by side must leave a WALL between
+                # them, not a fin. The rendered root section showed the
+                # electronics bay seated 5 mm from the pack: a 5 mm wide,
+                # 30 mm tall, two-bead sliver of skin standing between two
+                # holes. Closer than a real wall counts as interference.
+                thin = 0.0
+                for other in placed:
+                    if other.eta1 < vol.eta0 or other.eta0 > vol.eta1:
+                        continue
+                    gap = it.gap_mm(vol, other, plan)
+                    if 0.0 <= gap < MIN_BAY_WALL_MM:
+                        thin += MIN_BAY_WALL_MM - gap
                 # Total millimetres of interference, then nearest the seat
                 # the mission declared. SUMMED, not ranked: a clash and a
                 # depth shortfall are both "millimetres of something that
                 # does not fit", and ranking clash above depth made the
                 # solver accept a 6 mm depth miss to dodge a 0.1 mm graze.
-                key = (clash + max(-spare, 0.0) + split,
+                key = (clash + max(-spare, 0.0) + split + thin + room,
                        abs(float(x) - bay.x_frac))
                 if best is None or key < best[0]:
                     best = (key, float(x), vol, e)
@@ -307,6 +431,18 @@ class Mission:
     servo_arm_mm: float = 11.0
     horn_below_mm: float = 8.0
     servo_travel_deg: float = 60.0
+    servo_stall_nmm: float = 176.0
+    """The servo's stall torque, in newton-millimetres. DECLARED
+    hardware, like the arm length beside it: a 9 g servo is about
+    1.8 kg.cm. It is the load case for the control horn, because a servo
+    that meets a jammed surface delivers its stall torque and something
+    has to be the thing that gives."""
+    servo_shaft_offset_mm: float = 11.35
+    """How far the servo's output shaft sits from the middle of its body
+    along the span: half of a 9 g servo's 22.7 mm. The servo is mounted
+    with the shaft OUTBOARD, so the arm, the pushrod and the horn all
+    live at the pocket's centre plus this, and the linkage is solved
+    there."""
     """The mechanism, as declared hardware.
 
     A 9 g servo's outermost arm hole is about 11 mm from the shaft, a
@@ -365,6 +501,23 @@ class Mission:
     makes, so the real GJ is higher. A large factor on a conservative
     model is two safety margins stacked, which rejects designs for
     arithmetic rather than for physics."""
+    min_hands_off_margin: float = 0.0
+    """Floor on (hands-off trim speed) / (slowest trimmed speed); 0 is off.
+
+    Sticks centred, the aircraft settles at its trim speed; the slowest it
+    can be flown is where the first section stalls or the up-elevon runs
+    out (`performance.slow_flight`). 1.3 is the classic approach-speed
+    margin over the stall. A trainer that trims closer than that is one
+    gust, or one nervous pull, from the stall."""
+    stall_onset_ahead_of_cg: bool = False
+    """The first section to stall must sit AHEAD of the centre of gravity.
+
+    A section that stops lifting behind the CG pitches the nose UP, which
+    deepens the stall and spreads it -- the swept wing's pitch-up. Ahead
+    of the CG, the nose drops and the aircraft recovers on its own. The
+    tip-stall gate cannot see this: on a swept wing the tips can be well
+    unloaded and the peak can still sit at mid-span, 30-50 mm aft of the
+    CG, which is where every micro_fpv design through gen8 put it."""
     min_spiral_t2_s: float = 0.0
     """Fastest acceptable spiral divergence, as time to double; 0 is off.
     Yaw stiffness -- fins especially -- pushes the spiral mode toward
@@ -440,16 +593,21 @@ class Mission:
                   Bay("AR630 + esc", 0.42, (40.0, 34.0, 16.0),
                       x_lo=0.12, x_hi=0.86,
                       holds=("AR630 rx", "esc + wiring")),
-                  # A 9 g servo (the 18 g declared for two), LYING FLAT:
+                  # A 9 g servo (the 18 g declared for two), ON ITS SIDE:
                   # 22.5 x 11.8 x 22.7 mm standing up will not go into an
                   # outer panel 17 mm deep, so the long axis runs chordwise
                   # and the 12 mm dimension is the one through the section.
-                  # Seated out in the wing near the surface it drives, and
-                  # both sides' mass is carried at the same x because the
-                  # aircraft is symmetric and only x enters the CG.
-                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                  # The 22.5 is the BODY; the mounting ears take the
+                  # chordwise length to 32, and a pocket cut to the body
+                  # alone is a pocket the servo does not go into without
+                  # trimming its ears off. Seated out in the wing near the
+                  # surface it drives, and both sides' mass is carried at
+                  # the same x because the aircraft is symmetric and only
+                  # x enters the CG.
+                  Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.68,
                       eta_lo=0.30, eta_hi=0.80,
+                      lidded=False, drives_elevon=True,
                       holds=("servos x2",))),
             battery_kg=0.110,
             cruise_band_ms=(7.0, 11.0),
@@ -505,9 +663,10 @@ class Mission:
                   Bay("AR630 + esc", 0.44, (42.0, 34.0, 16.0),
                       x_lo=0.14, x_hi=0.86,
                       holds=("AR630 rx", "esc + wiring")),
-                  Bay("servos", 0.55, (23.0, 23.0, 12.0),
+                  Bay("servos", 0.55, (32.0, 23.0, 12.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.25, eta_hi=0.75,
+                      lidded=False, drives_elevon=True,
                       holds=("servos x2",))),
             battery_kg=0.105,
             # This band is the HANDS-OFF trim window, not the top end:
@@ -555,14 +714,17 @@ class Mission:
                   Bay("AR630", 0.44, (30.0, 20.0, 12.0),
                       x_lo=0.14, x_hi=0.88,
                       holds=("AR630 rx", "esc + wiring")),
-                  # 5 g sub-micro, flat: 20 x 8.6 x 20 mm becomes
-                  # 20 chordwise x 20 spanwise x 9 through the section.
-                  Bay("servos", 0.55, (20.0, 20.0, 9.0),
+                  # 5 g sub-micro, on its side: 20 x 8.6 x 20 mm becomes
+                  # 20 chordwise x 20 spanwise x 9 through the section,
+                  # and its ears take the chordwise length to 24.
+                  Bay("servos", 0.55, (24.0, 20.0, 9.0),
                       x_lo=0.20, x_hi=0.70,
                       eta_lo=0.30, eta_hi=0.80,
+                      lidded=False, drives_elevon=True,
                       holds=("servos x2",))),
             # sub-micro hardware to match the sub-micro servos
-            servo_arm_mm=7.0, horn_below_mm=5.0,
+            servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
+            servo_stall_nmm=78.0,       # 5 g sub-micro, about 0.8 kg.cm
             battery_kg=0.028,
             cruise_band_ms=(8.0, 17.0),
             min_static_margin=0.10, max_static_margin=0.26,
@@ -592,11 +754,149 @@ class Mission:
         )
 
     @staticmethod
+    def micro_fpv() -> "Mission":
+        """Sub-250 g, FPV, and as forgiving as the class allows.
+
+        250 g is not a target, it is a legal ceiling -- the registration
+        threshold in most places -- so the mission treats it as a gate and
+        spends nothing to approach it. The OBJECTIVE is stall speed, and
+        minimising it pushes mass down and area up together.
+
+        ## Why the span is fixed at 480 mm
+
+        Every other mission lets the search choose a span. This one
+        cannot, because the span IS the part height: panels print
+        root-down with span along Z, so a half wing taller than the 250 mm
+        envelope has to be cut into pieces. 480 mm of span is 240 mm of
+        half span, which fits in one piece with the 8 mm margin
+        `panel_etas` keeps. Ask for a millimetre more and the aircraft
+        arrives as twice as many parts.
+
+        The elevon still forces a break at its own root -- a wing's
+        trailing edge cannot vanish mid-panel, because a surface normal
+        to the span is a roof and spiralize cannot build one -- so the
+        half wing is two parts, not one. Two per side is the floor for
+        anything with a moving surface and a pusher motor between them.
+
+        ## What it carries that the others do not
+
+        An FPV camera and video transmitter, 8 g declared, at the nose.
+        They are NOT given a bay: nothing is cut through the skin any
+        more, so a camera buried inside a closed shell would be looking at
+        the inside of it. The declared mass sits at 0.06c and the hardware
+        goes in a pod bonded to the nose, which is where a camera on a
+        wing this size goes anyway.
+
+        ## Where the gates come from
+
+        The stability numbers are the TRAINER's, not micro's. micro's are
+        deliberately the loosest in the fleet because it is flown close in
+        and is a proof that a 363 mm aeroplane can exist at all; this one
+        is meant to be pleasant, so it inherits the mission that was
+        written around what happens when a beginner lets go of the sticks.
+        Wing loading is the one number relaxed from the trainer's 26, to
+        34: a 480 mm wing cannot reach 26 g/dm2 while carrying 102 g of
+        payload, and pretending otherwise would make the mission
+        unsatisfiable by construction rather than demanding."""
+        return Mission(
+            name="micro_fpv", span_m=0.48, objective="docile",
+            payload=Mission._common(servo_g=0.010, esc_g=0.012) + (
+                # An AIO camera-and-VTX and a dipole: 6 g and 2 g, the
+                # mass of the class of part rather than one part someone
+                # weighed. Declared, and stated as declared.
+                Item("fpv cam + vtx", 0.008, 0.06),
+            ),
+            bays=(Bay("2S 450", 0.30, (55.0, 30.0, 17.0), x_var="batt_x"),
+                  Bay("AR630", 0.44, (30.0, 20.0, 12.0),
+                      x_lo=0.14, x_hi=0.88,
+                      holds=("AR630 rx", "esc + wiring")),
+                  Bay("servos", 0.55, (24.0, 20.0, 9.0),
+                      x_lo=0.20, x_hi=0.70,
+                      eta_lo=0.30, eta_hi=0.80,
+                      lidded=False, drives_elevon=True,
+                      holds=("servos x2",))),
+            servo_arm_mm=7.0, horn_below_mm=5.0, servo_shaft_offset_mm=10.0,
+            servo_stall_nmm=78.0,
+            battery_kg=0.028,
+            # Slow, and the band is wide because the objective is already
+            # pushing on the bottom of it.
+            cruise_band_ms=(6.0, 14.0),
+            # Pitch stiffness, set for THIS aircraft rather than copied.
+            #
+            # The first draft took the trainer's [0.15, 0.32] on the
+            # reasoning that more margin is more docile. That is not true
+            # past a point: a tailless wing at 20% and up is nose-heavy,
+            # needs more up-reflex to trim, and spends elevon authority
+            # holding it there. The handling sweet spot for the type is
+            # 8-15%.
+            #
+            # The floor also has to be reachable at this span. The 900 mm
+            # trainer makes +0.209 comfortably and the 352 mm micro only
+            # +0.035, because the fixed 102 g of payload dictates the CG
+            # at small scale; four 480 mm searches wandered between -0.061
+            # and +0.140 against a 0.15 floor. The seeded design makes
+            # +0.267, so the band was not unreachable -- it was simply the
+            # wrong band, aimed at an aeroplane twice the size.
+            min_static_margin=0.12, max_static_margin=0.28,
+            cl_max_section=0.85, max_mass_kg=0.25,
+            max_wing_loading_gdm2=34.0, tip_stall_margin=0.12,
+            n_limit_g=3.0, max_trim_alpha_deg=8.0,
+            min_cn_beta=0.025, max_roll_yaw_ratio=8.5,
+            min_aeroelastic_margin=1.5,
+            min_dutch_roll_zeta=0.08, min_spiral_t2_s=20.0,
+            # For a first-time pilot, and measured on the aircraft as
+            # flown (performance.slow_flight): hands-off at least 1.3x
+            # the slowest trimmed speed, and a stall that drops the nose.
+            min_hands_off_margin=1.3, stall_onset_ahead_of_cg=True,
+            fairness=fz.Limits(max_root_t_over_c=0.26,
+                               max_tip_rise_frac=0.28),
+            # 6 mm, not micro's 8. The bore gate rejected two of the
+            # four first searches on the outboard panel, which on a 480 mm
+            # wing is a few millimetres of section -- and an 8 mm tube is
+            # sized for a 900 mm trainer pulling 3 g at 500 g. The
+            # buckling and aeroelastic gates size what is actually needed;
+            # this is only the floor they start from.
+            spar_d_mm=6.0, motor=prop.M2205, battery=prop.PACKS["2S 450"],
+            spars=(sp.SparSpec("main spar", 6.0, 0.18, 0.40),),
+            powertrain=prop.micro_power(),
+            min_spar_reach_frac=0.45,
+            # Relaxed from micro's 0.75. That number is for an aeroplane
+            # that has to climb away from a hand launch briskly; this one
+            # is slow by construction, and 0.6 static is enough to
+            # accelerate a 7 m/s wing off a throw. It is still a gate.
+            min_thrust_weight=0.60,
+            min_elevon_power=0.004, max_elevon_power=0.026,
+        )
+
+    @staticmethod
+    def micro_fpv_winglet() -> "Mission":
+        """micro_fpv with its wing kept nearly flat, so that yaw stiffness
+        has to come from REAL winglets -- the tip fins.
+
+        micro_fpv's gen7 winner curled the outer 27% of its semi-span up
+        through 54 degrees of cant (its cap is 28%) and carried no fins,
+        which looks extreme and raised the obvious question: is the curl a
+        winglet, or just what the search found cheapest? It was an uneven
+        contest at the time: the curl was in the vortex lattice and the
+        fins were not, so a fin earned nothing for tip losses. With the
+        fins in the lattice, this mission asks the same question the other
+        way round -- same gates, same objective, same aircraft -- with the
+        tip rise capped at 12% of the semi-span. Whichever finds the
+        better feasible design answers it on the numbers.
+
+        A variant, not a fifth aircraft: see MISSION_VARIANTS. The cap is
+        part of the design -> planform map (`build` clamps the rise to it),
+        so a design found here is only this aircraft under this mission."""
+        m = Mission.micro_fpv()
+        return replace(m, name="micro_fpv_winglet",
+                       fairness=replace(m.fairness, max_tip_rise_frac=0.12))
+
+    @staticmethod
     def beginner_trainer() -> "Mission":
         return Mission.trainer_v3()
 
 
-MISSIONS = ("trainer_v3", "demon1", "micro")
+MISSIONS = ("trainer_v3", "demon1", "micro", "micro_fpv")
 """Every mission the CLI may be asked for, declared beside the factories.
 
 run.py's argparse used to carry its own hardcoded list, and the list had
@@ -611,6 +911,14 @@ of mistake as a design vector that can express an invalid planform: the
 fix is to make it unrepresentable rather than to correct the one instance.
 `beginner_trainer` is deliberately absent -- it is an alias for
 trainer_v3, not a fourth aircraft."""
+
+MISSION_VARIANTS = {"micro_fpv_winglet": "micro_fpv"}
+"""Search-space variants of a fleet mission: variant -> parent.
+
+Same aircraft, same gates, same objective; a narrower design space. The
+CLI offers them beside MISSIONS, but the fleet -- the tuple the tests walk
+and results/fleet/index.json answers for -- is MISSIONS alone, so a
+variant never has to have a tracked winner to exist."""
 
 # --------------------------------------------------------- the design vector
 
@@ -730,6 +1038,61 @@ SECTION_BOUNDS = (
     Bound("fin_below", 0.0, 0.4, ""),
 )
 BATTERY_NAME = "battery"
+HATCH_MARGIN_MM = 2.0
+"""Clearance round the pack on each side of the hand-cut battery hatch:
+the hatch is the pack's footprint plus this, so the pack goes in without
+being forced past the cut edge."""
+
+
+def hatch_eta(mission, plan) -> float:
+    """Half-span fraction the battery hatch reaches from the centreline, or
+    0 with no hatch. The hatch is over the battery -- the bay the optimizer
+    places (`x_var`), which is the one reopened every flight -- and the
+    battery sits on the centreline, so the cut straddles the centre joint."""
+    for bay in mission.bays:
+        if bay.x_var == "batt_x" and bay.lidded and bay.eta_frac is None:
+            half = 0.5 * bay.box_mm[1] + HATCH_MARGIN_MM
+            return float(half / (plan.half_span_m * 1000.0))
+    return 0.0
+
+
+PROP_CLEARANCE_MM = 10.0
+"""Clearance the propeller disc keeps from the trailing edge.
+
+A DECLARED process limit, in the same category as `max_overhang_deg`: a
+motor mount bonded to foamed PLA flexes under thrust and gyroscopic
+load, the prop itself is not perfectly true, and a strike at 30 000 rpm
+destroys both. Not validated against a measurement."""
+
+RAMP_MARGIN = 0.85
+"""Fraction of the measured overhang budget a bay's ramp may use.
+
+MEASURED, in the style `build_stack` measures the rib truss's factor. The
+budget is taken on the bare skin, but a cut's corners sit off that skin
+and, rotated by twist and judged against the nearest previous-layer
+vertex, move up to 7% faster between layers than the skin at the same
+station -- on the trainer's servo pocket 1.048 mm/mm was allowed and
+0.977 was available, 51.3 degrees against a 50 degree limit, on both
+sides of the p0/p1 joint. 0.85 keeps every measured case under the limit
+with margin; a larger factor is a longer ramp, which is the right way to
+be wrong."""
+MIN_BAY_WALL_STRUCTURAL_MM = 10.0
+"""Narrowest wall two openings may leave between them, for its own sake.
+
+A declared print-process minimum, in the same category as the overhang
+limit: a two-bead skin 5 mm wide and 30 mm tall between two holes is a
+fin, and one that is 10 mm wide is a wall. Not derived -- there is no
+buckling model for a free-standing sliver here -- and stated as such."""
+
+MIN_BAY_WALL_MM = MIN_BAY_WALL_STRUCTURAL_MM
+"""...and nothing has to CROSS it any more.
+
+This was the larger of two reasons: the structural 10 mm, and 11 mm for
+the pack's XT30 to cross the wall between the root bays in a channel.
+The channels are gone -- a wire cannot be routed on a surface that is
+one continuous bead -- so only the structural reason is left. The alias
+is kept rather than folded away because the gate reads better naming
+the wall than naming the sliver."""
 
 BOUNDS = PLANFORM_BOUNDS + SECTION_BOUNDS
 N_DIM = len(BOUNDS)
@@ -867,10 +1230,36 @@ LATTICE_NC = 8
 
 _VLM_CACHE: "OrderedDict[tuple, VLM]" = OrderedDict()
 _VLM_CACHE_SIZE = 2
+_BUILD_CACHE: "OrderedDict[tuple, Planform]" = OrderedDict()
+
+
+def _cached_build(u, mission: Mission, base: Airfoil) -> Planform:
+    """The planform for this design, built at most once per evaluation.
+
+    `evaluate` scores the bare shell and then the ribbed one, and each pass
+    rebuilt an identical Planform from the same vector -- which threw away
+    the station memo `Planform.at` keeps, so every station the second pass
+    asked for was lofted twice. Keyed on everything `build` reads,
+    including the mission's NAME, which becomes the planform's and so every
+    part's; a hit is the same geometry by construction. A Planform is
+    frozen, so sharing one is safe."""
+    key = (np.asarray(u, dtype=float).tobytes(), mission.span_m,
+           mission.span_free, mission.fairness, mission.name,
+           base.au.tobytes(), base.al.tobytes(), float(base.te_gap),
+           float(base.te_camber))
+    plan = _BUILD_CACHE.get(key)
+    if plan is None:
+        plan = build(u, mission, base)
+        _BUILD_CACHE[key] = plan
+        while len(_BUILD_CACHE) > _VLM_CACHE_SIZE:
+            _BUILD_CACHE.popitem(last=False)
+    else:
+        _BUILD_CACHE.move_to_end(key)
+    return plan
 
 
 def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
-                ns: int, nc: int) -> VLM:
+                ns: int, nc: int, fins=None) -> VLM:
     """The lattice for this design, built at most once.
 
     Scoring the aircraft as built takes a bare-shell pass, a structure
@@ -887,10 +1276,14 @@ def _cached_vlm(u, mission: Mission, base: Airfoil, plan: Planform,
     key = (np.asarray(u, dtype=float).tobytes(), mission.span_m,
            mission.span_free, mission.fairness, base.au.tobytes(),
            base.al.tobytes(), float(base.te_gap), float(base.te_camber),
-           int(ns), int(nc))
+           int(ns), int(nc), fins)
     vlm = _VLM_CACHE.get(key)
     if vlm is None:
-        vlm = VLM(plan, ns=ns, nc=nc)
+        # The fins are panels of the lattice: their end-plate effect on
+        # the tip loading and the wake is part of the solve, where it used
+        # to be left unclaimed -- which scored a real winglet at zero
+        # induced-drag benefit and a curled wing tip at its full one.
+        vlm = VLM(plan, ns=ns, nc=nc, fins=fins)
         _VLM_CACHE[key] = vlm
         while len(_VLM_CACHE) > _VLM_CACHE_SIZE:
             _VLM_CACHE.popitem(last=False)
@@ -916,15 +1309,43 @@ class Evaluation:
     trim: perf.TrimState | None = None
     mass: perf.MassBudget | None = None
     panels: list = field(default_factory=list)
+    elevons: list = field(default_factory=list)
+    horn_eta: float = 0.0
+    """Span station of the control horn: the servo's shaft, or the
+    elevon's root when the shaft falls short of it."""
+    """The control surfaces as they were SCORED, sockets cut. They used
+    to be built once here for the mass and the gates and again in
+    `do_export` for the STLs, which is two places building one part --
+    the failure this project keeps finding. The export uses these."""
     spar_fits: list = field(default_factory=list)
     lateral: object | None = None
     fairness: object | None = None
     fairness_limits: object | None = None
     fins: object | None = None
+    slow: object | None = None
+    """performance.SlowFlight: the slowest trimmed flight, and what limits it."""
+    bays: tuple = ()
+    """The payload volumes as SEATED (geom.interior.Volume): where the pack
+    and the electronics actually are, which the hatch template is cut from."""
+    powertrain: object | None = None
+    """The powertrain this design was SCORED with -- the mission's motor
+    and pack, with the design's own propeller. The mission's powertrain
+    is a default the design vector overrides, and the export built the
+    motor mount from that default: gen9's build sheet checked a 5.04 in
+    disc the search never chose, and failed prop clearance by 0.17 mm."""
+    inserts: list = field(default_factory=list)
+    """The joint wedge inserts (printing/inserts.py): the loft a turning
+    joint leaves between two panel faces, as its own printed part.
+    Charged in the mass budget, gated for print, exported."""
     dynamics: object | None = None
     structure: object | None = None
     linkage: object | None = None
     aeroelastic: object | None = None
+    joints: tuple = ()
+    """Every bonded joint the print has, with the shear and torque it
+    carries. Panels used to butt together on the spar and nothing else:
+    the tube was sized for bending and the glue carried whatever was
+    left, unexamined."""
     print_settings: object | None = None
     max_elevon_deflect_deg: float = 12.0
     """The mission's deflection limit, carried out so the exporter sizes
@@ -987,7 +1408,7 @@ def _evaluate_once(
                 f"{prop.MAX_TIP_SPEED_MS:.0f}")
             penalty += 15.0
     try:
-        plan = build(u, mission, base)
+        plan = _cached_build(u, mission, base)
     except Exception as e:
         return Evaluation(False, -1e6, reasons=(f"geometry: {e}",))
 
@@ -1036,76 +1457,73 @@ def _evaluate_once(
     # through every pack in the fleet.
     bay_vols, bay_seats, bay_etas = seat_bays(
         plan, mission, p_vec, wall, joint_etas)
+    # A box that pokes out of the section -- or through the hinge wall --
+    # is priced here. The seat solver only PREFERS seats that fit; a bay
+    # with no fitting seat in its band is returned anyway, and nothing
+    # reported it.
+    for v in bay_vols:
+        out_mm = _box_outside_mm(plan, v, hinge=hinge_limit(p_vec, wall))
+        if out_mm > 0.0:
+            reasons.append(f"the {v.name} box pokes {out_mm:.1f} mm out of the "
+                           f"section (or through the hinge wall)")
+            penalty += 4.0 * out_mm
+    # ...and the truss keeps out of them (vase.PrintSettings.payload_boxes)
+    root_mm = plan.stations[0].chord_m * 1000.0
+    settings = replace(settings, payload_boxes=tuple(
+        (v.x0 * root_mm, v.x1 * root_mm, v.eta0, v.eta1) for v in bay_vols))
 
-    # What the spars must avoid is the CUT, not the box. The cut runs from
-    # the upper skin down to the bay's floor, so it is anchored upper and
-    # is deeper than the box by the floor's own thickness -- and a tube
-    # seated in the region the cut removes is a tube in mid-air. On the
-    # trainer this is what moves the TE spar off the upper skin, where the
-    # seat solver had put it to clear the pack.
-    # The reserved height must be the depth the GEOMETRY actually cuts:
-    # `bays.floor_limits` drops a groove below the upper skin first and
-    # then the box's depth below that, so the opening reaches
-    # box + floor + groove under the surface. Reserving only box + floor
-    # left the trainer's LE spar nominally clear of the electronics bay
-    # while the printed floor sat on top of it, and the bore gate --
-    # which measures the contour rather than the reservation -- was the
-    # one that noticed. Two places disagreeing about the same opening.
-    cut_vols = tuple(
-        it.Volume(f"{v.name} opening", v.x0, v.x1, v.eta0, v.eta1,
-                  height_mm=v.height_mm + 2.0 * wall, anchor=it.UPPER,
-                  offset_mm=0.0)
-        for v in bay_vols)
-
+    # The spars must avoid the payload boxes: a tube seated where the
+    # pack sits is a tube through the pack. Nothing else reserves space
+    # any more -- the openings that used to reach deeper than their own
+    # boxes are gone, so the box IS the reservation.
     spar_fits = []
     if mission.spars:
         spar_fits = sp.fit_all(plan, mission.spars, wall, joint_etas,
-                               reserved=tuple(bay_vols) + cut_vols,
+                               reserved=tuple(bay_vols),
                                min_reach=mission.min_spar_reach_frac)
-        avoid = sp.exclusion_bands(spar_fits, wall)
-        settings = replace(
-            settings, spar_avoid=avoid,
-            spar_corridors=tuple((f.x_frac, f.reach_eta) for f in spar_fits))
+        # The tubes as the straight lines they are. The panels keep their
+        # truss out of the chord band each line sweeps through inside
+        # them, and the bore is gated at the line's own centre in every
+        # layer it reaches -- not at a fixed chord fraction, which is the
+        # tube that bent with the wing (ROADMAP-CAD.md section 0.1).
+        def line(f):
+            d = max(f.spec.d_mm, settings.spar_d_mm)
+            return (f.root_xz_mm[0], f.root_xz_mm[1], f.slope[0], f.slope[1],
+                    f.reach_y_mm, 0.5 * d + 0.5 * wall + f.spec.clearance_mm, d)
+        settings = replace(settings, spar_avoid=(), spar_corridors=(),
+                           spar_lines=tuple(line(f) for f in spar_fits))
 
     # --- printable? the shell mass comes out of this, so it runs early ---
-    # The bays are CUT now, not merely reserved: the battery goes in
-    # through an opening the program made, not one someone made with a
-    # knife. Only bays that fit and clear everything are cut -- an
-    # infeasible bay is already reported by the gates below, and cutting
-    # one would produce geometry that self-intersects.
-    # The ramp length is measured on BARE panels -- the only non-circular
-    # place to measure it. A budget taken on a panel that already has the
-    # cut counts the ramp's own dive and climb walls as the wing's motion,
-    # comes back zero, and reports that a 24 mm bay needs an infinite span
-    # to close. Which is what the first version of this did.
-    bare = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
-    bare_by_eta = tuple(zip(joint_etas, bare))
-    bay_ramp: dict = {}
-    for bay in mission.bays:
-        v = next(x for x in bay_vols if x.name == bay.name)
-        pan = next((pn for (a, b), pn in bare_by_eta
-                    if a <= v.eta1 <= b + 1e-9), None)
-        depth = bay.box_mm[2] + wall
-        bay_ramp[bay.name] = (
-            vase.ramp_span_mm(pan, depth, v.x0, v.x1) if pan is not None
-            else float("inf"))
+    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm)
+    # --- the mechanism ---
+    #
+    # The horn goes where the pushrod can reach it: at the servo's output
+    # shaft, or at the elevon's own root when the shaft falls short of
+    # it. The shortfall is gated below rather than papered over.
+    #
+    # It used to be socketed into the elevon, in a pocket cut by the same
+    # machinery as a bay. That pocket landed in the thin tail -- micro
+    # had no section to take it at all -- and it is gone with the rest of
+    # the cutting.
+    link = None
+    horn_at = None
+    if elv.has_elevon(settings) and "servos" in bay_seats:
+        servo_bay = next(b for b in mission.bays if b.name == "servos")
+        half_mm = plan.half_span_m * 1000.0
+        e_servo = bay_etas.get("servos") or 0.5 * (p_vec["elevon_eta"] + 1.0)
+        e_shaft = e_servo + mission.servo_shaft_offset_mm / max(half_mm, 1e-9)
+        e_horn = max(e_shaft, float(settings.elevon_eta))
+        link = lkg.for_station(
+            plan, e_horn, elv.hinge_x(settings), bay_seats["servos"],
+            mission.servo_arm_mm, mission.horn_below_mm,
+            mission.servo_travel_deg, wall,
+            side=+1.0 if servo_bay.open_from == "upper" else -1.0,
+            hinge_gap_mm=settings.hinge_gap_mm,
+            deflect_deg=mission.max_elevon_deflect_deg)
+        rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
+        applied = rod_n * link.horn_arm_mm
+        horn_at = (e_horn, e_shaft, applied)
 
-    # Only bays that FIT and are CLEAR of each other are cut. Two bays
-    # that overlap in chord would put two floors within a fraction of a
-    # millimetre of each other -- on micro the two openings overlap by
-    # 0.004c and the contour came back with 0.14 mm of clearance against a
-    # 0.45 mm limit. The clash gate already reports the overlap; the
-    # geometry must not also become invalid because of it.
-    clashing = {n for a, b, _ in it.clashes(bay_vols, plan, wall)
-                for n in (a, b)}
-    cut_list = tuple(
-        (bay.name, v.x0, v.x1, v.eta1, bay.box_mm[2] + wall,
-         bay_ramp[bay.name])
-        for bay, v in ((b, next(x for x in bay_vols if x.name == b.name))
-                       for b in mission.bays)
-        if v.fits(plan, wall)[0] and bay.name not in clashing)
-    panels = vase.build_panels(plan, settings, z_step_mm=z_step_mm,
-                               bays=cut_list)
     elevon_parts = elv.build_elevons(
         plan, settings, joint_etas,
         mission.max_elevon_deflect_deg + settings.hinge_margin_deg,
@@ -1117,17 +1535,61 @@ def _evaluate_once(
     shell_kg = sum(p.mass_g() for p in panels + elevon_parts) * 2.0 / 1000.0
     print_fail = [f"{p.name}: {','.join(c.failures())}"
                   for p, c in zip(panels + elevon_parts, checks) if not c.ok]
+    # --- the wedges the turning joints leave, as parts ---
+    #
+    # A joint whose dihedral turns leaves a wedge of the loft that neither
+    # panel contains -- 6 mm open at micro_fpv's lower skin. It used to be
+    # "fill with glue" on the build sheet and missing from CAD, and it was
+    # never weighed. It is a printed part now, and a bigger turn is a
+    # heavier part, which is the pressure on the search that belongs here.
+    try:
+        inserts = ins_.joint_inserts(plan, settings, panels)
+    except (ValueError, IndexError, np.linalg.LinAlgError) as e:
+        # a geometry the insert builder cannot parse is a rejection with
+        # a reason, never a crash in a search worker
+        inserts = []
+        reasons.append(f"joint insert: {e}")
+        penalty += 5.0
+    for ins in inserts:
+        chk = vase.check_insert(ins, settings)
+        if not chk.ok:
+            print_fail.append(f"{ins.name}: {','.join(chk.failures())}")
     if mission.require_printable and print_fail:
         reasons.extend(print_fail)
+
+    # --- is the truss the buckling gate sized actually there? ---
+    #
+    # `structure.max_rib_pitch_mm` sizes the rib pitch from plate
+    # buckling of the compression skin, and `ribs_that_fit` will return
+    # ZERO for a panel whose chord is mostly openings -- correctly, since
+    # webs squeezed into what is left print at 83 degrees. Nothing then
+    # noticed that the pitch the structure had asked for was not
+    # delivered: the trainer's centre body carried no truss at all while
+    # the report went on quoting 26 mm, and the only symptom was 12 g of
+    # mass that quietly went away.
+    if settings.ribs:
+        bare_of_ribs = [p_.name for p_ in panels if not p_.has_ribs]
+        if bare_of_ribs:
+            reasons.append(
+                f"{', '.join(bare_of_ribs)} carr"
+                f"{'ies' if len(bare_of_ribs) == 1 else 'y'} no rib truss: "
+                f"the openings leave no chord for one, and the skin needs "
+                f"support every {settings.rib_pitch_mm:.0f} mm")
+            penalty += 6.0 * len(bare_of_ribs)
 
     root_c = plan.stations[0].chord_m
     # An item inside a bay sits where the bay sits. The trainer's
     # "AR630 + esc" bay was declared at 0.42c while the two masses it
     # contains were declared at 0.34c and 0.50c -- three stations for two
     # objects in one box, and the CG was computed from the wrong two.
+    # ... and it sits at the bay's ABSOLUTE station. A servo's seat is a
+    # fraction of the chord at its own eta, which is what the linkage
+    # wants; read as a root-chord fraction it put 18 g of servos 30 mm
+    # aft of where they are on the trainer.
     in_bay = {n: bay.name for bay in mission.bays for n in bay.holds}
+    bay_x_abs = {v.name: v.x_abs_mm / (root_c * 1000.0) for v in bay_vols}
     items = tuple(
-        replace(i, x_frac=bay_seats[in_bay[i.name]]).at(root_c)
+        replace(i, x_frac=bay_x_abs[in_bay[i.name]]).at(root_c)
         if i.name in in_bay else i.at(root_c)
         for i in mission.payload)
     items += (perf.PointMass(BATTERY_NAME, mission.battery_kg,
@@ -1135,7 +1597,8 @@ def _evaluate_once(
     # The tubes that were actually fitted, at the stations the fit solved
     # for. Not a flat allowance: see structure.spar_masses.
     for s_name, s_kg, s_x in struct.spar_masses(
-            spar_fits, spar_od_mm if spar_od_mm is not None else mission.spar_d_mm):
+            spar_fits, spar_od_mm if spar_od_mm is not None else mission.spar_d_mm,
+            root_chord_mm=root_c * 1000.0):
         items += (perf.PointMass(f"spar {s_name}", s_kg, s_x * root_c),)
     if fins is not None:
         # at the tips and aft: they move the CG back and add roll inertia,
@@ -1144,6 +1607,12 @@ def _evaluate_once(
         items += (perf.PointMass("tip fins",
                                  fins.mass_kg(settings.filament_density_gcc * 1000.0),
                                  xf, zf),)
+    for ins in inserts:
+        # one each side, at the joint
+        c = ins.centroid_flight_mm() / 1000.0
+        items += (perf.PointMass(f"joint {'fill' if ins.glue_fill else 'insert'} {ins.joint}",
+                                 2.0 * ins.mass_g(settings.filament_density_gcc) / 1000.0,
+                                 float(c[0]), float(c[2]), y_m=float(c[1])),)
     mass = perf.MassBudget(shell_kg=shell_kg,
                            shell_x_m=perf.shell_centroid_x(plan),
                            items=items)
@@ -1175,26 +1644,6 @@ def _evaluate_once(
                            f"(reaches eta {vol.eta1:.3f})")
             penalty += 25.0
 
-        # Can the bay's outboard end actually be CLOSED? A wall normal to
-        # the span is a roof in this print orientation, so the bay has to
-        # fade out, and the fade is an overhang. One ramp, not two: the
-        # root face is open anyway -- the spar has to get in and the two
-        # halves join there -- so a bay starting at the centreline pays
-        # for a single closure at its outboard end.
-        if 0 <= first < len(panels):
-            need = bay_ramp.get(bay.name, float("inf"))
-            # What is LEFT of the panel outboard of the bay, as arc length
-            # along the span -- the same quantity print height is measured
-            # in, because dihedral makes a panel taller than its projected
-            # span and the ramp is built in printed layers.
-            have = vase.arc_length_mm(plan, min(vol.eta1, joint_etas[first][1]),
-                                      joint_etas[first][1])
-            if need > have:
-                reasons.append(
-                    f"{bay.name} cannot be closed: needs {need:.0f} mm of "
-                    f"span to ramp {bay.box_mm[2]:.0f} mm deep, has "
-                    f"{have:.0f} mm left in p{first}")
-                penalty += 15.0 * min((need - have) / max(need, 1e-6), 1.0)
 
     for a_name, b_name, mm in it.clashes(
             bay_vols + [it.spar_volume(f, wall, plan) for f in spar_fits],
@@ -1204,8 +1653,110 @@ def _evaluate_once(
         # a 12 mm tube through the pack, or the optimizer sees a cliff
         penalty += 8.0 * mm
 
+    # The gates that are GEOMETRY, asked before trim is attempted. None of
+    # them depends on the flight condition, and a design that fails to trim
+    # returns early -- so asked after trim they went unreported on exactly
+    # the designs whose report matters most: micro's servo shaft sat 81 mm
+    # inboard of its elevon and nothing said so once it stopped trimming.
+    # --- spar gates ---
+    #
+    # A spar aft of the hinge line is a spar inside the control surface:
+    # the elevon is a separate printed part now, so a tube there has
+    # nothing to run through and the surface cannot move. Newly askable --
+    # before the hinge line reached the geometry there was no line to be
+    # aft of.
+    #
+    # Asked along the tube, at every station it occupies outboard of the
+    # hinge station: a straight tube's chord fraction drifts as the wing
+    # sweeps and tapers under it, so being forward of the hinge at the
+    # root says nothing about the tip.
+    x_hinge = elv.hinge_x(settings) if elv.has_elevon(settings) else 1.0
+    for f in spar_fits:
+        if f.reach_eta <= settings.elevon_eta:
+            continue
+        over, at = -np.inf, 0.0
+        for e in np.linspace(settings.elevon_eta, f.reach_eta, 9):
+            c_mm = plan.at(float(e)).chord_m * 1000.0
+            hx = 0.5 * f.spec.d_mm * np.sqrt(1.0 + f.slope[0] ** 2)
+            o = (f.x_frac_at(plan, float(e)) - x_hinge) * c_mm + hx
+            if o > over:
+                over, at = o, float(e)
+        if over > 0.0:
+            reasons.append(f"{f.spec.name} is {over:.1f} mm aft of the hinge "
+                           f"line ({x_hinge:.2f}c) at eta {at:.2f}")
+            penalty += 10.0 * over
+
+    for f in spar_fits:
+        if f.joints_blocked:
+            reasons.append(f"{f.spec.name}: a straight tube cannot reach the "
+                           f"joint{'s' if len(f.joints_blocked) > 1 else ''} at eta "
+                           + ",".join(f"{e:.2f}" for e in f.joints_blocked)
+                           + f" (reaches {f.reach_eta:.2f})")
+            penalty += 30.0 * len(f.joints_blocked)
+        if f.reach_eta < mission.min_spar_reach_frac:
+            reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
+                           f"(need {mission.min_spar_reach_frac:.2f})")
+            penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
+
+    # --- can the propeller swing without striking the wing? ---
+    #
+    # A pusher at the trailing edge of a SWEPT wing loses its clearance
+    # outboard: the trailing edge runs aft as the disc runs out, so it is
+    # the blade tips that are in danger and not the root. The motor was a
+    # point mass at 0.97c and nothing else until the mount was generated,
+    # and two of the three aircraft turned out to swing their declared
+    # five-inch prop within a couple of millimetres of their own trailing
+    # edge -- micro 2.0 mm, demon1 0.3 mm, against the 10 mm a mount
+    # bonded to foam should keep.
+    if mission.powertrain is not None:
+        clear = pmod.prop_clearance_mm(plan, p_vec["prop_diam_in"])
+        if clear < PROP_CLEARANCE_MM:
+            reasons.append(
+                f"prop disc clears the trailing edge by {clear:.1f} mm, "
+                f"needs {PROP_CLEARANCE_MM:.0f}")
+            penalty += 2.0 * (PROP_CLEARANCE_MM - clear)
+
+    # --- and can the MECHANISM deliver it? ---
+    #
+    # dcm_ddeg, below, says how much moment a degree of elevon buys, and
+    # the speed objective spends `max_elevon_deflect_deg` of it. Nothing
+    # until now asked whether the servo, its arm, the pushrod and the horn
+    # can reach that angle: demon1's headline speed was computed from a
+    # deflection the aircraft had never been shown able to make.
+    #
+    # Solved as a four-bar rather than by the ratio r_servo / r_horn,
+    # which is the small-angle limit of a parallel linkage and is wrong in
+    # the two ways that matter -- it is linear, so it cannot show a
+    # mechanism running out of travel, and it is symmetric, so it cannot
+    # show the differential a real linkage has.
+    # `link` was solved above, with the mechanism.
+    if link is not None and horn_at is not None:
+        _, e_shaft, applied = horn_at
+        e_horn = max(e_shaft, float(settings.elevon_eta))
+        servo_bay = next(b for b in mission.bays if b.name == "servos")
+        half_mm = plan.half_span_m * 1000.0
+        if servo_bay.drives_elevon and e_shaft < settings.elevon_eta - 1e-9:
+            short = (settings.elevon_eta - e_shaft) * half_mm
+            reasons.append(
+                f"servo shaft at eta {e_shaft:.2f} is {short:.0f} mm inboard "
+                f"of the elevon it drives (starts at eta "
+                f"{settings.elevon_eta:.2f})")
+            penalty += 0.25 * short
+        # A lock inside the servo's travel is geometry, not a fault, so
+        # long as it comes well AFTER the deflection the score spends: a
+        # 17 mm horn on an 11 mm arm always locks before 54 degrees of
+        # servo, and the transmitter's endpoints are what stop the servo
+        # short of it. A lock BEFORE the wanted deflection is the fault.
+        want = mission.max_elevon_deflect_deg
+        ok_link, why = lkg.delivers(link, want)
+        if not ok_link:
+            thr_down, thr_up, _ = lkg.sweep(link)
+            got = min(thr_down, -thr_up)
+            reasons.append(why)
+            penalty += 8.0 * max(want - got, 1.0)
+
     # --- trim fixes CL; CL fixes cruise speed ---
-    vlm = _cached_vlm(u, mission, base, plan, ns, nc)
+    vlm = _cached_vlm(u, mission, base, plan, ns, nc, fins)
     x_np = perf.neutral_point(vlm, plan)
     sm = (x_np - mass.x_cg_m) / plan.mac_m
     # The bracket is a SOLVER detail, not a design constraint. A slow
@@ -1215,15 +1766,37 @@ def _evaluate_once(
     # high trim angle unacceptable is proximity to the stall, and that is
     # already gated properly by cl_max_section below.
     alpha = vlm.trim_alpha(mass.x_cg_m, bounds=(-10.0, 18.0))
+
+    def untrimmed(score: float) -> Evaluation:
+        # Rejected at trim, but everything BEFORE trim was computed and is
+        # true: the parts, the settings they were cut with, the tubes, the
+        # mechanism, the mass. They used to be dropped, so exporting a
+        # design that does not trim -- which is how you find out WHY --
+        # crashed on settings that were never handed back, and every
+        # check of the parts silently skipped it.
+        return Evaluation(
+            False, score, reasons=tuple(reasons), plan=plan, mass=mass,
+            static_margin=sm, mass_kg=mass.total_kg,
+            panels=panels if want_panels else [],
+            elevons=elevon_parts if want_panels else [],
+            horn_eta=float(horn_at[0]) if horn_at else 0.0,
+            spar_fits=spar_fits, fairness=fair,
+            fairness_limits=mission.fairness, fins=fins, inserts=inserts,
+            max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
+            linkage=link,
+            sm_band=(mission.min_static_margin, mission.max_static_margin),
+            cruise_band=tuple(mission.cruise_band_ms),
+            max_loading_gdm2=mission.max_wing_loading_gdm2,
+            print_settings=settings)
+
     if alpha is None:
         reasons.append("no trim angle in [-10, 18] deg")
-        return Evaluation(False, -1e5 - 10 * len(reasons), reasons=tuple(reasons),
-                          plan=plan, mass=mass, static_margin=sm)
+        return untrimmed(-1e5 - 10 * len(reasons))
     pt = vlm.solve(alpha, mass.x_cg_m)
 
     if pt.CL <= 0.02:
         reasons.append(f"trims at CL {pt.CL:.3f}: cannot support itself")
-        return Evaluation(False, -1e5, reasons=tuple(reasons), plan=plan, mass=mass)
+        return untrimmed(-1e5)
 
     v = float(np.sqrt(2 * mass.total_kg * perf.G
                       / (perf.RHO_AIR * plan.area_m2 * pt.CL)))
@@ -1241,7 +1814,12 @@ def _evaluate_once(
     # happened. A design 0.5 m/s outside the cruise band must rank above
     # one 8 m/s outside it, or the optimizer sees a flat cliff instead of
     # a slope and never finds its way back into the feasible set.
-    penalty = 0.0
+    #
+    # `penalty` is NOT reset here. It was, for the whole life of the
+    # interior gates: every millimetre of clash, depth shortfall, joint
+    # straddle and closure failure priced above this line was thrown
+    # away before the score, so a 1 mm graze and a 12 mm tube through the
+    # pack scored the same -- exactly the cliff this comment warns about.
 
     def band(value: float, lo: float, hi: float, scale: float) -> float:
         return max(lo - value, 0.0, value - hi) / scale
@@ -1305,32 +1883,25 @@ def _evaluate_once(
                        f"{mission.min_cl_trim:.2f}")
         penalty += 60.0 * (mission.min_cl_trim - pt.CL)
 
-    # --- spar gates ---
+    # --- and do the BONDED joints carry what the spar does not? ---
     #
-    # A spar aft of the hinge line is a spar inside the control surface:
-    # the elevon is a separate printed part now, so a tube there has
-    # nothing to run through and the surface cannot move. Newly askable --
-    # before the hinge line reached the geometry there was no line to be
-    # aft of.
-    x_hinge = elv.hinge_x(settings) if elv.has_elevon(settings) else 1.0
-    root_c_mm = plan.stations[0].chord_m * 1000.0
-    for f in spar_fits:
-        aft = f.x_frac + 0.5 * f.spec.d_mm / max(root_c_mm, 1e-9)
-        if f.reach_eta > settings.elevon_eta and aft > x_hinge:
-            over = (aft - x_hinge) * root_c_mm
-            reasons.append(f"{f.spec.name} at {f.x_frac:.2f}c is {over:.1f} mm "
-                           f"aft of the hinge line ({x_hinge:.2f}c)")
-            penalty += 10.0 * over
-
-    for f in spar_fits:
-        if f.joints_blocked:
-            reasons.append(f"{f.spec.name}: joints too shallow at "
-                           + ",".join(f"{e:.2f}" for e in f.joints_blocked))
-            penalty += 30.0 * len(f.joints_blocked)
-        if f.reach_eta < mission.min_spar_reach_frac:
-            reasons.append(f"{f.spec.name} reaches only eta {f.reach_eta:.2f} "
-                           f"(need {mission.min_spar_reach_frac:.2f})")
-            penalty += 40.0 * (mission.min_spar_reach_frac - f.reach_eta)
+    # Panels butt together on the spar and are glued face to face. The
+    # tube is sized for bending; the ring of single wall at each joint
+    # carries the shear outboard of it and the torque of that lift about
+    # the spar line, and until now nothing asked whether it could. The
+    # allowable is declared, deliberately far below any figure for the
+    # adhesive itself, because the foam is the weak side.
+    fleet_joints = ()
+    if spar_fits and len(joint_etas) > 1:
+        x_axis = float(np.mean([f.x_frac for f in spar_fits]))
+        loads_j = struct.span_loads(plan, pt, mass.total_kg, mission.n_limit_g)
+        fleet_joints, j_gates = jnt.gates(plan, loads_j, joint_etas,
+                                          x_axis, wall)
+        for g in j_gates:
+            if not g.passed:
+                reasons.append(f"{g.name} carries {g.value:.1f}x its declared "
+                               f"allowable, needs {g.limit:.0f}x")
+                penalty += 10.0 * max(g.limit - g.value, 0.0)
 
     # --- can the powertrain actually hold this speed? ---
     if mission.powertrain is not None:
@@ -1375,42 +1946,42 @@ def _evaluate_once(
                        f"{mission.max_elevon_power:.4f} (twitchy)")
         penalty += 20.0 * (abs(dcm_ddeg) - mission.max_elevon_power)
 
-    # --- and can the MECHANISM deliver it? ---
-    #
-    # dcm_ddeg above says how much moment a degree of elevon buys, and the
-    # speed objective below spends `max_elevon_deflect_deg` of it. Nothing
-    # until now asked whether the servo, its arm, the pushrod and the horn
-    # can reach that angle: demon1's headline speed was computed from a
-    # deflection the aircraft had never been shown able to make.
-    #
-    # Solved as a four-bar rather than by the ratio r_servo / r_horn,
-    # which is the small-angle limit of a parallel linkage and is wrong in
-    # the two ways that matter -- it is linear, so it cannot show a
-    # mechanism running out of travel, and it is symmetric, so it cannot
-    # show the differential a real linkage has.
-    link = None
-    if elv.has_elevon(settings) and "servos" in bay_seats:
-        link = lkg.for_station(
-            plan, bay_etas.get("servos") or 0.5 * (e_start + 1.0),
-            elv.hinge_x(settings), bay_seats["servos"],
-            mission.servo_arm_mm, mission.horn_below_mm,
-            mission.servo_travel_deg, wall)
-        thr_down, thr_up, locked = lkg.sweep(link)
-        want = mission.max_elevon_deflect_deg
-        got = min(thr_down, -thr_up)
-        if locked:
-            reasons.append("linkage locks inside the servo's travel")
-            penalty += 30.0
-        if got < want:
-            reasons.append(f"linkage reaches {thr_down:+.1f}/{thr_up:+.1f} deg, "
-                           f"the score spends +/-{want:.0f}")
-            penalty += 8.0 * (want - got)
-
     loading = mass.total_kg * 1000.0 / (plan.area_m2 * 100.0)     # g/dm^2
     if loading > mission.max_wing_loading_gdm2:
         reasons.append(f"wing loading {loading:.1f} > "
                        f"{mission.max_wing_loading_gdm2:.0f} g/dm2")
         penalty += 2.0 * (loading - mission.max_wing_loading_gdm2)
+
+    # --- the slowest it can be FLOWN, and how it stalls there ---
+    # The elevon is a second right-hand side of the same lattice, so this
+    # is three triangular solves, not a rebuild. On the micro_fpv winner
+    # the minimum speed moves 0.4% from nc 8 to nc 32 (test_validation).
+    slow = None
+    if (mission.objective == "docile" or mission.min_hands_off_margin > 0.0
+            or mission.stall_onset_ahead_of_cg):
+        dn = vlm.elevon_dn(p_vec["elevon_eta"], p_vec["elevon_chord"])
+        slow = perf.slow_flight(vlm, mass.x_cg_m, alpha, dn, p_vec["elevon_eta"],
+                                mission.cl_max_section,
+                                mission.max_elevon_deflect_deg, mass.total_kg)
+        if mission.min_hands_off_margin > 0.0:
+            ratio = v / slow.v_min_ms
+            if ratio < mission.min_hands_off_margin:
+                reasons.append(
+                    f"hands-off {v:.1f} m/s is only {ratio:.2f}x the slowest "
+                    f"trimmed {slow.v_min_ms:.1f} m/s "
+                    f"(need {mission.min_hands_off_margin:.2f}x)")
+                penalty += 30.0 * (mission.min_hands_off_margin - ratio)
+        # Checked even when the elevon runs out first: that stops the
+        # pilot holding the wing stalled, not a gust or a pull-out
+        # taking it there, and where it lets go is the same place.
+        if mission.stall_onset_ahead_of_cg:
+            st_c = plan.at(slow.eta_critical)
+            aft = (st_c.x_le_m + 0.25 * st_c.chord_m - mass.x_cg_m) / plan.mac_m
+            if aft > 0.0:
+                reasons.append(
+                    f"stall starts at eta {slow.eta_critical:.2f}, "
+                    f"{aft:.2f} MAC behind the CG -- pitches UP at the stall")
+                penalty += 20.0 * aft
 
     # stall progression: the tip must be working LESS hard than the peak,
     # so the root gives up first and the nose drops instead of a wing.
@@ -1486,6 +2057,31 @@ def _evaluate_once(
         # smallest flyable: span dominates, mass breaks ties. Negated
         # because the optimizer maximises.
         merit = -(plan.span_m * 100.0 + mass.total_kg * 10.0)
+    elif mission.objective == "docile":
+        # SLOW is the objective, and stall speed is the one number that
+        # says it. Everything a nervous pilot complains about scales with
+        # it: the speed the aeroplane arrives at the ground, how far it
+        # travels while they think, and how much energy a mistake has.
+        #
+        # It is not a weighted sum of the stability derivatives, and that
+        # is deliberate -- those are GATES, and feasibility dominates the
+        # score, so a design that misses Dutch roll damping cannot buy its
+        # way back with a slower stall. What the merit does is pick, among
+        # designs that are already stable enough, the one that flies
+        # slowest.
+        #
+        # v_stall = sqrt(2W / rho S CLmax), so minimising it minimises
+        # wing loading: it pushes mass DOWN and area UP at the same time,
+        # which is why the 250 g ceiling is a gate rather than a target.
+        # A design has no reason to spend mass it does not need.
+        #
+        # It is the TRIMMED minimum speed: the first section to reach
+        # cl_max, or the up-elevon running out, whichever comes first. The
+        # flat version -- every section at cl_max at once, nothing spent
+        # on trim -- reported the gen8 winner at 6.40 m/s against 7.38 for
+        # the aircraft as flown, and it could not tell a wing whose lift
+        # was well spread from one whose peak stalled early.
+        merit = -slow.v_min_ms
     else:
         merit = ld
 
@@ -1508,7 +2104,8 @@ def _evaluate_once(
             plan, spar_fits, cl_a, p_vec["elevon_chord"], p_vec["elevon_eta"],
             v_design, settings.extrusion_width_mm,
             min_margin=mission.min_aeroelastic_margin,
-            n_ribs=settings.rib_count if settings.ribs else 0)
+            n_ribs=settings.rib_count if settings.ribs else 0,
+            hatch_eta=hatch_eta(mission, plan))
         if not aero_e.ok:
             worst = min(aero_e.v_div_ms, aero_e.v_rev_ms)
             which = ("reversal" if aero_e.v_rev_ms <= aero_e.v_div_ms
@@ -1524,12 +2121,17 @@ def _evaluate_once(
         mass_kg=mass.total_kg, cl_trim=float(pt.CL), static_margin=float(sm),
         reasons=tuple(reasons), plan=plan, trim=trim_state, mass=mass,
         panels=panels if want_panels else [],
+        elevons=elevon_parts if want_panels else [],
+        horn_eta=float(horn_at[0]) if horn_at else 0.0,
         spar_fits=spar_fits, lateral=lat,
         fairness=fair, fairness_limits=mission.fairness,
-        fins=fins, dynamics=modes,
+        fins=fins, slow=slow, powertrain=mission.powertrain,
+        bays=tuple(bay_vols),
+        inserts=inserts, dynamics=modes,
         max_elevon_deflect_deg=mission.max_elevon_deflect_deg,
         linkage=link,
         aeroelastic=aero_e,
+        joints=tuple(fleet_joints),
         sm_band=(mission.min_static_margin, mission.max_static_margin),
         cruise_band=tuple(mission.cruise_band_ms),
         max_loading_gdm2=mission.max_wing_loading_gdm2,
@@ -1561,7 +2163,7 @@ def choose_structure(ev: Evaluation, mission: Mission,
     mostly aft of the CG; on the gen4 trainer they pushed trim past 8
     degrees and cut Dutch-roll damping from +0.083 to +0.058. The search
     called that design feasible and the built aircraft was not."""
-    pt = (vlm or VLM(ev.plan, ns, nc)).solve(ev.trim.alpha_deg, ev.trim.x_cg_m)
+    pt = (vlm or VLM(ev.plan, ns, nc, fins=ev.fins)).solve(ev.trim.alpha_deg, ev.trim.x_cg_m)
     st = struct.select(ev.plan, pt, ev.mass_kg,
                        skin_t_mm=settings.extrusion_width_mm,
                        n_limit=mission.n_limit_g,
@@ -1594,14 +2196,18 @@ def evaluate(
 
     Designs rejected before trim never pay for the second pass. Pass
     size_structure=False for a bare-shell verdict on purpose."""
+    # Parts are built on both passes; asking for them on the first costs
+    # only the keeping. It matters when the first pass is the LAST one --
+    # a design that does not trim never gets a second -- and its parts
+    # are what someone exporting it to see why needs.
     first = _evaluate_once(u, mission, base, settings, drag=drag, ns=ns, nc=nc,
-                           want_panels=want_panels and not size_structure,
-                           z_step_mm=z_step_mm)
+                           want_panels=want_panels, z_step_mm=z_step_mm)
     if not size_structure or first.trim is None or first.plan is None:
         return first
     st, tuned = choose_structure(first, mission, first.print_settings or settings,
                                  ns, nc,
-                                 vlm=_cached_vlm(u, mission, base, first.plan, ns, nc))
+                                 vlm=_cached_vlm(u, mission, base, first.plan, ns, nc,
+                                                  first.fins))
     ev = _evaluate_once(u, mission, base, tuned, drag=drag, ns=ns, nc=nc,
                         want_panels=want_panels, z_step_mm=z_step_mm,
                         spar_od_mm=st.spar.od_mm)

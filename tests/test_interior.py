@@ -191,9 +191,14 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
     its declared nominal seat, the spar solved for reach alone -- an 8 mm
     tube shares space with the pack on all three aircraft. This test
     reproduces that state deliberately, so that the detection cannot
-    regress even after the seats and the solver have fixed the designs."""
+    regress even after the seats and the solver have fixed the designs.
+
+    The THREE aircraft the finding was made on, named, not `MISSIONS`.
+    micro_fpv was searched after the occupancy gates existed, so a naive
+    tube in it need not hit its pack -- and a test that demands a clash of
+    every future design is demanding that the gates never worked."""
     found = {}
-    for name in MISSIONS:
+    for name in ("trainer_v3", "demon1", "micro"):
         u, mission, base, plan = _fleet(name)
         p = unit_to_physical(u)
         vols = [it.bay_volume(b.name, p[b.x_var] if b.x_var else b.x_frac,
@@ -211,7 +216,7 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
         found[name] = [(a, b, mm) for a, b, mm in it.clashes(vols + naive, plan, WALL)
                        if pack in (a, b) and any(
                            s.name in (a, b) for s in mission.spars)]
-    for name in MISSIONS:
+    for name in found:
         assert found[name], f"{name}: the spar-through-the-pack clash vanished"
 
 
@@ -220,10 +225,20 @@ def test_the_fleet_spar_and_pack_conflict_is_now_visible():
 def test_a_bay_may_not_straddle_a_print_joint():
     """Micro's 2S 450 reaches eta 0.170 and panel p0 ends at 0.140, so the
     pack was declared across the joint between two separately printed
-    shells. There is no geometry that makes that work."""
-    _, mission, _, plan = _fleet("micro")
-    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0)
+    shells. There is no geometry that makes that work.
+
+    The joints come from the design's OWN elevon. With the print split
+    only as far as the envelope demands, micro's 176 mm half span is one
+    panel until the hinge station forces a break -- asked with default
+    settings (no elevon) there is no joint left to straddle, and the test
+    was asserting something about a split the aircraft does not have."""
+    u, mission, _, plan = _fleet("micro")
+    p = unit_to_physical(u)
+    s = vase.PrintSettings(bed_z_mm=250.0, spar_d_mm=8.0,
+                           elevon_chord=p["elevon_chord"],
+                           elevon_eta=p["elevon_eta"])
     joints = vase.panel_etas(plan, s)
+    assert len(joints) > 1, "the hinge station must be a joint"
     wide = it.bay_volume("wide", 0.40, (40.0, 200.0, 10.0), plan)
     first, last = it.straddles(wide, joints)
     assert last > first >= 0, "a 200 mm wide bay must cross a joint"
@@ -272,17 +287,30 @@ def test_the_solved_seat_is_the_seat_the_mass_uses():
     """`bay_fits` warns against a sweeping CHECK, and rightly: answering
     'does some seat exist' while modelling the mass elsewhere passed a
     design whose pack hung off the nose. A solved seat is different only
-    if it is also the station the mass is placed at."""
+    if it is also the station the mass is placed at.
+
+    The seat is a fraction of the chord AT THE BAY'S OWN STATION -- the
+    root for centreline payload, its solved eta for a servo -- and what
+    the CG is computed from is the absolute station that fraction lands
+    at. Read as a root-chord fraction instead, the trainer's 18 g of
+    servos sat 64 mm forward of where they are."""
     u, mission, base, plan = _fleet("trainer_v3")
     p = unit_to_physical(u)
-    vols, seats, _ = seat_bays(plan, mission, p, WALL)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0)
+    joints = vase.panel_etas(plan, settings)
+    vols, seats, etas = seat_bays(plan, mission, p, WALL, joints)
     ev = evaluate(u, mission, base, settings)
-    root_c = plan.stations[0].chord_m
     for bay in mission.bays:
+        vol = next(v for v in vols if v.name == bay.name)
+        st = plan.at(0.0 if etas[bay.name] is None else float(etas[bay.name]))
+        x_abs = (st.x_le_m + seats[bay.name] * st.chord_m) * 1000.0
+        assert vol.x_abs_mm == pytest.approx(x_abs, rel=1e-9), (
+            "the volume must sit where its own station's chord puts it")
         for item_name in bay.holds:
             item = next(i for i in ev.mass.items if i.name == item_name)
-            assert item.x_m == pytest.approx(seats[bay.name] * root_c, rel=1e-9)
+            assert item.x_m * 1000.0 == pytest.approx(x_abs, rel=1e-6), (
+                f"{item_name} is modelled at {item.x_m*1000:.1f} mm and its "
+                f"bay is at {x_abs:.1f} mm")
 
 
 def test_a_clash_is_penalised_by_how_far_it_reaches():
@@ -343,30 +371,105 @@ def test_the_ramp_budget_improves_outboard():
     assert rates[-1] > rates[0], f"{rates}"
 
 
-def test_a_shallow_panel_cannot_close_a_deep_bay():
-    """Micro's centre body is 24.5 mm tall and its pack is 17 mm deep.
+def test_a_bay_may_close_across_a_print_joint():
+    """Micro's centre body is 24.5 mm tall and its pack is 17 mm deep:
+    closing the bay needs 22 mm of span and there were 10 mm left in p0.
 
-    Closing the bay needs 33 mm of span at the rate available and there
-    are 10 mm left outboard of the pack, so the bay cannot be closed
-    inside p0 at all -- it has to run clear through the panel and be shut
-    by the joint, or move outboard. That is a per-aircraft architectural
-    consequence of the print constraint, and it is the reason this gate
-    exists rather than a blanket rule about bay depth."""
+    This test used to assert that micro therefore FAILED. It was pinning
+    a constraint nothing physical asks for. What must not straddle a joint
+    is the box -- half a battery in each shell is not a thing -- and that
+    is gated separately. The taper that closes the opening is just
+    geometry, both panels are lofted from the same planform, so the
+    contours match across the joint by construction, and the ramp may run
+    on into the next panel. Given the whole span outboard to close in,
+    micro has room, and the gate must say so."""
     u, mission, base, plan = _fleet("micro")
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
     closes = [r for r in ev.reasons if "cannot be closed" in r]
-    assert closes, f"micro p0 must fail the closure gate; got {ev.reasons}"
-    assert any(mission.bays[0].name in r for r in closes)
+    assert not closes, f"micro must be allowed to close across p0/p1: {closes}"
 
 
-def test_the_trainer_can_close_its_bays():
-    """The gate must not reject an aircraft that has the room: the
-    trainer's 111 mm centre body carries a 24 mm pack with ramps at both
-    ends and 16 mm to spare."""
+def test_a_bay_parked_at_the_tip_is_still_rejected():
+    """This used to be about the closure ramp: a bay whose fade needed
+    more span than existed outboard of it. Nothing is cut any more, so
+    there is no ramp -- but the reason the tip is a bad place to put a
+    pack never was the ramp. The section out there is thinner than the
+    box, and that gate is untouched."""
+    from dataclasses import replace as _replace
+    u, mission, base, plan = _fleet("trainer_v3")
+    # a pack parked at the very tip: nothing left outboard to close in
+    far = _replace(mission.bays[0], x_var=None, x_frac=0.45,
+                   eta_frac=0.985, eta_lo=0.98, eta_hi=0.99)
+    m2 = _replace(mission, bays=(far,) + mission.bays[1:])
+    settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                                  bed_z_mm=250.0)
+    ev = evaluate(u, m2, base, settings)
+    assert not ev.ok
+    assert any(far.name in r for r in ev.reasons), ev.reasons
+
+
+def test_the_trainer_can_seat_its_bays():
+    """The gates must not reject an aircraft that has the room: every one
+    of the trainer's boxes fits the section it is seated in, clear of the
+    spars and of each other."""
     u, mission, base, plan = _fleet("trainer_v3")
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     ev = evaluate(u, mission, base, settings)
-    assert not [r for r in ev.reasons if "cannot be closed" in r], ev.reasons
+    for bay in mission.bays:
+        assert not [r for r in ev.reasons if bay.name in r], ev.reasons
+
+
+# ---------------------------------------------- penalties reach the score
+
+def test_interior_penalties_reach_the_score():
+    """Penalties rank the infeasible -- that is the whole scoring rule.
+
+    Half way through `evaluate` a second `penalty = 0.0` threw away every
+    millimetre of clash, depth shortfall, joint straddle and closure
+    failure priced before it, so a bay 1 mm too shallow and a bay 40 mm
+    too shallow scored the same and the optimizer saw the flat cliff the
+    rule exists to prevent. A design whose electronics box is made far
+    too tall to fit must score BELOW the same design with the box as
+    declared, by at least the depth penalty."""
+    from dataclasses import replace as _replace
+
+    u, mission, base, _ = _fleet("trainer_v3")
+    s = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                           bed_z_mm=250.0)
+    base_ev = evaluate(u, mission, base, s, size_structure=False)
+    bays = tuple(_replace(b, box_mm=(b.box_mm[0], b.box_mm[1], 60.0))
+                 if b.name == "AR630 + esc" else b for b in mission.bays)
+    tall = evaluate(u, _replace(mission, bays=bays), base, s,
+                    size_structure=False)
+    assert not tall.ok
+    assert any("needs 60" in r for r in tall.reasons), tall.reasons
+    # GRADED, and compared WITHIN ONE SEAT. The gap used to be pinned at
+    # 8 points because a 60 mm bay also failed the closure ramp and
+    # collected that penalty too; with nothing cut the depth shortfall is
+    # the only thing left, and it is worth about 4.
+    #
+    # The comparison cannot simply deepen the box, because past about
+    # 50 mm the seat solver MOVES this bay from 0.21c to 0.33c to find a
+    # thicker section -- and that is a different aeroplane, with its own
+    # L/D and static margin, not a differently penalised one. Measured:
+    # 40 mm and 45 mm seat at 0.21c and score -1026.9 and -1029.5, then
+    # 50 mm jumps to 0.33c and scores -1020.4. Monotone within each seat,
+    # not across the jump. So the grading is checked on three depths that
+    # share a seat, which is the only comparison that isolates it.
+    def _at(depth):
+        return evaluate(u, _replace(mission, bays=tuple(
+            _replace(b, box_mm=(b.box_mm[0], b.box_mm[1], float(depth)))
+            if b.name == "AR630 + esc" else b for b in mission.bays)),
+            base, s, size_structure=False)
+
+    deeper, deepest = _at(70.0), _at(80.0)
+    seats = {r.split(" bay at ")[1].split(" ")[0]
+             for ev in (tall, deeper, deepest)
+             for r in ev.reasons if " bay at " in r}
+    assert len(seats) == 1, f"the three depths must share a seat: {seats}"
+    assert deepest.score < deeper.score < tall.score < base_ev.score, (
+        f"not graded: 80 mm {deepest.score:.1f}, 70 mm {deeper.score:.1f}, "
+        f"60 mm {tall.score:.1f}, declared {base_ev.score:.1f}")

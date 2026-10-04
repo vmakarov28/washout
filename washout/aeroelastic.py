@@ -254,10 +254,18 @@ def gj_multicell_nmm2(plan, eta: float, wall_mm: float, n_ribs: int,
     return float(g_mpa * torque), m
 
 
-def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA) -> float:
-    """The tubes' own contribution. J = pi (D^4 - d^4) / 32."""
+def gj_spars_nmm2(spar_fits, g_gpa: float = G_SPAR_GPA,
+                  eta: float | None = None) -> float:
+    """The tubes' own contribution. J = pi (D^4 - d^4) / 32.
+
+    At `eta`, only the tubes that reach it. Every tube used to be added
+    at every station, so the outer third of each wing was stiffened by
+    carbon that ends at eta 0.66 -- a third of the GJ, and reversal, the
+    binding limit on the fleet, goes as its square root."""
     total = 0.0
     for f in spar_fits:
+        if eta is not None and f.reach_eta < eta:
+            continue
         od = f.spec.d_mm
         idm = max(od - 2.0, 0.0)              # 8x6, 6x4: 1 mm wall
         total += np.pi * (od ** 4 - idm ** 4) / 32.0
@@ -281,6 +289,13 @@ class Aeroelastic:
     margin_hi: float = 0.0
     v_rev_hi_ms: float = 0.0
     notes: tuple[str, ...] = ()
+    hatch_eta: float = 0.0
+    """Half-span fraction of the hand-cut hatch, measured from the centreline;
+    0 means none."""
+    gj_hatch_nmm2: float = 0.0
+    v_div_hatch_ms: float = 0.0
+    v_rev_hatch_ms: float = 0.0
+    margin_hatch: float = 0.0
 
     def report(self) -> str:
         mark = "OK" if self.ok else "FAILS"
@@ -298,15 +313,56 @@ class Aeroelastic:
         if self.v_div_open_ms > 0.0:
             lines.append(
                 f"  OPEN section   divergence falls to "
-                f"{self.v_div_open_ms:.0f} m/s -- what a hatch would cost")
+                f"{self.v_div_open_ms:.0f} m/s if the WHOLE span were open "
+                f"-- a bound, not the hatch (see HATCH)")
+        if self.hatch_eta > 0.0:
+            lines.append(
+                f"  HATCH         cut to eta {self.hatch_eta:.3f}: GJ "
+                f"{self.gj_hatch_nmm2/1e6:.3f} N.m^2, divergence "
+                f"{self.v_div_hatch_ms:.0f} | reversal {self.v_rev_hatch_ms:.0f} m/s "
+                f"-> {self.margin_hatch:.2f}x")
         lines += [f"  note          {n}" for n in self.notes]
         return "\n".join(lines)
+
+
+def hatch_gj_nmm2(plan, spar_fits, wall_mm: float, gj_closed_eff: float,
+                  hatch_eta: float) -> float:
+    """The wing's equivalent GJ with the upper skin cut open over
+    |eta| < hatch_eta.
+
+    The cut section is OPEN: the skin's own J falls to (1/3) per t^3 and
+    what carries torque across is mostly the spar tube. It is short -- the
+    battery hatch is 17 mm of a 240 mm semi-span -- but it is at the
+    root, and the root is where compliance costs most. Under a torque
+    distributed along the span, the section at y carries everything
+    outboard of it, t (L - y). The tip twist is the integral of that over
+    GJ, so a compliance at the root is weighted L against the span
+    average of L / 2: TWICE its span fraction. The existing equivalent GJ
+    is a plain harmonic mean (a uniform weight, as `analyse` explains),
+    so the hatch's extra compliance is added with that factor of two:
+
+        1/GJ_h = 1/GJ_eff + 2 f (1/GJ_open - 1/GJ_closed),  f = hatch_eta
+
+    both GJs taken at the middle of the hatch, with the tubes that reach
+    there. Zero hatch returns the closed value exactly."""
+    if hatch_eta <= 0.0 or gj_closed_eff <= 0.0:
+        return float(gj_closed_eff)
+    e_mid = 0.5 * float(hatch_eta)
+    area, per, _ = cell_properties(plan, e_mid, wall_mm)
+    spar = gj_spars_nmm2(spar_fits, eta=e_mid)
+    closed = gj_closed_nmm2(area, per, wall_mm) + spar
+    open_ = gj_open_nmm2(per, wall_mm) + spar
+    if open_ <= 0.0 or closed <= 0.0:
+        return 0.0
+    comp = 1.0 / gj_closed_eff + 2.0 * float(hatch_eta) * (1.0 / open_ - 1.0 / closed)
+    return float(1.0 / comp) if comp > 0.0 else 0.0
 
 
 def analyse(plan, spar_fits, lift_slope_per_rad: float,
             elevon_chord_frac: float, elevon_eta: float,
             design_v_ms: float, wall_mm: float,
-            min_margin: float = 1.2, n_ribs: int = 0) -> Aeroelastic:
+            min_margin: float = 1.2, n_ribs: int = 0,
+            hatch_eta: float = 0.0) -> Aeroelastic:
     """Divergence and reversal speeds for this wing at this speed.
 
     `design_v_ms` is the speed the aircraft is SCORED at -- top speed for
@@ -332,7 +388,7 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
         gjs.append(gj_closed_nmm2(area, per, wall_mm))
         gjs_open.append(gj_open_nmm2(per, wall_mm))
         eas.append(ea_)
-    spar_gj = gj_spars_nmm2(spar_fits)
+    spar_gj = np.array([gj_spars_nmm2(spar_fits, eta=float(e_)) for e_ in etas])
     gj = _harmonic(np.array(gjs) + spar_gj)
     gj_open = _harmonic(np.array(gjs_open) + spar_gj)
     # The rib truss divides the box into cells and a multi-cell section is
@@ -430,7 +486,26 @@ def analyse(plan, spar_fits, lift_slope_per_rad: float,
     notes.append("reversal does not depend on the elastic axis (the e*cl_d "
                  "terms cancel), so it is the firmer of the two numbers")
 
+    # The hand-cut battery hatch, when there is one: the same two speeds on
+    # the stiffness with the root opened. Reported beside the closed
+    # numbers, and the build sheet gates on it; the search does not yet.
+    gj_h = v_div_h = v_rev_h = margin_h = 0.0
+    if hatch_eta > 0.0:
+        gj_h = hatch_gj_nmm2(plan, spar_fits, wall_mm, gj, hatch_eta)
+        k_h = gj_h * (np.pi / (2.0 * half_mm)) ** 2
+        vd = (q_to_v(k_h / (c_mm * c_mm * e * a) * 1e6) if e > 1e-6 else np.inf)
+        vr = (q_to_v(-cl_d * k_h / (c_mm * c_mm * a * cm_d) * 1e6)
+              if (cm_d < -1e-9 and cl_d > 0.0) else np.inf)
+        worst_h = min(vd, vr)
+        margin_h = (float(worst_h / max(design_v_ms, 1e-6))
+                    if np.isfinite(worst_h) else 99.0)
+        v_div_h = float(vd if np.isfinite(vd) else 9999.0)
+        v_rev_h = float(vr if np.isfinite(vr) else 9999.0)
+
     return Aeroelastic(
+        hatch_eta=float(hatch_eta), gj_hatch_nmm2=float(gj_h),
+        v_div_hatch_ms=v_div_h, v_rev_hatch_ms=v_rev_h,
+        margin_hatch=float(margin_h),
         gj_nmm2=gj, gj_open_nmm2=gj_open, ea_frac=ea, e_frac=e,
         k_nmm_per_rad=k,
         v_div_ms=float(v_div if np.isfinite(v_div) else 9999.0),

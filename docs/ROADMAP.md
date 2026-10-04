@@ -1,11 +1,15 @@
 # What is left between here and a flying wing nobody touched
 
-> Two roadmaps, two axes. **This one is whether the numbers are true.**
+> Three roadmaps, three axes. **This one is whether the numbers are true.**
 > [`ROADMAP-BUILD.md`](ROADMAP-BUILD.md) is whether the parts are
 > buildable without a CAD step. They meet in two places: opening a
 > battery bay destroys the closed torsion box that item 9's flutter
 > gate depends on, and the linkage gate there is what finally proves
 > the elevon deflection demon1's speed objective assumes.
+> [`ROADMAP-CAD.md`](ROADMAP-CAD.md) is the third dimension: a model of
+> the aircraft as built that a geometry kernel can check, the STEP
+> export that falls out of it, and the run modes. Its section 0 found
+> the two defects in item 0 below.
 
 washout already goes from a 35-number design vector to STLs a slicer will
 print in spiral-vase mode, and judges the whole way with a lattice, a
@@ -34,6 +38,31 @@ designs *unrepresentable* over penalising them.
 ---
 
 # A. The numbers are not the numbers
+
+## 0. Two facts that live between the sections - P0, above everything
+
+Found 2026-09-22, and both are the one discipline again: the scored
+aircraft and the built aircraft were different aircraft. Evidence and
+the fixes are in [`ROADMAP-CAD.md`](ROADMAP-CAD.md) sections 0 and 1.
+
+- **The spars bend.** `spars.reach_of` let each tube follow its corridor
+  through the sweep and the dihedral. A straight tube per half reaches
+  eta 0.66-0.69 where the solver claimed 0.76-1.00, a single tube "tip to
+  tip", as `BUILD.md` instructed, leaves the skin at 0.25-0.43 on every
+  aircraft, and the mass, tip deflection and GJ were all computed on tube
+  that is not there. Item 1 below weighed the fitted spars; the fit
+  itself was wrong.
+- **The panels are straight.** `build_stack` never used `z_le`, so each
+  printed panel is straight while the lattice scored a curve: up to
+  4.1 mm off the loft with a panel per control station, 9.0 mm with the
+  minimal split, joint kinks to 21 deg that nothing reported, and outer
+  sections printed `1/cos(phi)` too thick (+13% on the trainer's tip
+  panel).
+
+Both are fixed by making the built geometry follow from the loft in 3D,
+and both will move the fleet. Tier 0 also turned out to run at 12 s an
+evaluation against the 0.4 s CLAUDE.md promises, which is the reason
+gen6's searches were cut to popsize 4; that is item 1.3 there.
 
 ## 1. Charge the spars that were actually fitted - P0
 
@@ -198,6 +227,20 @@ washed out, and at a third of the root's Re, so its real margin is worse
 than any single constant can say. This is the gate most likely to be
 quietly optimistic today.
 
+**2026-09-24: blocked on the tool, not the plan.** Items 5 and 6 assumed
+the 2D LBM could find cl_max. It was validated against NASA TM 4062's
+measured E387 at Re 100 000 (`data/validation/`), with the criterion
+written down before the runs, and it fails before the stall: cl is 25%
+low at 9 deg. NeuralFoil fails too, 13% high on cl_max. Neither is
+used. What would unblock this:
+
+- a tier-1 tunnel at a resolution that holds the boundary layer, with a
+  transition model;
+- published measured sections;
+- or a physical test.
+
+Tuning either tool until it matches the reference is not an option.
+
 ## 7. A `refine` command: make the ladder climb itself - P1
 
 The fidelity ladder is documented as the architecture, and its top two
@@ -213,14 +256,49 @@ order beside it. The interesting output is not the winner, it is **how
 often tier 1 changes the order** - that number says whether the search's
 rankings can be trusted at all, which is currently an assumption.
 
-## 8. Finish a tier-2 run - P2
+## 8. Finish a tier-2 run - **DONE 2026-09-23, first results in**
 
-The 3D whole-aircraft LBM has never completed; the previous attempt hung
-the WSL VM. It has one job: check whether the VLM's induced drag plus
-strip-theory profile drag add up on a real blended wing body with a fat
-centre body, where the strip assumption is weakest. Run it detached, with
-a memory cap, and treat hanging that VM as a bot-killing failure rather
-than an inconvenience (see constraints).
+The 3D whole-aircraft LBM had never completed; the previous attempt hung
+the WSL VM. `scripts/tunnel3d.py` now writes a scene and calls the
+tunnel's `run3d.py` (no import), inside a systemd scope with a memory cap,
+at nice 10, with a CUDA allocator cap -- and that cap is what stopped the
+first full-resolution attempt cleanly (renderer OOM at its first frame)
+instead of spilling into the VM. It runs with a three-colour smoke rake,
+renders tunnel photographs, and exports a bundle for the tunnel repo's
+browser viewer (`python ../windtunnel/scripts/serve_viewer.py
+out/tunnel3d/<run>/tunnel/viewer`).
+
+gen7 micro_fpv at its trim angle (3.2 deg), Re 15,000 on the MAC -- TEN
+TIMES below flight -- 42.9 M cells, 68 per MAC, 31 min:
+
+| | tunnel | vortex lattice |
+|---|---|---|
+| CL (surface force) | 0.077 +/- 0.001 | 0.203 (inviscid) |
+| CL (circulation, KJ) | 0.067 (86% of the force; the check) | |
+| lift inboard of half semi-span | 103% | 67% |
+| lift outboard of 80% | -1% | 7% |
+
+And at 9 deg: tunnel CL 0.208 (circulation 0.189, 91% of it), lattice
+0.493; inboard half 80% against 61%, outer 20% 2.4% against 11%. The
+smoke agrees: strong downwash behind the centre body, and the tip smoke
+barely rolls up -- the tips are so lightly loaded that their vortex is
+weak. The "air slides out round the tips" worry is not what the tunnel
+shows; what it shows is an outer wing that hardly lifts at this Reynolds
+number.
+
+Neither level is a flight number. The SHAPE is the finding: at this
+Reynolds number the outer wing and the curled tips carry no lift at all,
+and the centre body carries everything. The outer sections see about
+Re 9k here and are thin and reflexed, and that combination is known to
+go to zero or negative lift at small angles. The design is optimised to
+fly SLOW, which is where the outer wing's Reynolds number is lowest, so
+tier 1 on the outer sections at their stall-speed Reynolds number
+(~5e4) is the next measurement worth making.
+
+The spanwise loading is read from the circulation round each section of
+the averaged flow, not from the momentum exchange binned by span: on a
+voxel staircase the per-bin force alternates from step to step
+(windtunnel NOTES 2026-09-23).
 
 ---
 
@@ -459,6 +537,20 @@ distribution, dihedral staging, and the aft spar's mass as a yaw-inertia
 term are all reachable in principle. Understand that before buying more
 fin area, which is mass and drag at the longest arm on the aeroplane.
 
+**2026-09-23: part of the answer was the model.** The fins were not in
+the vortex lattice; a curled wing tip was. So a fin was charged its mass
+and drag and credited nothing for the tip loss it stops, while the curl
+collected its full induced-drag benefit -- an uneven field, and micro_fpv's
+gen7 winner duly curled 27% of its semi-span and carried no fins. The fins
+are lattice panels now (`vlm.build_lattice(fins=...)`), with a branched
+Trefftz wake, and the lattice reproduces Hoerner's measured end-plate rule
+to 3% and puts a fin's side-force slope between the isolated-plate and
+reflection-plane closed forms. Three numerical faults had to go first, all
+at the junction where the wing's tip vortices pass the fin root; each has
+a test. gen8 re-asks the question on micro_fpv with a variant mission,
+`micro_fpv_winglet`, whose tip rise is capped at 12% so the yaw stiffness
+has to come from fins (results/README.md).
+
 ## 21. `span_m` is an inert dimension on two of three missions - P4
 
 `build()` reads `p["span_m"]` only when `mission.span_free`, which is the
@@ -515,6 +607,10 @@ Carried forward. These are not preferences.
 
 # Suggested order
 
+0. Item 0, in the order `ROADMAP-CAD.md` section 5 gives: tier 0 back at
+   its contract first (it changes no number, and it makes everything
+   after it cheaper to check), then true-slice panels, then straight
+   spars.
 1. Items 1, 3 and 4 together - one afternoon, and every number after them
    is trustworthy in a way nothing before them is.
 2. Item 2, after asking about the aft tube.

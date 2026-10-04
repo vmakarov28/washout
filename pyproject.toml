@@ -7,10 +7,20 @@ dependencies = ["numpy", "scipy"]
 
 [project.optional-dependencies]
 dev = ["pytest", "matplotlib"]
+# The STEP export (washout/cad) and its 3D gates. Optional: the search is
+# numpy and scipy only, and nothing on its path imports these.
+cad = ["cadquery-ocp>=7.8"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# `faker` is not used here -- it arrives as a transitive dependency and
+# auto-registers a pytest plugin whose session fixture walks every
+# installed module with `pkgutil.iter_modules`. With the OCC bindings
+# installed (cadquery-ocp pulls vtk, which has an unusual module layout)
+# that walk dies with a Windows access violation during fixture setup,
+# taking the run with it. Nothing in this repo needs the plugin.
+addopts = "-p no:faker"
 
 # Say which package this is, explicitly. `data/` and `results/` are
 # evidence, not importable code, but setuptools' flat-layout autodiscovery

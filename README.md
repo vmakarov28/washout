@@ -46,11 +46,29 @@ own cavity *is* the channel; a carbon tube slides in after the print.
 python run.py check  --mission trainer_v3          # re-score the tracked design
 python run.py search --mission trainer_v3 --iters 90 --out out/run1
 python run.py export --mission trainer_v3 --design out/run1/design.json --out out/run1
+python run.py export ... --step                     # and cad/: STEP files + 3D gates
 python -m pytest -q                                 # the validation gates
+python scripts/fleet/gen7.py launch | status | pick # the whole fleet, the whole machine
 ```
 
-Missions are `trainer_v3`, `demon1` and `micro`, declared once in
-`design.MISSIONS`. To rebuild a
+`--workers N` evaluates each generation of a search in N processes. One
+search on one core leaves most of a machine idle; the gen7 runner starts
+twelve searches of three workers -- deliberately more workers than
+threads, so a generation's stragglers and a finished search's cores are
+always taken -- at below-normal priority, detached, so they outlive the
+shell that started them.
+
+`--step` needs the OpenCASCADE bindings (`pip install -e .[cad]`); the
+search never does. It writes `cad/<name>_assembly.step` -- the aircraft
+in the flight frame, both halves and the spar tubes, every part and face
+named -- and one STEP per printed part in its print frame. Each part is a
+handful of named B-spline faces and planar end caps, not a triangle
+soup, and the export reports how far the surfaces are from the print and
+whether each tube is inside the wing, as gates. See
+[`docs/ROADMAP-CAD.md`](docs/ROADMAP-CAD.md).
+
+Missions are `trainer_v3`, `demon1`, `micro` and `micro_fpv`, declared
+once in `design.MISSIONS`. To rebuild a
 design already in the repo, and to see the whole pipeline run end to end:
 
 ```bash
@@ -148,6 +166,38 @@ truth for the physics — and lets polars be produced on the WSL/GPU side
 while the search runs anywhere. Polars are cached by a content hash of
 the CST coefficients and Reynolds number, so a repeat section is free and
 a miss is a deliberate spend.
+
+### Tier 2, with smoke, and a viewer
+
+```bash
+python scripts/tunnel3d.py --mission micro_fpv --design results/fleet/<folder>/design.json --alpha trim
+```
+
+This voxelises the aircraft and writes a scene, then runs the tunnel's
+`run3d.py` in WSL. It runs under a memory cap and a CUDA allocator cap,
+because the VM is shared. A three-colour smoke rake runs upstream of the
+wing. The result has four parts:
+- tunnel photographs from three cameras (`tunnel/frames/`);
+- the spanwise lift from the circulation of the averaged flow, against the
+  vortex lattice (`span_loading.png`, `report.json`);
+- the same lift from the momentum-exchange total, as a check;
+- a bundle for the tunnel repo's browser viewer.
+
+To walk around the flow:
+
+```bash
+python ../windtunnel/scripts/serve_viewer.py out/tunnel3d/<run>/tunnel/viewer
+```
+
+Then open http://localhost:8765. The viewer shows:
+- the animated smoke;
+- the vortex cores;
+- a movable crossflow plane of speed;
+- streamlines;
+- the aircraft coloured by surface pressure.
+
+At 68 cells on the mean chord a run is about 30 min, at Re 15k: ten times
+below flight. Read the shape of the flow, not the coefficients.
 
 ## Why the design vector looks like this
 

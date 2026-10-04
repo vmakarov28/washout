@@ -1,0 +1,9 @@
+# 2D LBM (windtunnel fused solver, 340 cells/chord, u_lat 0.1, SGS on, 26 convective times), E387 at Re 100000
+# PARTIAL: alphas 10-16 were lost when the WSL service dropped (Wsl/Service/0x80072746). Not a polar; a validation record.
+alpha,cl,cd
+0,0.2367,0.04000
+2,0.3893,0.02940
+4,0.5438,0.04990
+6,0.6957,0.06270
+8,0.8674,0.08290
+9,0.9108,0.09000

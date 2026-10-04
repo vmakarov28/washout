@@ -102,8 +102,16 @@ def test_a_fin_split_about_the_cg_adds_no_roll_coupling():
     assert mid[2, 0] == pytest.approx(up[2, 0], rel=0.25)
 
 
-def _trimmed_design(mission, seed=4, tries=60):
-    """A random design that gets as far as trim, with no fins."""
+def _trimmed_design(mission, seed=4, tries=60, min_sm=0.0):
+    """A random design that gets as far as trim, with no fins, and with at
+    least `min_sm` of static margin to spare.
+
+    The margin is for tests that ADD mass aft and need the result still to
+    trim: tip fins are 3 g at the tips. It became necessary when the spars
+    were weighed at the middle of the straight tubes they are rather than
+    at their root seats, which moved every swept design's CG aft and left
+    the first random micro that trimmed with 0.01 of margin -- which 3 g
+    of fin then took away."""
     from washout.printing import vase
     from washout.search.design import N_DIM, evaluate, physical_to_unit, unit_to_physical
 
@@ -114,7 +122,8 @@ def _trimmed_design(mission, seed=4, tries=60):
         phys = unit_to_physical(rng.random(N_DIM))
         phys["fin_area_frac"] = 0.0
         ev = evaluate(physical_to_unit(phys), mission, base, settings)
-        if ev.trim is not None and ev.lateral is not None:
+        if (ev.trim is not None and ev.lateral is not None
+                and ev.static_margin >= min_sm):
             return phys, ev, base, settings
     raise AssertionError(f"no trimmed design in {tries} draws")
 
@@ -128,7 +137,7 @@ def test_the_search_charges_fins_and_checks_the_dutch_roll():
     from washout.search.design import Mission, evaluate, physical_to_unit
 
     m = Mission.micro()
-    phys, bare, base, settings = _trimmed_design(m)
+    phys, bare, base, settings = _trimmed_design(m, tries=400, min_sm=0.12)
     finned = evaluate(physical_to_unit({**phys, "fin_area_frac": 0.04,
                                         "fin_aspect": 1.3, "fin_below": 0.2}),
                       m, base, settings)

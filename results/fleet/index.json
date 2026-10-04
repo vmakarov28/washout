@@ -1,6 +1,8 @@
 {
   "_why": "Which tracked design is the current answer for each mission. Declared, not inferred from folder names: `run.py check` and the CI export both read it, and a mission whose winner is picked by string-matching a directory is a mission that silently checks the wrong aeroplane.",
-  "trainer_v3": "gen5_trainer_v3_v101",
+  "trainer_v3": "gen7_trainer_v3_v121",
   "demon1": "gen5_demon1_v102",
-  "micro": "gen4_micro_v92_sized"
+  "micro": "gen7_micro_v120",
+  "micro_fpv": "gen12_micro_fpv_v171",
+  "micro_fpv_winglet": "gen8_micro_fpv_winglet_v130"
 }

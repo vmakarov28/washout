@@ -88,16 +88,24 @@ def test_the_cli_offers_exactly_the_declared_missions():
     Checked against the parser argparse actually builds, not against the
     source text: a source assertion trips over the comment that documents
     the fix, and would pass for a parser that had drifted again in some
-    other way."""
+    other way.
+
+    The declared list is the fleet plus its search-space variants
+    (MISSION_VARIANTS), each of which must build and must name a parent
+    in the fleet."""
     import run
 
-    from washout.search.design import MISSIONS, Mission
+    from washout.search.design import MISSION_VARIANTS, MISSIONS, Mission
 
     choices = {a.dest: a.choices for a in run.build_parser()._actions
                if a.choices}
-    assert tuple(choices["mission"]) == MISSIONS
+    assert tuple(choices["mission"]) == MISSIONS + tuple(MISSION_VARIANTS)
     for name in choices["mission"]:
         getattr(Mission, name)()          # every offered name must build
+    for variant, parent in MISSION_VARIANTS.items():
+        assert parent in MISSIONS, (variant, parent)
+        v, p = getattr(Mission, variant)(), getattr(Mission, parent)()
+        assert v.name == variant and v.objective == p.objective
 
 
 def test_an_unknown_mission_is_refused_before_any_work():

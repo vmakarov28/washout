@@ -390,6 +390,32 @@ bending moment the spar is sized for.
   root value.
 - **Depends on:** A1.
 
+### C1b. The wedge a turning joint leaves — **a new part: DONE 2026-09-23**
+
+Every panel prints root-down, so both its end faces are square to its
+own axis; where the dihedral turns at a joint, the inner panel's tip face
+and the outer panel's root face are two planes through the pivot at the
+kink angle, and the loft between them belongs to neither part — 6.3 mm
+open at micro_fpv's lower skin. Neither face can be tilted instead (the
+classes above: a sloped root is a sloped bottom on the bed; a sloped tip
+is a cut moving ~0.8 mm a layer across a hollow part, printed over air).
+
+So the missing loft is its own part, `printing/inserts.py`: exactly the
+loft between the two planes, faces A and B lying on the panels' end
+faces (the three parts share faces), tube bores cut through it, the knife
+edge at the pivot stopped at two beads (the crest left is glue, reported),
+and at the elevon's root it stops at the hinge cut so the elevon stays
+free (the elevon's own root wedge is its clearance, reported). Printed
+FLAT on face A in normal mode. Gated in `vase.check_insert` (bed, mesh,
+thinnest edge, bore wall), charged in the search's mass budget at its
+centroid — so a steeper turn costs the search a heavier part, which is the
+pressure that belongs there — and exported as STL, as a named solid in
+the STEP assembly, and on the build sheet's Joints table.
+
+Measured against the loft itself: the ruled two-face construction holds
+the volume of the loft sliced at 200 planes between the faces to 1%
+(`test_a_turning_joint_is_filled_by_a_printed_insert`).
+
 ### C2. The centre joint — **detour + insert**
 
 Two half-wings meet on the centreline. On a BWB with a fat body this is

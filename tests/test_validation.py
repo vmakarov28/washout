@@ -8,6 +8,8 @@ published data or closed-form theory, the source is named in the test.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -537,6 +539,161 @@ def test_a_winglet_reduces_induced_drag():
         f"vs winglet {eff_wing:.2f}")
 
 
+def _fin_on(p, h: float, below: float = 0.0, chord: float | None = None):
+    """A rectangular plate at each tip of `p`: full tip chord by default
+    (an END PLATE, the geometry Hoerner's rule was measured on), or
+    `chord` long."""
+    from washout.aero.fins import TipFins
+    c = p.at(1.0).chord_m if chord is None else chord
+    return TipFins(area_m2=h * c, height_m=h, root_chord_m=c,
+                   tip_chord_m=c, below_frac=below, sweep_deg=0.0,
+                   thickness_m=0.002, x_root_le_m=p.at(1.0).x_le_m,
+                   y_m=p.half_span_m, z_root_m=0.0)
+
+
+def test_the_branched_wake_reduces_to_the_chain_without_fins():
+    """Tip fins make the Trefftz wake a T at each tip, which the chain of
+    strips could not hold, so the sheet is solved as nodes and strips.
+    On a wing with nothing hanging from it the general form must be the
+    chain, to round-off -- otherwise every fin-less design in every
+    generation would move for no physical reason."""
+    from washout.aero.vlm import trefftz_cdi
+    p = rect(6.0, cst.naca4("0012"))
+    v = VLM(p, ns=40, nc=6)
+    a = np.radians(5.0)
+    gamma = v._lu @ (-(v.lat.normal @ np.array([np.cos(a), 0.0, np.sin(a)])))
+    g_strip = np.bincount(v.lat.strip, weights=gamma)
+    pts, edge, g = v._sheet(g_strip)
+    general = trefftz_cdi(pts, edge, g, None, None, None, v.lat.area)
+    assert general == pytest.approx(v.solve(5.0, 0.25).CDi, rel=1e-12)
+
+
+def test_tip_fins_are_winglets_in_the_lattice():
+    """The fins used to be flat plates for yaw stability ONLY, their
+    end-plate effect deliberately left unclaimed -- while a curled wing
+    tip, which IS in the lattice, got its full benefit. So the search
+    could compare a winglet against a curl only on an uneven field, and
+    micro_fpv's winner curled 27% of its semi-span and carried no fins.
+
+    In the lattice, a vertical plate at each tip of a planar wing must
+    (Munk: moving shed vorticity out of the plane of the wing):
+      * raise the span efficiency on the SAME projected span by what end
+        plates are measured to give: Hoerner's rule AR_eff = AR (1 + 1.9
+        h/b): x1.095, x1.19 and x1.38 at h/b = 0.05, 0.1 and 0.2. The
+        lattice gives 1.111, 1.226 and 1.401 -- within 3% -- and the band
+        here is 5%, the scatter of the measurements the rule was fitted
+        to;
+      * load a fin standing above the tip INBOARD -- the tip vortex
+        carries the flow round the tip from below, so above it the flow
+        runs inward -- and the two fins' side forces must cancel;
+      * load a fin split evenly above and below the tip antisymmetrically,
+        with no net side force at all."""
+    p = rect(6.0, cst.naca4("0012"))
+    bare = VLM(p, ns=40, nc=6).solve(5.0, 0.25)
+    for h_over_b, hoerner in ((0.05, 1.095), (0.10, 1.19), (0.20, 1.38)):
+        h = h_over_b * p.span_m
+        v = VLM(p, ns=40, nc=6, fins=_fin_on(p, h))
+        pt = v.solve(5.0, 0.25)
+        gain = (pt.CL ** 2 / pt.CDi) / (bare.CL ** 2 / bare.CDi)
+        assert 1.0 < gain, h_over_b
+        assert gain == pytest.approx(hoerner, rel=0.05), (h_over_b, gain)
+
+        a = np.radians(5.0)
+        vinf = np.array([np.cos(a), 0.0, np.sin(a)])
+        gam = v._lu @ (-(v.lat.normal @ vinf))
+        fin = v.lat.strip >= v.lat.n_wing_strips
+        dF = gam[:, None] * np.cross(vinf, v.lat.b - v.lat.a)
+        stbd = fin & (v.lat.cp[:, 1] > 0)
+        port = fin & (v.lat.cp[:, 1] < 0)
+        assert dF[stbd, 1].sum() < 0.0, "the starboard fin must pull inboard"
+        assert dF[stbd, 1].sum() == pytest.approx(-dF[port, 1].sum(), rel=1e-9)
+
+    v = VLM(p, ns=40, nc=6, fins=_fin_on(p, 0.1 * p.span_m, below=0.5))
+    a = np.radians(5.0)
+    vinf = np.array([np.cos(a), 0.0, np.sin(a)])
+    gam = v._lu @ (-(v.lat.normal @ vinf))
+    dF = gam[:, None] * np.cross(vinf, v.lat.b - v.lat.a)
+    fin = v.lat.strip >= v.lat.n_wing_strips
+    stbd = fin & (v.lat.cp[:, 1] > 0)
+    assert abs(dF[stbd, 1].sum()) < 1e-9
+
+
+def test_a_fin_on_a_curled_tip_converges_as_it_is_refined():
+    """On fpv_micro_fpv_s4 -- swept fins on a 35-degree curled tip -- the
+    first fin lattice's side-force slope went -0.24, -0.18, -0.05, +11.8
+    as the fin was refined, and span efficiency 1.20 to 0.001. Three
+    separate faults, each found by this refinement:
+      * strips clustered at the fin's free tip made 0.2 mm strips under
+        6 mm chordwise panels (the circulation alternated in sign);
+      * the wing's last cosine strip puts control points a fraction of a
+        millimetre from the fin's root vortices, uncored;
+      * a fin root that followed the tip's camber line climbed 3 mm along
+        the chord, and its own straight trailing legs fell through the
+        control points of the strips below.
+    Uniform strips, a flat root, and a core across the junction sized to
+    the spread of the wing's tip vortices about it: a refinement must now
+    move the answer by little and in one direction, and the fin's slope
+    must sit between the isolated-plate and reflection-plane closed forms.
+
+    (It does NOT land on the flat-plate model's 1.5x calibrated slope: on
+    this curled tip the lattice finds the fins about 20% less effective in
+    yaw. That calibration was made for a fin standing on a wing tip, and
+    this one stands on a winglet.)"""
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    from washout.aero import dynamics as dyn
+    m = Mission.micro_fpv()
+    d = _json.loads((ASSETS.parent / "results" / "fleet" / "fpv_micro_fpv_s4"
+                     / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55,
+                                     spar_d_mm=m.spar_d_mm),
+                  size_structure=False)
+    plan, fins, t = ev.plan, ev.fins, ev.trim
+    assert fins is not None and t is not None
+    _, _, _, z_cg = dyn.inertia(plan, ev.mass, t.alpha_deg, 0.5, fins)
+    ref = np.array([t.x_cg_m, 0.0, z_cg])
+    d0 = VLM(plan).lateral_derivatives(t.alpha_deg, ref)
+    got = []
+    for nf, ncf in ((8, 4), (12, 6), (16, 8), (24, 8)):
+        v = VLM(plan, fins=fins, nf=nf, ncf=ncf)
+        dd = v.lateral_derivatives(t.alpha_deg, ref) - d0
+        got.append((dd[0, 0], dd[2, 0], v.solve(t.alpha_deg, t.x_cg_m).e_oswald))
+    cy = np.array([g[0] for g in got])
+    cn = np.array([g[1] for g in got])
+    e = np.array([g[2] for g in got])
+    assert np.all(np.diff(cy) > 0.0), cy          # monotone, shrinking
+    assert abs(cy[-1] - cy[-2]) < 0.05 * abs(cy[-1]), cy
+    assert abs(cn[-1] - cn[-2]) < 0.05 * abs(cn[-1]), cn
+    assert np.ptp(e) < 0.03, e
+    from washout.aero.fins import lift_slope
+    per_fin = cy[-1] * plan.area_m2 / (2.0 * fins.area_m2)
+    ar = fins.height_m ** 2 / fins.area_m2
+    assert -lift_slope(2.0 * ar) < per_fin < -lift_slope(ar), (per_fin, ar)
+
+
+def test_a_fin_on_a_wing_tip_sits_between_the_two_closed_forms():
+    """The flat-plate fin model took Helmbold's slope on 1.5x the
+    geometric aspect ratio -- the CALIBRATED part, because a wing tip is a
+    partial reflection plane for the fin root. The lattice now solves the
+    fin with the wing, so its side-force slope has to fall between the
+    two closed forms that bracket it: the isolated plate (AR) and the fin
+    on an infinite reflection plane (2 AR)."""
+    from washout.aero.fins import lift_slope
+    p = rect(6.0, cst.naca4("0012"))
+    ref = np.array([0.25, 0.0, 0.0])
+    d0 = VLM(p, ns=40, nc=6).lateral_derivatives(0.0, ref)
+    for h_over_b in (0.05, 0.10):
+        h = h_over_b * p.span_m
+        f = _fin_on(p, h, chord=0.3 * h)       # a fin, not an end plate
+        d1 = VLM(p, ns=40, nc=6, fins=f).lateral_derivatives(0.0, ref)
+        per_fin = (d1[0, 0] - d0[0, 0]) * p.area_m2 / (2.0 * f.area_m2)
+        ar = f.height_m ** 2 / f.area_m2
+        assert -lift_slope(2.0 * ar) < per_fin < -lift_slope(ar), (
+            f"h/b {h_over_b}: {per_fin:+.3f} outside "
+            f"[{-lift_slope(2 * ar):+.3f}, {-lift_slope(ar):+.3f}]")
+
+
 def test_dihedral_effect_matches_its_own_closed_form():
     """Cl_beta by strip integration, checked against the textbook limit.
 
@@ -707,24 +864,45 @@ def test_most_random_designs_are_one_fair_shape():
     assert fair / total >= 0.35, f"only {fair}/{total} random draws are fair"
 
 
-def test_printed_panels_break_at_control_stations_only():
-    """The faired loft emits ~35 dense stations; the printer must not care.
+def test_the_print_is_split_only_as_far_as_the_envelope_demands():
+    """A joint is not free, so there must not be one that is not needed.
 
-    panel_etas() splits the print at the planform's stations. Pointed at
-    the dense stations it would have turned four printed panels into
-    thirty-odd. Breaks belong to the stations a designer placed.
-    """
+    This used to assert that EVERY control station is a panel break. That
+    was stronger than the reason for it: the faired loft emits ~35 dense
+    stations and the printer must not care about them, which is a rule
+    about where a break may LAND, not about how many there must be. Read
+    the strong way it cut a 480 mm wing into four panels a side with
+    every one under a third of the envelope -- four parts, six bonded
+    faces and three steps in the skin, to describe curvature the loft had
+    already described.
+
+    The invariant that actually matters is minimality: no two adjacent
+    panels may be merged. Merging them must either overflow the Z
+    envelope or swallow the elevon's root station, which has to be a
+    joint because a trailing edge cannot vanish mid-panel."""
     from washout.geom import cst as _cst
-    from washout.search.design import Mission, N_DIM, build
+    from washout.search.design import Mission, N_DIM, build, unit_to_physical
 
     base = _cst.load_selig(ASSETS / "mh45.dat")
-    p = build(np.random.default_rng(1).random(N_DIM), Mission.trainer_v3(), base)
+    u = np.random.default_rng(1).random(N_DIM)
+    p = build(u, Mission.trainer_v3(), base)
+    phys = unit_to_physical(u)
+    s = vase.PrintSettings(elevon_chord=phys["elevon_chord"],
+                           elevon_eta=phys["elevon_eta"])
     assert len(p.stations) > 2 * len(p.controls)
-    spans = vase.panel_etas(p, vase.PrintSettings())
-    assert len(spans) <= 2 * len(p.controls)
-    breaks = {round(b, 9) for _, b in spans}
-    for e in p.controls[1:]:
-        assert round(e, 9) in breaks, f"control station {e:.3f} is not a panel break"
+    spans = vase.panel_etas(p, s)
+    limit = s.bed_z_mm - 8.0
+    hinge = phys["elevon_eta"]
+    for (a, _), (b0, b) in zip(spans, spans[1:]):
+        merged = vase.arc_length_mm(p, a, b)
+        swallows = a < hinge - 1e-9 < b
+        assert merged > limit or swallows, (
+            f"panels {a:.3f}-{b0:.3f} and {b0:.3f}-{b:.3f} merge to "
+            f"{merged:.0f} mm, inside the {limit:.0f} mm envelope, and do "
+            f"not straddle the hinge at {hinge:.3f}: that joint is not needed")
+    # and every panel still fits
+    for a, b in spans:
+        assert vase.arc_length_mm(p, a, b) <= limit + 1e-6
 
 
 def test_the_design_sheet_never_takes_the_export_down(tmp_path, monkeypatch):
@@ -767,3 +945,979 @@ def test_the_design_sheet_never_takes_the_export_down(tmp_path, monkeypatch):
     monkeypatch.setattr(report, "_figure", boom)
     out = report.figure(ev, s, tmp_path / "none.png", title="t")
     assert out == tmp_path / "none.png"          # returned, did not raise
+
+
+# ------------------------------------------ panels are slices of the loft
+
+def _fleet_design(name):
+    import json as _json
+    from washout.search.design import Mission, build, unit_to_physical
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    u = np.array(d["u"])
+    mission = getattr(Mission, name)()
+    plan = build(u, mission, cst.load_selig(ASSETS / "mh45.dat"))
+    p = unit_to_physical(u)
+    s = vase.PrintSettings(elevon_chord=p["elevon_chord"],
+                           elevon_eta=p["elevon_eta"])
+    return plan, s
+
+
+def _off_loft_mm(plan, stack, x_lo=0.02, x_hi=0.85, every=6):
+    """Largest distance from a printed skin vertex, put back where it
+    flies, to the loft's own section at that vertex's span station --
+    measured to the ANALYTIC surface on a grid in t = sqrt(x), which is
+    where CST is a polynomial and where the nose is resolved. The first
+    2% and the last 15% of chord are the nozzle's, not the loft's: the
+    nose and the trailing edge are thickened to a printable floor on
+    purpose."""
+    H = plan.half_span_m * 1000.0
+    worst = 0.0
+    n_up = (stack.contours.shape[1] + 1) // 2
+    for k in range(0, len(stack.z_mm), every):
+        c = stack.contours[k]
+        P = stack.to_flight(c[:, 0], c[:, 1], np.full(len(c), stack.z_mm[k]))
+        for i in range(0, len(c), 2):
+            x, y, z = P[i]
+            st = plan.at(float(np.clip(y / H, 0.0, 1.0)))
+            cm = st.chord_m * 1000.0
+            a = np.radians(-st.twist_deg)
+            rx = (x - st.x_le_m * 1000.0 - 0.25 * cm) / cm
+            rz = (z - st.z_le_m * 1000.0) / cm
+            u = rx * np.cos(a) + rz * np.sin(a) + 0.25
+            v = -rx * np.sin(a) + rz * np.cos(a)
+            if not x_lo <= u <= x_hi:
+                continue
+            t = np.clip(np.sqrt(u) + np.linspace(-0.06, 0.06, 2001), 0.0, 1.0)
+            ys = (st.airfoil.y_upper(t * t) if i < n_up
+                  else st.airfoil.y_lower(t * t))
+            worst = max(worst, float(np.hypot(t * t - u, ys - v).min()) * cm)
+    return worst
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "micro_fpv"])
+def test_a_layer_is_the_loft_cut_square_to_its_panel(name):
+    """Every printed panel is the loft, not a straightened copy of it.
+
+    `build_stack` used to stack the loft's `y = const` sections straight up
+    the print axis and never read `z_le`, so each panel printed straight
+    while the lattice scored a curve: micro_fpv's outer panel sat 9.0 mm
+    off the loft, and every tilted panel printed 1/cos(phi) too thick when
+    assembled (+13% on the trainer's tip panel). Each layer is now the
+    loft cut square to the panel's own axis, and every skin vertex, put
+    back where it flies, must lie on the loft's surface at its own span
+    station. 0.06 mm is under a sixth of a bead; the slice as built is
+    within 0.045 mm on the whole fleet."""
+    plan, s = _fleet_design(name)
+    for stack in vase.build_panels(plan, s, z_step_mm=2.0):
+        off = _off_loft_mm(plan, stack)
+        assert off < 0.06, f"{stack.name}: a printed vertex is {off:.3f} mm off the loft"
+
+
+def test_the_centre_body_meets_its_mirror_flat():
+    """The centre body's axis is horizontal, so its root face IS the
+    symmetry plane. Any tilt and the two halves meet in a V: open on one
+    side and interpenetrating on the other, which two printed parts
+    cannot do."""
+    plan, s = _fleet_design("micro_fpv")
+    p0 = vase.build_panels(plan, s, z_step_mm=2.0)[0]
+    assert p0.frame.phi_deg == 0.0
+    c = p0.contours[0]
+    P = p0.to_flight(c[:, 0], c[:, 1], np.zeros(len(c)))
+    assert np.abs(P[:, 1]).max() < 1e-6
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "micro_fpv"])
+def test_two_panels_never_share_material_at_a_joint(name):
+    """A joint between panels on different axes cannot be one plane. Hinged
+    about the chord line, the two parts would interpenetrate above it and
+    gape below; hinged about the joint section's top skin when the wing
+    turns up, every point of each lies on its own side and the joint opens
+    as a wedge on the lower skin instead -- glue, which the build sheet
+    sizes. Checked on the actual printed layers either side of every
+    joint, put back where they fly.
+
+    gen7's trainer found the hole in the pivot rule: with both joints on
+    their top points its first joint turned -0.3 degrees instead of +10,
+    and the fallback to a chord-line pivot put the 10 degrees back about
+    the chord line -- p0 and p1 shared 4.3 mm. That joint now sits at the
+    height where it does not turn, and the faces mate flat."""
+    plan, s = _fleet_design(name)
+    pans = vase.build_panels(plan, s, z_step_mm=1.0)
+    for inner, outer in zip(pans, pans[1:]):
+        f_in, f_out = inner.frame, outer.frame
+        q = np.array(f_out.origin_yz_mm)
+        a_in = np.array([f_in.cos, f_in.sin])
+        a_out = np.array([f_out.cos, f_out.sin])
+        c = outer.contours[0]
+        P = outer.to_flight(c[:, 0], c[:, 1], np.zeros(len(c)))[:, 1:]
+        into_inner = -((P - q) @ a_in).min()
+        c = inner.contours[-1]
+        P = inner.to_flight(c[:, 0], c[:, 1],
+                            np.full(len(c), inner.z_mm[-1]))[:, 1:]
+        into_outer = ((P - q) @ a_out).max()
+        assert into_inner < 0.05 and into_outer < 0.05, (
+            f"{inner.name}/{outer.name}: parts overlap by "
+            f"{max(into_inner, into_outer):.2f} mm")
+        if abs(f_out.kink_deg) > 1.0:
+            assert f_out.pivot in ("upper", "lower") and f_out.wedge_mm > 0.0
+
+
+def test_an_elevon_is_cut_in_its_wing_panels_frame():
+    """The elevon and the wing panel it came off must share a frame, layer
+    for layer, or their hinge faces are two different surfaces meeting at
+    the angle between two axes."""
+    from washout.printing import elevons
+    plan, s = _fleet_design("trainer_v3")
+    spans = vase.panel_etas(plan, s)
+    wing = vase.build_panels(plan, s, z_step_mm=2.0)
+    elv = elevons.build_elevons(plan, s, spans, 16.0, z_step_mm=2.0)
+    by_span = {(round(p.frame.eta0, 9), round(p.frame.eta1, 9)): p.frame for p in wing}
+    for e in elv:
+        assert e.frame == by_span[(round(e.frame.eta0, 9), round(e.frame.eta1, 9))]
+
+
+def test_every_joint_is_on_the_build_sheet():
+    """The angle each joint turns through, and the wedge it opens, are the
+    builder's to set and to fill. Before this nothing reported either:
+    a 17 degree kink on micro_fpv's only joint, and nowhere to read it."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro_fpv"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro_fpv(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert "## Joints" in text
+    wing = [p for p in ev.panels if p.role == "wing"]
+    for prev, p in zip(wing, wing[1:]):
+        row = next(line for line in text.splitlines()
+                   if line.startswith(f"| `{prev.name}` / `{p.name}`"))
+        assert f"{p.frame.kink_deg:+.1f} deg" in row
+        assert f"{p.frame.wedge_mm:.1f} mm" in row
+    m = build_sheet.manifest(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert all("placement" in part for part in m["half_wing_parts"]
+               if part["profile"] == "vase")
+
+
+def test_a_joint_that_does_not_turn_says_so():
+    """gen7's trainer has a joint placed where it does not turn. The
+    Joints table knew only skins and the chord line, so it would have told
+    the builder that joint hinges about the chord line -- the pivot that
+    put 4.3 mm of shared material into it."""
+    from washout import build_sheet
+    from washout.printing import frames
+    plan, s = _fleet_design("trainer_v3")
+    wing = vase.build_panels(plan, s, z_step_mm=2.0)
+    flat = [p for p in wing if p.frame.pivot == "flat"]
+    assert flat, "the tracked trainer is the design with a flat joint"
+    rows = frames.joint_report([p.frame for p in wing])
+    assert any("mate flat" in r for r in rows)
+    from washout.search.design import Mission, evaluate
+    import json as _json
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["trainer_v3"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.trainer_v3(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    for p in flat:
+        i = [q.name for q in ev.panels].index(p.name)
+        row = next(line for line in text.splitlines()
+                   if line.startswith(f"| `{ev.panels[i - 1].name}` / `{p.name}`"))
+        assert "mate flat" in row and "chord line" not in row, row
+
+
+# ------------------------------------------------- a spar is a straight tube
+
+def _inside_section(plan, eta, x_mm, z_mm):
+    """Independent of the fitter: is each flight (x, z) inside the placed
+    section at eta? Built from `Planform.at` and the CST surfaces alone."""
+    st = plan.at(float(eta))
+    c = st.chord_m * 1000.0
+    a = np.radians(-st.twist_deg)
+    u = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, 401)))
+    out = []
+    for v in (st.airfoil.y_upper(u), st.airfoil.y_lower(u)):
+        xs = st.x_le_m * 1000.0 + 0.25 * c + c * ((u - 0.25) * np.cos(a) - v * np.sin(a))
+        zs = st.z_le_m * 1000.0 + c * ((u - 0.25) * np.sin(a) + v * np.cos(a))
+        o = np.argsort(xs)
+        out.append((xs[o], zs[o]))
+    (xu, zu), (xl, zl) = out
+    x_mm, z_mm = np.asarray(x_mm), np.asarray(z_mm)
+    return ((x_mm > max(xu[0], xl[0])) & (x_mm < min(xu[-1], xl[-1]))
+            & (z_mm < np.interp(x_mm, xu, zu)) & (z_mm > np.interp(x_mm, xl, zl)))
+
+
+def _tube_ring(f, y, r, n=24):
+    """Points around a straight tube's section by the plane at span y: an
+    ellipse, because the tube crosses the plane at an angle."""
+    sx, sz = f.slope
+    x0, z0 = f.centre_mm(y)
+    m = float(np.hypot(sx, sz))
+    e1 = np.array([sx, sz]) / m if m > 1e-12 else np.array([1.0, 0.0])
+    e2 = np.array([-e1[1], e1[0]])
+    th = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    p = (np.cos(th)[:, None] * r * np.sqrt(1 + sx * sx + sz * sz) * e1
+         + np.sin(th)[:, None] * r * e2)
+    return x0 + p[:, 0], z0 + p[:, 1]
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "demon1", "micro", "micro_fpv"])
+def test_a_spar_is_a_straight_tube_inside_the_wing(name):
+    """The fit asked whether the section was deep enough at one chord
+    fraction, station by station, which let the tube bend with the sweep
+    and the dihedral: it claimed eta 0.76-1.00 where a straight tube
+    reaches 0.66-0.69, and the build sheet asked for one tube tip to tip
+    that left the skin at eta 0.25-0.43 on every aircraft.
+
+    Checked here without the fitter's own machinery: the straight tube,
+    with its fit clearance, is inside the section at 400 stations from
+    the root to its reach -- more than twice the fitter's resolution --
+    and would NOT be at a station just past where the fit stopped, so the
+    reach is the geometry's and not a cautious guess."""
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, s = _fleet_design(name)
+    mission = getattr(Mission, name)()
+    H = plan.half_span_m * 1000.0
+    for f in sp.fit_all(plan, mission.spars, 0.45,
+                        min_reach=mission.min_spar_reach_frac):
+        r = sp.fit_radius_mm(f.spec, 0.45)
+        for y in np.linspace(0.0, f.reach_y_mm, 400):
+            x, z = _tube_ring(f, y, r)
+            assert _inside_section(plan, y / H, x, z).all(), (
+                f"{name} {f.spec.name}: the straight tube leaves the wing at "
+                f"eta {y / H:.3f}, inside its claimed reach {f.reach_eta:.3f}")
+        if f.reach_eta < 0.97:
+            sx, sz = f.slope
+            lean = np.hypot(sx, sz)
+            beyond = (f.reach_y_mm + r * lean / np.sqrt(1 + lean * lean)
+                      + 2.0 * H / 160)
+            x, z = _tube_ring(f, beyond, r)
+            assert not _inside_section(plan, beyond / H, x, z).all(), (
+                f"{name} {f.spec.name}: the tube still fits past its reach")
+
+
+def test_the_old_fit_let_the_tube_bend():
+    """The finding, pinned so it cannot quietly come back. The trainer's LE
+    spar, asked the old question -- is there depth at 0.21c, station by
+    station -- 'reaches' the tip. The straight tube does not get past
+    seven tenths of the span."""
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("trainer_v3")
+    spec = Mission.trainer_v3().spars[0]
+    assert sp.reach_of(plan, 0.21, spec, 0.45) >= 0.95
+    f = sp.fit_all(plan, (spec,), 0.45)[0]
+    assert f.reach_eta <= 0.72 and not f.one_piece
+
+
+@pytest.mark.parametrize("name", ["trainer_v3", "demon1", "micro", "micro_fpv"])
+def test_every_fitted_tube_passes_the_print_bore(name):
+    """The fit works on the loft in the flight frame; the bore gate works on
+    the printed layers, at the tube's own centre, with the ellipse a tube
+    cuts in a tilted layer. The fit's clearance is the stricter of the two,
+    so a tube the fit seats must pass the gate -- and micro's did not, by
+    0.09 mm at its last layer, because a cut tube's end face is square to
+    its axis and on a 46 degree tube reaches 3.3 mm further out than the
+    axis does, into section no station had checked."""
+    from dataclasses import replace
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, s = _fleet_design(name)
+    mission = getattr(Mission, name)()
+    spans = vase.panel_etas(plan, s)
+    d = mission.spar_d_mm
+    fits = sp.fit_all(plan, mission.spars, 0.45, spans,
+                      min_reach=mission.min_spar_reach_frac)
+    lines = tuple((f.root_xz_mm[0], f.root_xz_mm[1], f.slope[0], f.slope[1],
+                   f.reach_y_mm, 0.5 * d + 0.225 + f.spec.clearance_mm, d)
+                  for f in fits)
+    s = replace(s, spar_d_mm=d, spar_lines=lines)
+    for pan in vase.build_panels(plan, s, z_step_mm=0.5):
+        v, z = vase.spar_fit(pan)
+        assert v >= d, f"{pan.name}: {v:.2f} mm of bore at z {z:.1f} for a {d:.0f} mm tube"
+
+
+def test_a_tube_is_weighed_where_its_mass_is():
+    """A straight tube swept 47 degrees has its mass well aft of its root
+    seat. Charged at the seat, as every tube was, micro_fpv's CG sat well
+    forward of where it is and its static margin read 0.132 where it is
+    0.09 -- inside its band where it is outside it."""
+    from washout import spars as sp
+    from washout import structure as st
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("micro_fpv")
+    m = Mission.micro_fpv()
+    f = sp.fit_all(plan, m.spars, 0.45, min_reach=m.min_spar_reach_frac)[0]
+    root_c = plan.stations[0].chord_m * 1000.0
+    (_, kg, x_frac), = st.spar_masses([f], 6.0, root_chord_mm=root_c)
+    assert x_frac * root_c == pytest.approx(f.centroid_x_mm())
+    assert f.centroid_x_mm() > f.root_xz_mm[0] + 50.0
+    tube = st.tube_for_od(6.0)
+    assert kg == pytest.approx(tube.mass_g(2.0 * f.reach_mm) * 1e-3)
+
+
+def test_tube_stiffness_stops_where_the_tube_does():
+    """The torsion model added every tube at every span station, so the
+    outer third of each wing was stiffened by carbon that ends at eta
+    0.66 -- and reversal, the binding aeroelastic limit on the fleet,
+    goes as the square root of that stiffness."""
+    from washout import aeroelastic as ael
+    from washout import spars as sp
+    from washout.search.design import Mission
+    plan, _ = _fleet_design("micro_fpv")
+    m = Mission.micro_fpv()
+    fits = sp.fit_all(plan, m.spars, 0.45, min_reach=m.min_spar_reach_frac)
+    assert ael.gj_spars_nmm2(fits, eta=0.5 * fits[0].reach_eta) > 0.0
+    assert ael.gj_spars_nmm2(fits, eta=min(fits[0].reach_eta + 0.05, 1.0)) == 0.0
+
+
+def test_the_build_sheet_asks_for_the_tube_that_exists():
+    """BUILD.md said 'each tube runs tip to tip through the centre body --
+    one length, not two meeting at the centreline' on a 48.7 degree swept
+    wing, where that tube leaves the skin a quarter of the way out. It now
+    says what the fit found: one tube a side and the V joiner's angles, or
+    one tube only when the line really is parallel to the span."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro_fpv"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro_fpv(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=6.0,
+                                     bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    bom = build_sheet.bom(ev, ev.panels + ev.elevons)
+    for f in ev.spar_fits:
+        if f.one_piece:
+            assert "tip to tip" in text
+        else:
+            assert "tip to tip through the centre body" not in text
+            assert f"V: {2 * f.sweep_deg:.0f} deg in plan" in text
+            assert "V joiner" in bom
+
+
+def test_an_untrimmed_design_keeps_what_it_knows():
+    """A design rejected at trim used to come back with its plan, its mass
+    and nothing else: no print settings, no spar fits, no mechanism, no
+    parts -- all computed, all thrown away. So exporting one, which is how
+    you find out WHY it will not fly, crashed on settings that were never
+    handed back, and every check of the parts silently skipped it.
+
+    micro's tracked design is the live example: weighed where its swept
+    tube's mass really is, it no longer trims. It must still carry its
+    parts, and its build sheet must say plainly that it does not trim."""
+    import json as _json
+    from washout import build_sheet
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index["micro"] / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), Mission.micro(),
+                  cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
+                                     bed_z_mm=250.0),
+                  want_panels=True, z_step_mm=2.0)
+    if ev.trim is not None:
+        pytest.skip("micro trims again -- re-searched; nothing left to pin here")
+    assert any("no trim angle" in r for r in ev.reasons)
+    assert ev.print_settings is not None and ev.panels
+    assert ev.spar_fits and ev.linkage is not None and ev.mass is not None
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings)
+    assert "does not trim" in text
+    assert "## Joints" in text and "## Spar cut list" in text
+
+
+# ------------------------------------------- the nose, and the chamfer corner
+
+def test_the_nose_is_round_not_a_flat():
+    """`thicken_for_nozzle` exists for the TRAILING edge, and it applied its
+    floor along the whole chord -- including the nose, where the vertical
+    thickness is zero by construction because the nose is round. So the
+    shared leading-edge vertex went to +0.5 mm and the next point below it
+    to -0.47 mm, 0.04 mm aft: every printed section had a 1 mm vertical
+    flat for a nose, and no smooth skin could be fitted through it without
+    a seam at the leading edge.
+
+    The floor now blends in over 0.35c-0.65c. The nose is the aerofoil's,
+    the trailing edge still carries its millimetre, and the wall gates no
+    longer mistake one bead turning round the nose for two walls: they
+    skip neighbours by distance along the loop, not only by index.
+
+    One gate got harder, and it is recorded rather than tuned: micro's
+    centre body overhangs 51.4 degrees at z = 14 mm, where its rounded
+    planform nose sweeps fastest, against 48.8 with the flat nose. The
+    flat was not more printable; it read better under a metric that
+    measures to the nearest wall."""
+    from washout.search.design import Mission, build
+    base = cst.load_selig(ASSETS / "mh45.dat")
+    plan, s = _fleet_design("micro_fpv")
+    for e in (0.0, 0.5, 0.9):
+        st = plan.at(e)
+        c = st.chord_m * 1000.0
+        raw = st.airfoil.coords(s.contour_points)
+        th = vase.thicken_for_nozzle(raw, c, s)
+        n = (len(raw) + 1) // 2
+        assert np.allclose(th[n - 3:n + 2], raw[n - 3:n + 2]), "the nose moved"
+        up, lo = th[:n][::-1], th[n - 1:]
+        assert (up[-1, 1] - lo[-1, 1]) * c >= s.min_te_mm - 1e-6, "the TE lost its floor"
+    for stack in vase.build_panels(plan, s, z_step_mm=2.0):
+        assert vase.check(stack).ok, stack.name
+
+
+def test_the_elevon_chamfer_corner_is_a_vertex_on_every_layer():
+    """The corner where the bevel meets the lower skin fell between two
+    cosine samples, so the printed contour cut it with a chord, and as it
+    moved along the span the turn hopped from one vertex to the next --
+    triangles twisted across it in the STL, and the CAD export, skinning
+    pieces that were not the same piece from one layer to the next,
+    wandered 3.8 mm between sections. It is a vertex now, at the same
+    index on every layer, and the whole turn happens there."""
+    from washout.printing import elevons as elv
+    plan, s = _fleet_design("trainer_v3")
+    spans = vase.panel_etas(plan, s)
+    for part in elv.build_elevons(plan, s, spans, 16.0, z_step_mm=2.0):
+        n = part.n_upper
+        corner = set()
+        for c in part.contours:
+            a = np.diff(c[n:], axis=0)
+            a /= np.linalg.norm(a, axis=1, keepdims=True)
+            turn = np.degrees(np.arccos(np.clip((a[:-1] * a[1:]).sum(1), -1, 1)))
+            corner.add(int(np.flatnonzero(turn >= 30.0)[-1]))
+        assert len(corner) == 1, (part.name, sorted(corner))
+
+
+def test_a_corner_between_two_samples_is_given_a_vertex_before_fitting():
+    """demon1's elevon has a second corner the chamfer fix does not place:
+    the nose floor meets the chamfer at 45 degrees between two grid
+    points, its turn split 28.5 + 28.2 on some layers and 45 + 12 on
+    others. Fitted across it, the chamfer's cubic folded back over the
+    nose flat and the root cap came out a self-intersecting face -- an
+    invalid solid in the gen7 export. Split at it without a vertex there,
+    the boundary hopped a grid point along the part and the surface missed
+    the held-out layers by 0.08 mm. `sharpen` inserts the true corner, the
+    meeting of the two straight runs, and keeps every printed point.
+
+    Here a floor and a 45-degree chamfer sampled so the corner falls
+    between two samples, each taking a quarter of the kink or more: the
+    inserted point is the exact intersection, the whole turn is then at
+    that one vertex, and the pieces split there."""
+    from washout.cad import bspline as bs
+    upper = np.array([[10.0, 1.0], [5.0, 2.0], [0.5, 2.0], [0.0, 2.0]])
+    n = len(upper)                            # loop[n - 1 : n + 1] is the nose flat
+    for off in (0.04, 0.08, 0.32):     # 35+10, 31+14 and 16+29 degrees
+        # floor along y = 1 to the corner at x = 1, then y = 2 - x
+        xs = np.arange(off, 6.0, 0.4)
+        lower = np.array([[x, min(1.0, 2.0 - x)] for x in xs])
+        loop = np.vstack([upper, [[0.0, 1.0]], lower, [[10.0, 0.0]]])
+        loop = np.column_stack([loop, np.zeros(len(loop))])
+        sharp = bs.sharpen(loop, n)
+        assert len(sharp) == len(loop) + 1, off
+        k = int(np.flatnonzero(np.all(np.isclose(sharp[:, :2], [1.0, 1.0]), axis=1))[0])
+        for p in loop:
+            assert any(np.array_equal(p, q) for q in sharp), "a printed point was dropped"
+        turns = bs._turns_deg(sharp[:, :2])   # turns[i] is at vertex i + 1
+        assert np.isclose(turns[k - 1], 45.0), off
+        assert turns[k - 2] < 1e-4 and turns[k] < 1e-4, off
+        b = bs.piece_bounds(sharp, n, every_corner=True)
+        assert (n, k) in b and any(q[0] == k for q in b), (off, b)
+
+
+# ------------------------------------------------- the joint wedge inserts
+
+
+def _fleet_eval(name, z_step_mm=2.0, folder=None):
+    """The TRACKED design for `name` -- or, with `folder`, that design. A
+    test about a particular aircraft must name it: the index moves every
+    generation, and a test pinned to "the tracked micro_fpv" silently
+    started checking gen9, then gen10, instead of the gen8 design it was
+    written about."""
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / (folder or index[name]) / "design.json").read_text(encoding="utf-8"))
+    m = getattr(Mission, name)()
+    return evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                    vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
+                    want_panels=True, z_step_mm=z_step_mm)
+
+
+def test_a_single_layer_is_sliced_like_one_in_a_stack():
+    """`slice_layers` takes its span rates as differences ACROSS the layers
+    it is given. Asked for one layer, the rates were zero: every point slid
+    along y alone, and the first joint insert's face sat 4 mm aft of the
+    loft on micro_fpv's swept wing. The loft-conformance gate never saw it
+    -- a chordwise slide along a nearly flat crest barely leaves the
+    surface -- so it is pinned directly: one layer sliced alone must be
+    that layer as the stack slices it."""
+    from washout.printing import frames as fr
+    from washout.printing.inserts import _plain_unit_loop
+    plan, s = _fleet_design("micro_fpv")
+    pans = vase.build_panels(plan, s, z_step_mm=1.0)
+    loop = _plain_unit_loop(s, False)
+    for p in pans:
+        z = np.arange(0.0, min(p.frame.length_mm, 20.0), 0.5)
+        stack, _ = fr.slice_layers(plan, p.frame, z, loop)
+        for k in (0, 7):
+            one, _ = fr.slice_layers(plan, p.frame, z[k:k + 1], loop)
+            assert np.abs(one[0] - stack[k]).max() < 0.01, (p.name, k)
+
+
+def test_a_turning_joint_is_filled_by_a_printed_insert():
+    """The wedge a turning joint leaves -- 6 mm open at micro_fpv's lower
+    skin, the loft that belongs to neither panel -- was "fill with glue"
+    on the build sheet, a gap in CAD, and never weighed. It is a part now,
+    and these are the claims it has to meet:
+
+      * its two big faces LIE ON the two panels' end planes, so the three
+        parts share faces;
+      * it is watertight;
+      * its volume is the loft's own, to 1%: the loft sliced at 200
+        planes between the two faces, each slice clipped to the far side
+        of the inner panel's tip plane, areas summed -- none of which
+        uses the insert's two-face construction, whose side is a band of
+        straight rulings between the faces. (tan(k) times the first
+        moment of face A about the pivot line was tried as the closed
+        form and is 5% out: it assumes the skin rotates about the pivot,
+        and the loft's local dihedral moves it in height between the
+        planes instead.) Compared bore-less and cut at 0.05 mm, so the
+        two describe the same wedge;
+      * it is never thicker than the frame's own wedge estimate, and not
+        much thinner (the insert stops at the hinge; the estimate spans
+        the whole section);
+      * it is charged, both sides, in the mass budget."""
+    from washout.printing.stl import manifold_report
+    ev = _fleet_eval("micro_fpv")
+    assert ev.inserts, "micro_fpv's joint turns 17 degrees and must carry an insert"
+    ins = ev.inserts[0]
+    outer = next(p for p in ev.panels if abs(p.frame.eta0 - ins.eta) < 1e-9)
+    inner = next(p for p in ev.panels if abs(p.frame.eta1 - ins.eta) < 1e-9)
+    fo, fi = outer.frame, inner.frame
+    na = np.array([0.0, fo.cos, fo.sin])
+    qa = np.array([0.0, *fo.origin_yz_mm])
+    nb = np.array([0.0, fi.cos, fi.sin])
+    qb = np.array([0.0, *fi.origin_yz_mm]) + fi.length_mm * nb
+    V = ins.flight_verts
+    on_a = np.abs((V - qa) @ na) < 1e-6
+    on_b = np.abs((V - qb) @ nb) < 1e-6
+    assert on_a.sum() >= len(V) // 2 - 1 and on_b.sum() >= len(V) // 2 - 1
+    assert (on_a | on_b).all(), "every vertex is on one face or the other"
+    assert manifold_report(ins.tris)["watertight"]
+
+    # independent: the loft sliced between the planes, each slice clipped
+    from dataclasses import replace as _replace
+    from washout.printing import frames as fr
+    from washout.printing.inserts import _plain_unit_loop, joint_inserts
+    s0 = _replace(ev.print_settings, spar_lines=())
+    bare = next(i for i in joint_inserts(ev.plan, s0, ev.panels, min_thickness_mm=0.05)
+                if i.joint == ins.joint)
+    loop = _plain_unit_loop(s0, s0.elevon_chord > 1e-6
+                            and ins.eta >= s0.elevon_eta - 1e-9)
+    ss = np.linspace(-(bare.max_gap_mm + 0.5), 0.0, 201)
+    layers, _ = fr.slice_layers(ev.plan, fo, ss, loop)
+    areas = []
+    for s_k, c in zip(ss, layers):
+        P = fo.to_flight(c[:, 0], c[:, 1], np.full(len(c), s_k))
+        beyond = (P - qb) @ nb                  # > 0: past the inner tip face
+        poly, pts2 = [], c
+        for i in range(len(c)):                 # Sutherland-Hodgman, one plane
+            j = (i + 1) % len(c)
+            a_in, b_in = beyond[i] > 0.0, beyond[j] > 0.0
+            if a_in:
+                poly.append(pts2[i])
+            if a_in != b_in:
+                t = beyond[i] / (beyond[i] - beyond[j])
+                poly.append(pts2[i] + t * (pts2[j] - pts2[i]))
+        if len(poly) >= 3:
+            q = np.array(poly)
+            areas.append(0.5 * abs(np.dot(q[:, 0], np.roll(q[:, 1], -1))
+                                   - np.dot(q[:, 1], np.roll(q[:, 0], -1))))
+        else:
+            areas.append(0.0)
+    sliced = float(np.trapezoid(areas, ss))
+    assert bare.volume_mm3 == pytest.approx(sliced, rel=0.01), (bare.volume_mm3, sliced)
+    assert ins.volume_mm3 < bare.volume_mm3     # the bore and the crest come out
+
+    assert ins.max_gap_mm <= fo.wedge_mm + 1e-6
+    assert ins.max_gap_mm >= 0.8 * fo.wedge_mm
+    item = next(i for i in ev.mass.items if i.name == f"joint insert {ins.joint}")
+    assert item.mass_kg == pytest.approx(2.0 * ins.mass_g(0.55) / 1000.0, rel=1e-9)
+    assert item.y_m == pytest.approx(ins.eta * ev.plan.half_span_m, abs=0.01)
+
+
+def test_a_joint_that_mates_flat_gets_no_insert():
+    """gen7's trainer: its first joint does not turn (the faces mate flat)
+    and its second turns 22 degrees. One insert, at the second."""
+    ev = _fleet_eval("trainer_v3")
+    wing = [p for p in ev.panels if p.role == "wing"]
+    flat = [j for j, p in enumerate(wing[1:], start=1) if p.frame.pivot == "flat"]
+    assert flat and all(i.joint not in flat for i in ev.inserts)
+    turning = [j for j, p in enumerate(wing[1:], start=1)
+               if p.frame.pivot in ("upper", "lower")]
+    assert sorted(i.joint for i in ev.inserts) == turning
+    for i in ev.inserts:
+        chk = vase.check_insert(i, ev.print_settings)
+        assert chk.ok, chk.report()
+
+
+def test_a_tube_against_the_skin_notches_the_insert_or_fills_it():
+    """The spars are SEATED against a skin, so where a joint's wedge is
+    thin the tube's bore reaches the insert's outline -- and a closed hole
+    one sliver from the edge is not printable. The first insert gated that
+    as a failed bore and rejected every design of the flatter-winged gen8
+    family with it. Now:
+      * where the tube leaves a neck of two beads, the outline is NOTCHED
+        round it: a C-shaped channel, the outline area less exactly the
+        part of the (grown) disc inside it;
+      * where it severs the wedge, the joint is a declared glue fill,
+        charged by weight and not gated for print.
+    The notch is checked on a shape with a known answer: a 40 x 10
+    rectangle (open along its top edge, the crest cut) and a disc of
+    radius 3 centred 1 mm inside its bottom edge."""
+    from washout.printing.inserts import _notch_one, _points_in_polygon
+    rect = np.array([[40.0, 10.0], [40.0, 0.0], [0.0, 0.0], [0.0, 10.0]])
+    # open arc: from the top right, down, along the bottom, up to top left
+    open_arc = np.vstack([np.linspace(rect[0], rect[1], 11)[:-1],
+                          np.linspace(rect[1], rect[2], 41)[:-1],
+                          np.linspace(rect[2], rect[3], 11)])
+    th = np.linspace(0.0, 2 * np.pi, 400, endpoint=False)
+    hole = np.stack([20.0 + 3.0 * np.cos(th), 1.0 + 3.0 * np.sin(th)], 1)
+    res = _notch_one(open_arc, hole, grow=0.0)
+    assert res is not None
+    pre, arc, post, c, r = res
+    new = np.vstack([pre, arc[1:-1], post])
+    area = 0.5 * abs(np.dot(new[:, 0], np.roll(new[:, 1], -1))
+                     - np.dot(new[:, 1], np.roll(new[:, 0], -1)))
+    # the disc's part inside the rectangle: all of it above y = 0
+    d = 1.0                                        # centre above the edge
+    seg = r * r * np.arccos(-d / r) + d * np.sqrt(r * r - d * d)
+    assert area == pytest.approx(400.0 - seg, rel=2e-3)
+    # the channel runs INSIDE the part, round the tube's far side
+    assert arc[1:-1, 1].max() == pytest.approx(1.0 + 3.0, abs=0.05)
+    assert _points_in_polygon(np.array([[20.0, 4.5]]), new)[0]
+    assert not _points_in_polygon(np.array([[20.0, 2.0]]), new)[0]
+
+    # and a wedge the tube severs is filled, not printed
+    import json as _json
+    from washout.search.design import Mission, evaluate
+    m = Mission.micro_fpv_winglet()
+    d = _json.loads((ASSETS.parent / "results" / "fleet" / "fpv_micro_fpv_s4"
+                     / "design.json").read_text(encoding="utf-8"))
+    ev = evaluate(np.array(d["u"]), m, cst.load_selig(ASSETS / "mh45.dat"),
+                  vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=m.spar_d_mm),
+                  z_step_mm=2.0, size_structure=False)
+    ins = ev.inserts[0]
+    assert ins.glue_fill
+    assert vase.check_insert(ins, ev.print_settings).ok
+    item = next(i for i in ev.mass.items if i.name == f"joint fill {ins.joint}")
+    assert item.mass_kg == pytest.approx(2.0 * ins.fill_g() / 1000.0)
+    assert not any("insert" in r for r in ev.reasons)
+
+
+# ------------------------------------- the elevon in the lattice, and the stall
+
+
+@pytest.mark.parametrize("ef", [0.165, 0.25])
+def test_an_elevon_in_the_lattice_converges_to_thin_aerofoil_theory(ef):
+    """A deflection is one more right-hand side: the normals aft of the
+    hinge turned about it. In the 2D limit dCL/ddelta over dCL/dalpha must
+    approach the closed-form flap effectiveness tau = 1 - (th - sin th)/pi
+    (Glauert), and approach it MONOTONICALLY as the chord is refined --
+    the hinge is a log singularity in the loading, so the discrete answer
+    comes from below. At nc 8, the search's lattice, it is 8-10% low; the
+    minimum speed it feeds moves 0.4% from nc 8 to nc 32 (next test)."""
+    from washout.geom.cst import flap_effectiveness
+    tau = flap_effectiveness(ef)
+    ratios = []
+    for nc in (8, 16, 32):
+        v = VLM(rect(1000.0, cst.naca4("0012")), ns=40, nc=nc, hinge_xc=1.0 - ef)
+        dn = v.elevon_dn(0.0, ef)
+        c0, ca = v.solve(0.0, 0.0).CL, v.solve(4.0, 0.0).CL
+        cd = v.solve(0.0, 0.0, 4.0, dn).CL
+        ratios.append((cd - c0) / (ca - c0))
+    assert ratios[0] < ratios[1] < ratios[2] < tau
+    assert ratios[2] == pytest.approx(tau, rel=0.03)
+
+
+def test_an_elevon_deflection_is_symmetric_and_lifts_trailing_edge_down():
+    af = cst.naca4("0012")
+    plan = demo_bwb(af)
+    v = VLM(plan, ns=24, nc=8)
+    dn = v.elevon_dn(0.4, 0.2)
+    p0, p1 = v.solve(3.0, 0.1), v.solve(3.0, 0.1, 5.0, dn)
+    assert p1.CL > p0.CL                     # TE down adds lift
+    assert p1.Cm < p0.Cm                     # ...and pitches the nose down
+    n = len(v.lat.y_strip) // 2
+    dcl = p1.cl_local - p0.cl_local
+    assert np.allclose(dcl[:n], dcl[n:2 * n], atol=1e-10)   # port = starboard
+    eta = np.abs(v.lat.y_strip) / plan.half_span_m
+    assert dcl[eta > 0.45].min() > dcl[eta < 0.2].max()     # it is ON the elevon
+
+
+def test_the_stall_starts_where_the_textbook_says_it_does():
+    """Critical-section method against the classical stall patterns of
+    untwisted wings: a rectangular wing loads its root hardest and stalls
+    there first; a sharply tapered one stalls near the tip; washout on the
+    same tapered wing moves the start inboard. And no wing's CL_max can
+    exceed the section cl_max it is built from.
+
+    (An elliptic wing, uniform cl in closed form, was the first choice and
+    is not usable: the lattice cannot resolve a chord that goes to zero,
+    and its last strip reads 25% high however the planform is sampled.
+    Every design here has a finite tip chord.)"""
+    from washout.aero.performance import slow_flight
+    af = cst.naca4("0012")
+
+    def tapered(taper, twist_tip):
+        return planform.Planform(3.0, (
+            planform.Station(0.0, 1.0, 0.0, 0.0, 0.0, af),
+            planform.Station(1.0, taper, 0.25 * (1 - taper), 0.0, twist_tip, af)), "t")
+
+    got = {}
+    for name, plan in (("rect", rect(6.0, af)), ("pointed", tapered(0.2, 0.0)),
+                       ("washed", tapered(0.2, -6.0))):
+        v = VLM(plan, ns=40, nc=6)
+        no_elevon = np.zeros_like(v.lat.normal)
+        got[name] = slow_flight(v, 0.25, 6.0, no_elevon, 1.0, 1.0, 12.0, 1.0)
+        assert got[name].limit == "stall"
+        assert got[name].cl_max < 1.0
+    assert got["rect"].eta_critical < 0.1
+    assert got["pointed"].eta_critical > 0.6
+    assert got["washed"].eta_critical < got["pointed"].eta_critical - 0.2
+
+
+def test_the_minimum_speed_does_not_hang_on_the_chordwise_lattice():
+    """On the micro_fpv winner the minimum speed moves under 1% from the
+    search's nc 8 to nc 32. That is a statement about THIS wing: on the
+    demo BWB it moves 3%, most of it the base lattice's own trim angle
+    (1.5 deg at nc 8, 2.8 at nc 32 -- the reflex camber resolving),
+    which every tier-0 number already carries."""
+    from washout.aero.performance import slow_flight
+    ev = _fleet_eval("micro_fpv")
+    p = _fleet_physical("micro_fpv")
+    got = []
+    for nc in (8, 32):
+        v = VLM(ev.plan, ns=32, nc=nc, fins=ev.fins)
+        a = v.trim_alpha(ev.mass.x_cg_m, bounds=(-10.0, 18.0))
+        dn = v.elevon_dn(p["elevon_eta"], p["elevon_chord"])
+        got.append(slow_flight(v, ev.mass.x_cg_m, a, dn, p["elevon_eta"], 0.85,
+                               12.0, ev.mass.total_kg).v_min_ms)
+    assert got[0] == pytest.approx(got[1], rel=0.01)
+
+
+def _fleet_physical(name):
+    import json as _json
+    from washout.search.design import unit_to_physical
+    root = ASSETS.parent / "results" / "fleet"
+    index = _json.loads((root / "index.json").read_text(encoding="utf-8"))
+    d = _json.loads((root / index[name] / "design.json").read_text(encoding="utf-8"))
+    return unit_to_physical(np.array(d["u"]))
+
+
+def test_the_micro_fpv_stall_starts_behind_its_cg():
+    """Found 2026-09-23, pinned so the finding cannot be argued away.
+
+    Every micro_fpv design through gen8 passed the tip-stall gate -- its
+    outer 20% works at under 88% of the peak cl -- and every one still
+    starts to stall at mid-span, about 0.18 MAC BEHIND the CG, because
+    the whole outer wing is swept aft of it. Lift lost there pitches the
+    nose up, into a deeper stall: the swept wing's pitch-up, and the
+    opposite of what a beginner's aircraft must do. The flat stall speed
+    (every section at cl_max at once, nothing spent on trim) also called
+    this wing 6.40 m/s; trimmed, it was 7.38 -- and 7.29 once the rib
+    truss stopped running through its pack and servos (2026-09-24), the
+    webs that could never have been built round them no longer weighed."""
+    ev = _fleet_eval("micro_fpv", folder="gen8_micro_fpv_v132")
+    assert ev.slow is not None and ev.slow.limit == "stall"
+    assert 0.35 < ev.slow.eta_critical < 0.6
+    assert ev.slow.v_min_ms == pytest.approx(7.29, abs=0.05)
+    assert any("pitches UP at the stall" in r for r in ev.reasons)
+
+
+def test_the_motor_mount_is_built_for_the_prop_the_design_chose():
+    """The search scores prop clearance with the design vector's own
+    propeller; the export built the mount from the MISSION's default
+    powertrain. On gen9's micro_fpv that was a 5.04 in disc the search
+    never chose, and the build sheet failed a clearance the search had
+    passed (9.83 mm against 10). The mount must see the scored prop, and
+    its clearance must be the score's, to a tenth of a millimetre."""
+    from washout.printing import parts as pm
+    ev = _fleet_eval("micro_fpv")
+    p = _fleet_physical("micro_fpv")
+    assert ev.powertrain.prop.diameter_in == pytest.approx(p["prop_diam_in"])
+    _, gates = pm.mount_for(ev.plan, ev.print_settings, ev.powertrain, "m")
+    gap = next(g for g in gates if g.name == "prop to trailing edge").value
+    # Not to the hundredth: the mount's web sits against the PRINTED
+    # trailing edge (thickened for the nozzle), the score measures from the
+    # lofted one. On gen10 they are 0.045 mm apart. The bug this pins was
+    # a different propeller -- millimetres, not hundredths.
+    assert gap == pytest.approx(pm.prop_clearance_mm(ev.plan, p["prop_diam_in"]), abs=0.1)
+
+
+def test_the_balance_window_stops_at_the_stall_onset():
+    """Found 2026-09-24, writing the flight-test card. The stall-onset gate
+    compares where the first section stalls with where the CG is, so it is
+    passed by an AFT CG, not a forward one: on gen10's micro_fpv the onset
+    is 6.6 mm ahead of the CG, and balancing 7 mm nose-heavy -- which is
+    what the results README advised -- puts it behind, into a stall that
+    pitches up. The build sheet printed only the static-margin window
+    (120.7-144.5 mm), which contains that mistake. Its window now stops
+    at the onset, and a CG just forward of it fails the gate."""
+    from washout import build_sheet
+    ev = _fleet_eval("micro_fpv")
+    lo, hi, why = build_sheet.balance_window_mm(ev)
+    sm_lo, sm_hi = build_sheet.cg_window_mm(ev)
+    onset = build_sheet.stall_onset_x_mm(ev)
+    assert why == "stall onset" and lo == pytest.approx(onset)
+    assert sm_lo < lo < ev.mass.x_cg_m * 1000.0 <= hi == pytest.approx(sm_hi)
+    from washout.search.design import Mission
+    card = build_sheet.flight_test(ev, Mission.micro_fpv())
+    assert "Do not balance nose-heavy" in card and f"{lo:.1f} mm" in card
+    # predicted at the balance TARGET, the middle of the window
+    tgt = build_sheet.balance_target_mm(ev)
+    assert f"Balance at **{tgt:.1f} mm**" in card
+
+
+def test_a_root_hatch_is_charged_as_the_exact_twist_integral_says():
+    """The battery hatch opens the torsion box over |y| < f L at the root.
+    Under a torque t per unit span, the section at y carries t (L - y), so
+    the tip twist is t * integral (L - y) / GJ(y) dy. For a uniform GJ0
+    with GJ1 over the first f L that is exactly
+
+        1/GJ_eq = 1/GJ0 + (1/GJ1 - 1/GJ0) (2 f - f^2)
+
+    `hatch_gj_nmm2` uses 2 f -- the root weighted twice its span fraction,
+    dropping the f^2 -- which is never less compliant than the exact
+    answer, and within f^2 of it. Zero hatch must return the closed value
+    exactly, and a bigger hatch must never be stiffer."""
+    from washout import aeroelastic as ae
+    plan = demo_bwb(cst.load_selig(ASSETS / "mh45.dat"))
+    gj0 = 3.0e6
+    assert ae.hatch_gj_nmm2(plan, [], 0.45, gj0, 0.0) == gj0
+    prev = gj0
+    for f in (0.02, 0.05, 0.1):
+        got = ae.hatch_gj_nmm2(plan, [], 0.45, gj0, f)
+        area, per, _ = ae.cell_properties(plan, 0.5 * f, 0.45)
+        closed = ae.gj_closed_nmm2(area, per, 0.45)
+        opened = ae.gj_open_nmm2(per, 0.45)
+        exact = 1.0 / (1.0 / gj0 + (1.0 / opened - 1.0 / closed) * (2 * f - f * f))
+        assert got <= exact                   # conservative
+        assert got == pytest.approx(exact, rel=f)
+        assert got < prev
+        prev = got
+
+
+def test_the_battery_hatch_fits_the_pack_and_passes_its_stiffness_gate():
+    """micro_fpv's battery is loaded through a hand-cut hatch (2026-09-24):
+    the printer cannot leave an opening, and a pack sealed inside a foamed
+    PLA shell cannot be charged or changed. The hatch must clear the
+    seated pack's footprint on every side, and the torsion box it opens
+    must still clear the aeroelastic margin."""
+    from washout import build_sheet
+    from washout.search.design import HATCH_MARGIN_MM, Mission
+    ev = _fleet_eval("micro_fpv")
+    h = build_sheet.hatch_template(ev)
+    pack = ev.bays[0]
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    assert h["x0"] == pytest.approx(pack.x0 * root_c - HATCH_MARGIN_MM)
+    assert h["x1"] - h["x0"] >= 55.0 + 2 * HATCH_MARGIN_MM - 1e-6
+    assert 2 * h["y"] >= 30.0 + 2 * HATCH_MARGIN_MM - 1e-6
+    a = ev.aeroelastic
+    assert a.hatch_eta > 0 and a.gj_hatch_nmm2 < a.gj_nmm2
+    assert a.margin_hatch >= Mission.micro_fpv().min_aeroelastic_margin
+    text = build_sheet.render(ev, ev.panels + ev.elevons, ev.print_settings,
+                              Mission.micro_fpv())
+    assert "Battery hatch" in text and "PASS" in text
+
+
+def test_no_printed_wall_runs_through_the_payload():
+    """Found 2026-09-24, building the full CAD. When the bay cutter was
+    removed (2026-09-21) the ribs' only exclusions left were the spar
+    corridors, and every design from gen7 to gen10 printed diagonal webs
+    through its battery and its servos: on gen10, 2,624 sampled points of
+    web inside the pack's box and 637 inside the servos'. The boxes
+    still gated, so the searches called them feasible.
+
+    Checked the way the first check was NOT: along every segment of every
+    sampled layer, not at the contour's vertices -- a web is two floor
+    vertices and two long straight legs, and a check of vertices only
+    reported a web through the battery as clear.
+
+    Any printed wall, not only a web: the first version of this test found
+    gen9's servo box reaching 2.6 mm through the outer panel's HINGE wall,
+    the cut face the elevon hinges from, which nothing checked either --
+    the payload fit used the whole aerofoil even where the wing ends at the
+    hinge. The seat solver now takes the hinge as the section's aft end
+    (`_box_outside_mm` with the hinge), so gen9's servos are re-seated
+    forward of it, and a seat that cannot be is gated."""
+    from washout.geom import interior as it
+    from washout.search.design import _box_outside_mm, hinge_limit, unit_to_physical
+    gen9 = _fleet_eval("micro_fpv", folder="gen9_micro_fpv_v144")
+    p9 = unit_to_physical(np.array(json.loads((ASSETS.parent / "results" / "fleet"
+        / "gen9_micro_fpv_v144" / "design.json").read_text())["u"]))
+    servo = next(v for v in gen9.bays if v.name == "servos")
+    assert _box_outside_mm(gen9.plan, servo, hinge=hinge_limit(p9, 0.45)) == 0.0
+    assert not any("pokes" in r for r in gen9.reasons), gen9.reasons
+    ev = _fleet_eval("micro_fpv")
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    half = ev.plan.half_span_m * 1000.0
+    for p in ev.panels:
+        f = p.frame
+        phi = np.radians(f.phi_deg)
+        y0, z0 = f.origin_yz_mm
+        ox, oy = p.origin_mm
+        for k in range(0, len(p.z_mm), 3):
+            C = p.contours[k]
+            X, Yp, s = C[:, 0] + ox, C[:, 1] + oy, p.z_mm[k]
+            fy = y0 + s * np.cos(phi) - Yp * np.sin(phi)
+            fz = z0 + s * np.sin(phi) + Yp * np.cos(phi)
+            ym = float(np.mean(fy))
+            P = np.stack([X, fz], 1)
+            Q = np.roll(P, -1, 0)
+            t = np.linspace(0.0, 1.0, 12, endpoint=False)[None, :, None]
+            D = (P[:, None, :] + t * (Q - P)[:, None, :]).reshape(-1, 2)
+            for b in ev.bays:
+                if not (b.eta0 * half <= ym <= b.eta1 * half):
+                    continue
+                inx = (D[:, 0] > b.x0 * root_c) & (D[:, 0] < b.x1 * root_c)
+                if not inx.any():
+                    continue
+                zu = np.array([it.skin_z_mm(ev.plan, ym / half, x, it.UPPER)
+                               for x in D[inx, 0]])
+                top = zu - b.offset_mm
+                bot = top - b.height_mm
+                z_in = D[inx, 1]
+                assert not np.any((z_in > bot + 0.3) & (z_in < top - 0.3)), (
+                    f"{p.name} layer {k}: a web inside the {b.name} box")
+
+
+def test_an_infeasible_population_is_not_converged():
+    """scipy's differential evolution stops when std(energies) <= atol +
+    tol * |mean(energies)|. With tol = 0.01 and infeasible designs scored
+    at about -1000, a population with NOTHING feasible and penalties
+    still falling was 'converged' -- gen8 to gen11 stopped searches that
+    way, gen11's best 0.4 degrees of overhang from feasible. Pinned on the
+    rule itself: such a population must not stop, and a feasible one
+    agreeing to under a millimetre per second must."""
+    from washout.search.optimize import DE_ATOL, DE_TOL
+
+    def converged(e):
+        e = np.asarray(e, dtype=float)
+        return np.std(e) <= DE_ATOL + DE_TOL * abs(np.mean(e))
+
+    assert not converged([1000.06, 1000.5, 1000.9, 1002.1, 1003.0])
+    assert not converged([1000.06, 1000.07, 1000.08])
+    assert converged([7.6121, 7.6122, 7.6120, 7.6121])

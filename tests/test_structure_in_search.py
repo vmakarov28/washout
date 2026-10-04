@@ -177,7 +177,12 @@ def test_each_spar_is_weighed_at_the_station_it_was_fitted_to():
     The flat item sat at 0.30c whatever the fit solved for. On the trainer
     the LE and TE corridors come out 0.21c and 0.54c -- 80 mm apart on a
     244 mm root chord -- and that is a real CG difference, not a rounding
-    one."""
+    one.
+
+    And the station is the middle of the TUBE, not its root seat: a
+    straight tube swept 35 degrees has its mass half its length aft of
+    where it starts. Weighed at the seat, micro_fpv's static margin read
+    0.132 where it is 0.09."""
     m = Mission.trainer_v3()
     u, _, base, settings = _trimmed(m)
     ev = evaluate(u, m, base, settings)
@@ -186,7 +191,9 @@ def test_each_spar_is_weighed_at_the_station_it_was_fitted_to():
     by_name = {i.name: i for i in ev.mass.items}
     for f in ev.spar_fits:
         item = by_name[f"spar {f.spec.name}"]
-        assert item.x_m == pytest.approx(f.x_frac * root_c, rel=1e-12)
+        assert item.x_m == pytest.approx(f.centroid_x_mm() / 1000.0, rel=1e-12)
+        if not f.one_piece:
+            assert item.x_m > f.x_frac * root_c
 
 
 def test_the_gen5_trainer_does_not_survive_its_own_spar():
@@ -194,9 +201,27 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
 
     gen5's trainer was logged at 331 g and 25.7 g/dm2, inside its
     26 g/dm2 wing-loading gate. Weighing the two 8 mm tubes it actually
-    carries puts it at ~355 g and ~27.5 g/dm2, outside it. This test
-    exists so that the mass can never quietly drift back down: the number
-    it pins is the one a builder would put on a scale."""
+    carries put it at ~355 g, outside it. It went to ~361 g when the skin
+    stopped being cut open for the payload bays, and to ~350 g when the
+    tubes became straight (ROADMAP-CAD.md section 0.1): the fit had been
+    charging two tubes that bent all the way to eta 1.00 and 0.76, and a
+    straight tube a side stops at 0.68 and 0.58. It went to ~355 g when
+    the wedges its two turning joints leave were weighed (2026-09-23):
+    4.5 g of glue fill at the first, where the spar severs a thin wedge,
+    and a 1.1 g printed insert at the second. It went to ~334 g
+    (2026-09-24) when the rib truss stopped running through the payload
+    bays: since the bay cutter was removed nothing kept the webs out of
+    the pack and the electronics, and 21 g of truss that could never be
+    built round a battery was being weighed. Every move is the aircraft
+    changing, not an estimate drifting.
+
+    At 334 g its wing loading is 25.9 g/dm2 -- INSIDE the 26 gate by
+    0.1, the gate this test was first written about. It is still not a
+    feasible aircraft: its centre body has no chord left for a truss
+    once the payload is kept clear, and seven other gates miss.
+
+    This test exists so the mass can never quietly drift back down. The
+    number it pins is the one a builder would put on a scale."""
     root = Path(__file__).resolve().parent.parent
     d = json.loads((root / "results" / "fleet" / "gen5_trainer_v3_v101"
                     / "design.json").read_text())
@@ -206,10 +231,7 @@ def test_the_gen5_trainer_does_not_survive_its_own_spar():
                                   bed_z_mm=250.0)
     ev = evaluate(np.array(d["u"]), m, base, settings)
 
-    assert ev.mass_kg * 1000 == pytest.approx(355.0, abs=4.0), (
-        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~355")
-    loading = ev.mass_kg * 1000.0 / (ev.plan.area_m2 * 100.0)
-    assert loading > m.max_wing_loading_gdm2, (
-        f"wing loading {loading:.1f} should now miss "
-        f"{m.max_wing_loading_gdm2:.0f} g/dm2")
-    assert not ev.ok and any("wing loading" in r for r in ev.reasons)
+    assert ev.mass_kg * 1000 == pytest.approx(334.0, abs=4.0), (
+        f"{ev.mass_kg*1000:.0f} g; logged 331, real ~334")
+    assert not ev.ok
+    assert any("carries no rib truss" in r for r in ev.reasons), ev.reasons

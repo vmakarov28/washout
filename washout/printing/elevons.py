@@ -52,7 +52,8 @@ from dataclasses import replace
 
 import numpy as np
 
-from .vase import LayerStack, PrintSettings, arc_length_mm, thicken_for_nozzle
+from .vase import (LayerStack, PrintSettings,
+                   thicken_for_nozzle)
 
 
 def hinge_x(settings: PrintSettings) -> float:
@@ -119,8 +120,36 @@ def elevon_loop(loop_unit: np.ndarray, x_hinge: float, chord_mm: float,
     xs_old = upper[:, 0]
 
     x0 = x_hinge + gap_mm / max(chord_mm, 1e-9)
-    t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n)))
-    xs = x0 + (1.0 - x0) * t
+    tb = max(np.tan(np.radians(chamfer_deg)), 1e-3)
+    y_axis = float(np.interp(x0, xs_old, upper[:, 1]))
+
+    # A VERTEX ON THE CHAMFER'S CORNER, at the same index on every layer.
+    # The corner where the bevel meets the lower skin used to fall between
+    # two cosine samples, so the printed contour cut it with a chord, and
+    # as it moved along the span the turn hopped from one vertex to the
+    # next -- the STL's triangles twisted across it and the CAD export,
+    # skinning pieces that were not the same piece from layer to layer,
+    # wandered 3.8 mm between sections. So the chord stations are two
+    # cosine runs, nose to corner and corner to trailing edge, meeting
+    # exactly at the corner. Upper and lower still share every station,
+    # which the thickness gate's pairing needs.
+    xf = np.linspace(x0, 1.0, 2001)
+    gap_f = (y_axis - (xf - x0) / tb) - np.interp(xf, xs_old, lower[:, 1])
+    x_corner = None
+    below = np.flatnonzero(gap_f <= 0.0)
+    if below.size and below[0] > 0:
+        i = int(below[0])
+        g0, g1 = gap_f[i - 1], gap_f[i]
+        x_corner = float(xf[i - 1] + (xf[i] - xf[i - 1]) * g0 / (g0 - g1))
+    if x_corner is not None and x_corner < x0 + 0.9 * (1.0 - x0):
+        n_a = max(6, n // 6)
+        ta = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_a)))
+        tb_ = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n - n_a + 1)))[1:]
+        xs = np.concatenate([x0 + (x_corner - x0) * ta,
+                             x_corner + (1.0 - x_corner) * tb_])
+    else:
+        t = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n)))
+        xs = x0 + (1.0 - x0) * t
     up = np.stack([xs, np.interp(xs, xs_old, upper[:, 1])], 1)
     lo = np.stack([xs, np.interp(xs, xs_old, lower[:, 1])], 1)
 
@@ -144,8 +173,6 @@ def elevon_loop(loop_unit: np.ndarray, x_hinge: float, chord_mm: float,
     # thickness and the bevel runs aft from there: that residual corner is
     # only 1 mm deep, so it swings 1 mm * sin(beta) -- under 0.3 mm --
     # which the hinge gap covers.
-    y_axis = float(up[0, 1])
-    tb = max(np.tan(np.radians(chamfer_deg)), 1e-3)
     y_floor = y_axis - (xs - x0) / tb
     t_min = settings_min_te_frac(chord_mm)
     lo[:, 1] = np.minimum(np.maximum(lo[:, 1], y_floor), up[:, 1] - t_min)
@@ -167,42 +194,44 @@ def nose_swing_mm(depth_mm: float, deflect_deg: float) -> float:
 
 def build_elevon(plan, settings: PrintSettings, eta0: float, eta1: float,
                  name: str, chamfer_deg: float,
-                 z_step_mm: float | None = None) -> LayerStack:
-    """One elevon panel, printed root-down like the wing it came off."""
-    tip, root = plan.at(eta1), plan.at(eta0)
-    dy = (eta1 - eta0) * plan.half_span_m
-    dz = tip.z_le_m - root.z_le_m
-    panel_len_mm = float(np.hypot(dy, dz)) * 1000.0
+                 z_step_mm: float | None = None, frame=None) -> LayerStack:
+    """One elevon panel, printed root-down like the wing it came off.
+
+    Cut in the SAME frame as that wing panel, so every layer of the two
+    parts lies in one plane and the hinge faces are one surface: an elevon
+    sliced square to its own axis would meet its wing at the angle between
+    them.
+
+    Nothing is cut into it. The horn's socket used to be, and it was a
+    pocket in the thin tail where there was least section to hold it;
+    the horn is part of the contour now."""
+    from . import frames as fr
+    if frame is None:
+        frame = fr.standalone(plan, eta0, eta1, settings)
+    panel_len_mm = float(frame.length_mm)
 
     step = z_step_mm or settings.layer_h_mm
     n_layers = max(int(round(panel_len_mm / step)), 2)
     z = np.arange(n_layers) * step
     z = z[z <= panel_len_mm + 1e-9]
-    eta = eta0 + (z / panel_len_mm) * (eta1 - eta0)
-
-    n_pts = 2 * settings.contour_points
-    contours = np.empty((len(z), n_pts, 2))
     xh = hinge_x(settings)
-    for k, e in enumerate(eta):
-        st = plan.at(float(e))
-        chord_mm = st.chord_m * 1000.0
-        loop = thicken_for_nozzle(st.airfoil.coords(settings.contour_points),
-                                  chord_mm, settings)
-        loop = elevon_loop(loop, xh, chord_mm, settings.hinge_gap_mm,
-                           chamfer_deg, settings.contour_points)
-        p = loop - np.array([0.25, 0.0])
-        a = np.radians(-st.twist_deg)
-        ca, sa = np.cos(a), np.sin(a)
-        rot = np.stack([p[:, 0] * ca - p[:, 1] * sa,
-                        p[:, 0] * sa + p[:, 1] * ca], 1)
-        contours[k] = rot * chord_mm + np.array(
-            [st.x_le_m * 1000.0 + 0.25 * chord_mm, 0.0])
 
+    def unit_loop(st, chord_mm, s_mm, te_scale):
+        loop = thicken_for_nozzle(st.airfoil.coords(settings.contour_points),
+                                  chord_mm, settings,
+                                  min_te_mm=settings.min_te_mm * te_scale)
+        return elevon_loop(loop, xh, chord_mm, settings.hinge_gap_mm,
+                           chamfer_deg, settings.contour_points)
+
+    contours, eta = fr.slice_layers(plan, frame, z, unit_loop)
     flat = contours.reshape(-1, 2)
-    contours -= 0.5 * (flat.min(0) + flat.max(0))
+    origin = 0.5 * (flat.min(0) + flat.max(0))
+    contours -= origin
     return LayerStack(z_mm=z, eta=eta, contours=contours, settings=settings,
                       name=name, z_step_mm=step, has_ribs=False,
-                      role="elevon", n_upper=settings.contour_points)
+                      origin_mm=(float(origin[0]), float(origin[1])),
+                      role="elevon", n_upper=settings.contour_points,
+                      frame=frame)
 
 
 def build_elevons(plan, settings: PrintSettings, panel_etas,
@@ -213,17 +242,20 @@ def build_elevons(plan, settings: PrintSettings, panel_etas,
     Sharing the wing's joint stations is not tidiness: each elevon panel
     then sits against exactly one wing panel, one hinge rod or one strip
     of tape serves both, and the parts cannot be assembled in the wrong
-    order."""
+    order. It shares the wing's FRAMES for the same reason, solved from
+    the same split by the same function."""
     if not has_elevon(settings):
         return []
+    from .frames import panel_frames
+    frames = panel_frames(plan, panel_etas, settings)
     out = []
     j = 0
-    for a, b in panel_etas:
+    for (a, b), f in zip(panel_etas, frames):
         if a < settings.elevon_eta - 1e-9:
             continue
         out.append(build_elevon(plan, settings, a, b,
                                 f"{plan.name}_elevon{j}", chamfer_deg,
-                                z_step_mm=z_step_mm))
+                                z_step_mm=z_step_mm, frame=f))
         j += 1
     return out
 

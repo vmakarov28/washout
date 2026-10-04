@@ -43,12 +43,114 @@ def cg_window_mm(ev) -> tuple[float, float]:
     not "balance here" but "balance here, and here is how far out you may
     be before it stops flying the way it was designed to."
     """
-    t = ev.trim
     mac = ev.plan.mac_m * 1000.0
-    x_np = t.x_np_m * 1000.0
+    x_np = neutral_point_mm(ev)
     lo = x_np - mac * ev.sm_band[1]
     hi = x_np - mac * ev.sm_band[0]
     return float(min(lo, hi)), float(max(lo, hi))
+
+
+def neutral_point_mm(ev) -> float:
+    """From the trim state when there is one; otherwise from the CG and the
+    static margin, which are both known before trim is attempted --
+    SM = (x_np - x_cg) / mac is a definition, not an estimate."""
+    if ev.trim is not None:
+        return ev.trim.x_np_m * 1000.0
+    return (ev.mass.x_cg_m + ev.static_margin * ev.plan.mac_m) * 1000.0
+
+
+def stall_onset_x_mm(ev) -> float | None:
+    """Where the first section to reach cl_max has its quarter chord, mm aft
+    of the root leading edge -- or None where slow flight was not solved.
+
+    The CG must stay AFT of this. Lift lost at a station behind the CG
+    pitches the nose up, and this station is fixed by the wing, not by the
+    balance: moving the CG FORWARD walks it past the onset. The build sheet
+    printed only the static-margin window, so on gen10's micro_fpv a
+    builder told "balance nose-heavy" -- as the results README said until
+    2026-09-24 -- could have balanced 10 mm forward, well inside that
+    window, and 3.4 mm into a stall that pitches up."""
+    slow = getattr(ev, "slow", None)
+    if slow is None:
+        return None
+    st = ev.plan.at(slow.eta_critical)
+    return float((st.x_le_m + 0.25 * st.chord_m) * 1000.0)
+
+
+def balance_window_mm(ev) -> tuple[float, float, str]:
+    """The CG stations to balance within: the static-margin band, cut at the
+    front by the stall onset where there is one. -> (lo, hi, what sets lo)."""
+    lo, hi = cg_window_mm(ev)
+    onset = stall_onset_x_mm(ev)
+    if onset is not None and onset > lo:
+        return float(onset), hi, "stall onset"
+    return lo, hi, "static margin"
+
+
+def balance_target_mm(ev) -> float:
+    """Where to aim the CG: the middle of the balance window. The search
+    puts the CG wherever the score is best, which is usually an EDGE of the
+    window -- gen10's micro_fpv sits 0.8 mm from the aft limit -- and the
+    few grams of glue this program cannot weigh land wherever the joints
+    are. The middle leaves that error room on both sides."""
+    lo, hi, _ = balance_window_mm(ev)
+    return 0.5 * (lo + hi)
+
+
+def ballast_g(ev, target_mm: float, x_ballast_mm: float) -> float:
+    """Grams at `x_ballast_mm` that move the CG to `target_mm`: exactly,
+    from (M cg + n x) / (M + n) = target. 0 when the target is aft of the
+    CG (that is moved with the pack, not with lead)."""
+    M = ev.mass.total_kg * 1000.0
+    cg = ev.mass.x_cg_m * 1000.0
+    if target_mm >= cg or target_mm <= x_ballast_mm:
+        return 0.0
+    return float(M * (cg - target_mm) / (target_mm - x_ballast_mm))
+
+
+def slow_at(ev, x_cg_mm: float, mass_g: float, cl_max_section: float,
+            max_up_deg: float):
+    """The slowest trimmed flight at another CG and mass, from the same
+    lattice the score used. -> (SlowFlight, hands-off speed m/s) or None."""
+    from .aero import performance as perf
+    from .aero.vlm import VLM
+    ps = ev.print_settings
+    if ps is None or not elv.has_elevon(ps):
+        return None
+    v = VLM(ev.plan, ns=32, nc=8, fins=getattr(ev, "fins", None))
+    x = x_cg_mm / 1000.0
+    a = v.trim_alpha(x, bounds=(-10.0, 18.0))
+    if a is None:
+        return None
+    dn = v.elevon_dn(ps.elevon_eta, ps.elevon_chord)
+    m = mass_g / 1000.0
+    sf = perf.slow_flight(v, x, a, dn, ps.elevon_eta, cl_max_section,
+                          max_up_deg, m)
+    cl = v.solve(a, x).CL
+    v_trim = float(np.sqrt(2 * m * G / (RHO_AIR * ev.plan.area_m2 * max(cl, 1e-6))))
+    return sf, v_trim
+
+
+def hatch_template(ev) -> dict | None:
+    """The hand-cut battery hatch, in plan-view mm from the root leading
+    edge and the centreline: the seated pack's footprint plus
+    HATCH_MARGIN_MM, cut through the UPPER skin (the pack's box is
+    anchored under it). None when there is no pack bay on the centreline."""
+    from .search.design import HATCH_MARGIN_MM
+    root_c = ev.plan.stations[0].chord_m * 1000.0
+    # The optimizer-placed bays are seated FIRST (search.design.seat_bays),
+    # and the pack is the one the optimizer places: it is bays[0]. It must
+    # also be the centreline box under the upper skin for a top hatch.
+    bays = getattr(ev, "bays", ())
+    pack = bays[0] if bays else None
+    if pack is None or pack.eta0 > 1e-9 or pack.anchor != "upper":
+        return None
+    half_mm = ev.plan.half_span_m * 1000.0
+    return {"name": pack.name,
+            "x0": pack.x0 * root_c - HATCH_MARGIN_MM,
+            "x1": pack.x1 * root_c + HATCH_MARGIN_MM,
+            "y": pack.eta1 * half_mm + HATCH_MARGIN_MM,
+            "depth": pack.height_mm}
 
 
 def pack_travel_mm(ev) -> float:
@@ -61,8 +163,8 @@ def pack_travel_mm(ev) -> float:
     pack = next((i for i in ev.mass.items if i.name == "battery"), None)
     if pack is None or pack.mass_kg <= 0.0:
         return 0.0
-    lo, hi = cg_window_mm(ev)
-    cg = ev.trim.x_cg_m * 1000.0
+    lo, hi, _ = balance_window_mm(ev)
+    cg = ev.mass.x_cg_m * 1000.0
     slack = min(cg - lo, hi - cg)
     return float(max(slack, 0.0) * ev.mass.total_kg / pack.mass_kg)
 
@@ -117,7 +219,7 @@ def tight_gates(ev, within: float = 0.15) -> list[str]:
     return out
 
 
-def render(ev, parts, settings: vase.PrintSettings) -> str:
+def render(ev, parts, settings: vase.PrintSettings, mission=None) -> str:
     """The build sheet, as Markdown."""
     plan, t, m = ev.plan, ev.trim, ev.mass
     root_c = plan.stations[0].chord_m * 1000.0
@@ -138,10 +240,43 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("## Balance this first")
     A("")
     lo, hi = cg_window_mm(ev)
-    A(f"- **CG: {t.x_cg_m*1000:.1f} mm aft of the root leading edge.**")
-    A(f"- Acceptable window **{lo:.1f} to {hi:.1f} mm** — that is the static")
-    A(f"  margin band {ev.sm_band[0]:.2f} to {ev.sm_band[1]:.2f} expressed as a")
-    A(f"  position, with the neutral point at {t.x_np_m*1000:.1f} mm.")
+    if t is None:
+        A("- **This design does not trim.** No elevon-neutral angle of attack")
+        A("  balances it, so it cannot be flown as drawn; the misses are listed")
+        A("  at the end. The numbers below are what it is, not what it needs.")
+    A(f"- **CG: {m.x_cg_m*1000:.1f} mm aft of the root leading edge.**")
+    b_lo, b_hi, why = balance_window_mm(ev)
+    A(f"- Acceptable window **{b_lo:.1f} to {b_hi:.1f} mm**.")
+    A(f"  - The static margin band {ev.sm_band[0]:.2f} to {ev.sm_band[1]:.2f} is")
+    A(f"    {lo:.1f} to {hi:.1f} mm, with the neutral point at {neutral_point_mm(ev):.1f} mm.")
+    if why == "stall onset":
+        A(f"  - **The front limit is the stall, not the margin.** The first")
+        A(f"    section to stall has its quarter chord at {b_lo:.1f} mm. With the")
+        A(f"    CG forward of that, the lift it loses is behind the CG and the")
+        A(f"    nose pitches UP at the stall. **Nose-heavy is not safer here.**")
+    if why == "stall onset" and mission is not None:
+        tgt = balance_target_mm(ev)
+        cam = next((i for i in m.items if "cam" in i.name), None)
+        A(f"- **Aim for {tgt:.1f} mm**, the middle of that window. The design")
+        A(f"  CG is {b_hi - m.x_cg_m*1000:.1f} mm from the aft limit, and glue this program")
+        A(f"  cannot weigh lands wherever the joints are.")
+        if cam is not None:
+            n = ballast_g(ev, tgt, cam.x_m * 1000.0)
+            at = slow_at(ev, (m.x_cg_m * 1000.0 * m.total_kg * 1000.0
+                              + n * cam.x_m * 1000.0) / (m.total_kg * 1000.0 + n),
+                         m.total_kg * 1000.0 + n, mission.cl_max_section,
+                         mission.max_elevon_deflect_deg)
+            if n > 0.0:
+                A(f"  - If the pack cannot move far enough forward in its bay,")
+                A(f"    **{n:.1f} g** of nose weight at the camera "
+                  f"({cam.x_m*1000:.0f} mm) gets there.")
+            if at is not None:
+                sf, vt = at
+                A(f"  - There the model gives a slowest trimmed speed of "
+                  f"**{sf.v_min_ms:.2f} m/s** (at the design CG it is {ev.slow.v_min_ms:.2f}),")
+                A(f"    with a hands-off speed of {vt:.1f} m/s.")
+        A(f"- Mark {tgt:.0f} mm on the belly in pencil: balancing is then a")
+        A(f"  fingertip check.")
     travel = pack_travel_mm(ev)
     if travel > 0.0:
         A(f"- The pack may sit **{travel:.0f} mm** either side of its drawn")
@@ -152,6 +287,62 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("area, which this program does not yet compute, so expect a few grams")
     A("more and check the CG after assembly rather than before.")
     A("")
+
+    # ------------------------------------------------ the hatch and exits
+    h = hatch_template(ev)
+    ae = getattr(ev, "aeroelastic", None)
+    if h is not None:
+        A("## Cut by hand after bonding: the battery hatch and the exits")
+        A("")
+        A("Nothing is cut through the skin by the printer (vase mode). These")
+        A("are cut with a sharp blade after the halves are bonded, and the")
+        A("numbers are plan-view mm from the root leading edge (x, aft) and")
+        A("from the centreline (y).")
+        A("")
+        A(f"**Battery hatch ({h['name']}):** a rectangle in the UPPER skin, "
+          f"x **{h['x0']:.0f} to {h['x1']:.0f} mm**, y **-{h['y']:.0f} to "
+          f"+{h['y']:.0f} mm**. It straddles the centre joint, so bond the "
+          f"halves first. The piece that comes out is the lid: hinge its front "
+          f"edge with tape and hold the rear edge with tape. It carries no "
+          f"load in the model.")
+        A("")
+        if ae is not None and ae.hatch_eta > 0.0:
+            lim = mission.min_aeroelastic_margin if mission is not None else None
+            ok = lim is not None and ae.margin_hatch >= lim
+            A(f"The cut opens the torsion box where it is most loaded, at the root.")
+            A(f"The model charges it: GJ {ae.gj_nmm2/1e6:.2f} -> "
+              f"{ae.gj_hatch_nmm2/1e6:.2f} N.m^2, and control reversal "
+              f"{ae.v_rev_ms:.0f} -> **{ae.v_rev_hatch_ms:.0f} m/s**. That is")
+            verdict = ("" if lim is None else
+                       f", against a {lim:.2f}x limit: **{'PASS' if ok else 'FAIL -- do not cut it'}**")
+            A(f"**{ae.margin_hatch:.2f}x** the {ae.design_v_ms:.0f} m/s it is scored "
+              f"at{verdict}. Do not make the hatch bigger than drawn.")
+            A("")
+        rows = []
+        k = ev.linkage
+        if k is not None and ev.horn_eta > 0.0:
+            st = ev.plan.at(ev.horn_eta)
+            y = ev.horn_eta * ev.plan.half_span_m * 1000.0
+            x_le = st.x_le_m * 1000.0
+            face = "upper" if k.side > 0 else "lower"
+            rows.append(("servo arm and pushrod", f"{face} skin, y {y:.0f} mm, x "
+                         f"{x_le + k.servo_x_mm - k.servo_arm_mm - 2:.0f} to "
+                         f"{x_le + k.servo_x_mm + k.servo_arm_mm + 2:.0f} mm, 4 mm wide",
+                         "the arm swings through it; both halves"))
+        rows.append(("motor wires", "the trailing edge on the centreline, under "
+                     "the mount's wire channel", "one hole, 5 mm"))
+        spar = ev.spar_fits[0] if ev.spar_fits else None
+        if spar is not None:
+            rows.append(("receiver antennas", "NOT SOLVED: two exits at 90 deg to "
+                         "each other, at least 30 mm from carbon",
+                         f"the tube starts at x {spar.root_xz_mm[0]:.0f} mm on the "
+                         f"centreline and runs aft-outboard at "
+                         f"{spar.sweep_deg:.0f} deg"))
+        A("| exit | where | note |")
+        A("|---|---|---|")
+        for r in rows:
+            A(f"| {r[0]} | {r[1]} | {r[2]} |")
+        A("")
 
     # ------------------------------------------------------------- parts
     A("## Parts")
@@ -166,9 +357,82 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
           f"{p.mass_g():.1f} g | vase |")
     if getattr(ev, "fins", None) is not None:
         A(f"| `{plan.name}_tip_fin.stl` | tip fin, print TWO | — | — | solid |")
+    dens = settings.filament_density_gcc
+    for ins in getattr(ev, "inserts", None) or []:
+        if ins.glue_fill:
+            continue                         # filled, not printed: see Joints
+        w, d, h = ins.size_mm()
+        A(f"| `{ins.name}.stl` | joint {ins.joint} wedge insert | "
+          f"{h:.1f} mm | {ins.mass_g(dens):.1f} g | solid, face A down |")
     A("")
     A(f"Everything above is **one half wing**. Print two of each and mirror.")
     A("")
+
+    # ------------------------------------------------------------ joints
+    wing = [p for p in parts if p.role == "wing" and getattr(p, "frame", None)]
+    if wing:
+        H = plan.half_span_m * 1000.0
+        A("## Joints")
+        A("")
+        A("Each panel follows the wing's dihedral curve inside itself; the")
+        A("joints are where it turns. Two end faces square to two different")
+        A("axes cannot both be one plane, so each joint hinges about the skin")
+        A("named and opens as a wedge on the other one. That wedge is a piece")
+        A("of the wing, and it is a PRINTED PART: the insert named below is")
+        A("exactly the loft between the two faces. Bond panel, insert, panel")
+        A("-- they share faces -- with the insert's face A (the flat face it")
+        A("prints on) against the OUTER panel's root.")
+        A("")
+        by_joint = {ins.joint: ins for ins in (getattr(ev, "inserts", None) or [])}
+        A("| joint | where | turns | faces touch at | wedge | filled by |")
+        A("|---|---|---|---|---|---|")
+        A("| centre | the symmetry plane | 0 deg | the whole face | 0 mm: "
+          "the two `p0` root faces mate flat | -- |")
+        far = {"upper": "lower", "lower": "upper"}
+        for j, (prev, p) in enumerate(zip(wing, wing[1:]), start=1):
+            f = p.frame
+            fill = "--"
+            if f.pivot == "flat":
+                touch, opens = "the whole face", "0 mm: the faces mate flat"
+            else:
+                touch = (f"{f.pivot} skin" if f.pivot in far
+                         else "the chord line")
+                opens = (f"**{f.wedge_mm:.1f} mm** at the {far[f.pivot]} skin"
+                         if f.pivot in far else f"{f.wedge_mm:.1f} mm, split")
+                ins = by_joint.get(j)
+                if ins is None:
+                    fill = "**glue** (no insert)"
+                elif ins.glue_fill:
+                    fill = (f"**microballoon epoxy**, about {ins.fill_g():.1f} g a "
+                            f"side: the spar runs through a wedge too thin to print "
+                            f"round it")
+                else:
+                    fill = (f"`{ins.name}.stl`, all but a {ins.crest_mm:.1f} mm "
+                            f"crest at the {f.pivot} skin (glue)")
+            A(f"| `{prev.name}` / `{p.name}` | eta {f.eta0:.3f}, "
+              f"{f.eta0 * H:.0f} mm out | **{f.kink_deg:+.1f} deg** | "
+              f"{touch} | {opens} | {fill} |")
+        A("")
+        for ins in by_joint.values():
+            if ins.elevon_gap_mm > 0.0:
+                A(f"At joint {ins.joint} the elevon begins. The insert stops at "
+                  f"the hinge cut, because the elevon moves and must not be "
+                  f"bonded to it; the elevon's own root wedge, **"
+                  f"{ins.elevon_gap_mm:.1f} mm** open at the far skin, is its "
+                  f"root clearance. Leave it open.")
+                A("")
+            if ins.glue_fill:
+                continue                      # the Joints table says it
+            for b in ins.bores:
+                if b.get("kind") == "notch":
+                    A(f"`{ins.name}` is notched round {b['name']} ({b['d_mm']:.0f} mm, "
+                      f"seated against the skin): fit it over the tube.")
+                else:
+                    A(f"`{ins.name}` carries a {b['d_mm']:.0f} mm bore for "
+                      f"{b['name']} ({b['wall_mm']:.1f} mm of wall round it): "
+                      f"thread it on the tube between the two panels.")
+            if ins.bores:
+                A("")
 
     # ------------------------------------------------------------ slicer
     A("## Slicer")
@@ -194,19 +458,30 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     if ev.spar_fits:
         A("## Spar cut list")
         A("")
-        A("| spar | tube | cut length | chord station | seat | reaches |")
-        A("|---|---|---|---|---|---|")
+        A("| spar | tube | cut | root seat | runs | reaches | centre joiner |")
+        A("|---|---|---|---|---|---|---|")
         tube = ev.structure.spar.name if ev.structure else "?"
         for f in ev.spar_fits:
-            A(f"| {f.spec.name} | {tube} | **{2*f.reach_mm:.0f} mm** | "
-              f"{f.x_frac:.2f}c ({f.x_frac*root_c:.0f} mm aft of root LE) | "
-              f"{f.anchor} skin | eta {f.reach_eta:.2f} |")
+            x0, z0 = f.root_xz_mm
+            if f.one_piece:
+                cut = f"**1 x {2*f.reach_mm:.0f} mm**, tip to tip"
+                join = "none: one tube"
+            else:
+                cut = f"**2 x {f.reach_mm:.0f} mm**, one a side"
+                join = (f"**V: {2*f.sweep_deg:.0f} deg in plan, "
+                        f"{2*f.dihedral_deg:.0f} deg seen from the front**")
+            A(f"| {f.spec.name} | {tube} | {cut} | {x0:.0f} mm aft of the "
+              f"root LE, {f.anchor} skin | swept {f.sweep_deg:.1f} deg, "
+              f"dihedral {f.dihedral_deg:.1f} deg | eta {f.reach_eta:.2f} | "
+              f"{join} |")
         A("")
-        A("Each tube runs **tip to tip through the centre body** — one length,")
-        A("not two meeting at the centreline. The bore is the shell's own")
-        A("cavity: there is no hole to drill through the wall, but the tube")
-        A("has to be seated against the skin the table names, because that is")
-        A("where the clearance was solved for.")
+        A("A tube is straight, so on a swept wing with dihedral each half gets")
+        A("its own, and they meet at the centreline in a V joiner at the angles")
+        A("above. The tube leaves the wing's depth where the table says it")
+        A("reaches; outboard of that the shell alone carries the load. The")
+        A("bore is the shell's own cavity: there is no hole to drill through")
+        A("the wall, but the tube must start at the root seat named, because")
+        A("that is where its whole line was solved from.")
         A("")
 
     # ----------------------------------------------------------- controls
@@ -228,9 +503,22 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
             A(f"  delivers more, so set the transmitter endpoints, not the horn.")
         if ev.linkage is not None:
             k = ev.linkage
+            where = ("above the surface, {:.0f} mm aft of the hinge axis"
+                     .format(k.horn_dx_mm) if k.side > 0
+                     else "below the hinge axis")
             A(f"- Servo arm **{k.servo_arm_mm:.0f} mm**, horn hole "
-              f"**{k.horn_arm_mm:.0f} mm** below the hinge axis, pushrod "
+              f"**{k.horn_arm_mm:.0f} mm** {where}, pushrod "
               f"**{k.rod_mm:.0f} mm** between centres.")
+            from . import linkage as _lkg
+            th_dn, th_up = _lkg.endpoints_deg(k, ev.max_elevon_deflect_deg)
+            lock = _lkg.lock_angle_deg(k)
+            if th_dn is not None and th_up is not None:
+                A(f"- **Transmitter endpoints: {th_dn:+.0f}° / {th_up:+.0f}° of "
+                  f"servo** give the full ±{ev.max_elevon_deflect_deg:.0f}° of "
+                  f"surface.")
+                if np.isfinite(lock):
+                    A(f"  The linkage locks at {lock:.0f}° of servo; never set "
+                      f"an endpoint past {_lkg.LOCK_MARGIN * lock:.0f}°.")
         A("")
 
     # ------------------------------------------------------- aeroelastic
@@ -262,7 +550,9 @@ def render(ev, parts, settings: vase.PrintSettings) -> str:
     A("   apart.** After the centre joint there is no access.")
     A("3. Slide the spars in and bond them, seated against the skin the cut")
     A("   list names.")
-    A("4. Join the panels outboard, then the two halves at the centreline.")
+    A("4. Join the panels outboard, each at the angle the Joints table")
+    A("   gives -- with its wedge insert between them where the table names")
+    A("   one -- then the two halves at the centreline.")
     A("5. Hinge the elevons, fit the horns and the pushrods.")
     A("6. Glue the tip fins on.")
     A("7. Balance to the CG window above. Then set the throws.")
@@ -321,9 +611,18 @@ def bom(ev, parts) -> str:
     for f in ev.spar_fits:
         m = next((i.mass_kg for i in ev.mass.items
                   if i.name == f"spar {f.spec.name}"), 0.0)
-        L.append(f"| 1 | carbon tube — {f.spec.name} | {tube}, "
-                 f"**{2*f.reach_mm:.0f} mm** | {m*1000:.0f} g | "
-                 f"seats on the {f.anchor} skin at {f.x_frac:.2f}c |")
+        if f.one_piece:
+            L.append(f"| 1 | carbon tube — {f.spec.name} | {tube}, "
+                     f"**{2*f.reach_mm:.0f} mm** | {m*1000:.0f} g | "
+                     f"tip to tip, from the {f.anchor} skin at {f.x_frac:.2f}c |")
+        else:
+            L.append(f"| 2 | carbon tube — {f.spec.name} | {tube}, "
+                     f"**{f.reach_mm:.0f} mm** | {m*1000:.0f} g | one a side, "
+                     f"from the {f.anchor} skin at {f.x_frac:.2f}c |")
+            L.append(f"| 1 | V joiner — {f.spec.name} | {tube} bore, "
+                     f"{2*f.sweep_deg:.0f} deg in plan, "
+                     f"{2*f.dihedral_deg:.0f} deg from the front | — | "
+                     f"not generated yet: bend or print to these angles |")
     known = {f"spar {f.spec.name}" for f in ev.spar_fits}
     for i in ev.mass.items:
         if i.name in known:
@@ -333,14 +632,25 @@ def bom(ev, parts) -> str:
         # means eighteen grams of servo in the aeroplane, not thirty-six.
         # The name carries the count for the pairs, so it is stripped out
         # of the name and put in the column where it belongs.
-        qty = 2 if ("x2" in i.name or i.name == "tip fins") else 1
-        name = i.name.replace(" x2", "").rstrip("s") if qty == 2 else i.name
+        insert = i.name.startswith(("joint insert", "joint fill"))
+        qty = 2 if ("x2" in i.name or i.name == "tip fins" or insert) else 1
+        name = (i.name.replace(" x2", "").rstrip("s")
+                if qty == 2 and not insert else i.name)
         L.append(f"| {qty} | {name} | — | {i.mass_kg*1000:.0f} g | "
                  f"at {i.x_m*1000:.0f} mm aft of the root LE |")
+    pt = getattr(ev, "powertrain", None)
+    if pt is not None:
+        pr = pt.prop
+        L.append(f"| 1 | propeller, pusher | **{pr.diameter_in:.1f} x "
+                 f"{pr.pitch_in:.1f} in** as scored | — | a design variable, not a "
+                 f"stock size: take the nearest stock prop NO LARGER in "
+                 f"diameter -- prop clearance was passed at "
+                 f"{pr.diameter_in:.2f} in |")
     if ev.linkage is not None:
         k = ev.linkage
-        L.append(f"| 2 | control horn | hole {k.horn_arm_mm:.0f} mm below the "
-                 f"hinge axis | — | bonded to the elevon's lower surface |")
+        face = "upper" if k.side > 0 else "lower"
+        L.append(f"| 2 | control horn | hole {k.horn_arm_mm:.0f} mm off the "
+                 f"{face} surface | — | tongue glued into the elevon's socket |")
         L.append(f"| 2 | pushrod | {k.rod_mm:.0f} mm between centres | — | "
                  f"1 mm wire with a clevis, or a Z-bend |")
     if ev.print_settings is not None and elv.has_elevon(ev.print_settings):
@@ -351,6 +661,176 @@ def bom(ev, parts) -> str:
     L += ["", f"Filament: about **{ev.mass.shell_kg*1000:.0f} g** of shell at "
           f"the declared {ev.print_settings.filament_density_gcc:.2f} g/cc, "
           f"plus adhesive.", ""]
+    return "\n".join(L) + "\n"
+
+
+RHO_AIR = 1.225       # the same sea-level density the score used
+G = 9.80665
+
+
+def flight_test(ev, mission=None) -> str | None:
+    """A flight-test card: what the model predicts, and how to check it.
+
+    Every prediction on it rests on a section cl_max that nothing on this
+    machine could validate (data/validation/README.md), so the card is
+    written as a measurement of that number, not a confirmation of it:
+    the first stall shows where the wing really lets go and how slowly it
+    really flies, and the table turns a measured speed back into the wing
+    CL_max the model should have used. None where slow flight was not
+    solved (missions without the docile objective or its gates)."""
+    slow = getattr(ev, "slow", None)
+    if slow is None or ev.trim is None:
+        return None
+    cl_max_section = mission.cl_max_section if mission is not None else None
+    plan, m = ev.plan, ev.mass
+    S = plan.area_m2
+    half = plan.half_span_m * 1000.0
+    y_on = slow.eta_critical * half
+    x_on = stall_onset_x_mm(ev)
+    b_lo, b_hi, why = balance_window_mm(ev)
+    cg = m.x_cg_m * 1000.0
+    v_trim = ev.v_cruise
+    mass_g = m.total_kg * 1000.0
+    alpha_trim = ev.trim.alpha_deg
+    ballast = 0.0
+    # Predict what will be FLOWN: the build sheet's balance target, with
+    # its nose weight, not the design CG at the edge of the window.
+    if why == "stall onset" and mission is not None:
+        tgt = balance_target_mm(ev)
+        cam = next((i for i in m.items if "cam" in i.name), None)
+        if cam is not None:
+            ballast = ballast_g(ev, tgt, cam.x_m * 1000.0)
+            new_cg = (cg * mass_g + ballast * cam.x_m * 1000.0) / (mass_g + ballast)
+            at = slow_at(ev, new_cg, mass_g + ballast, mission.cl_max_section,
+                         mission.max_elevon_deflect_deg)
+            if at is not None:
+                slow, v_trim = at
+                cg, mass_g = new_cg, mass_g + ballast
+                alpha_trim = None
+    W = mass_g / 1000.0 * G
+    clm = (f"a section cl_max of {cl_max_section:.2f}, the same everywhere"
+           if cl_max_section is not None else
+           "one declared section cl_max, the same everywhere")
+    L: list[str] = []
+    A = L.append
+    A(f"# {plan.name}: flight-test card")
+    A("")
+    A("Generated with the build sheet, from the design that was scored.")
+    A("Every number is computed; none is typed in.")
+    A("")
+    A("**What this test is for.** The slowest speed and the place the stall")
+    A(f"starts are predicted with {clm}. That is a declared number that no")
+    A("tool on this machine could validate (`data/validation/README.md`).")
+    A("This flight MEASURES it.")
+    A("")
+    A("## Before the first flight")
+    A("")
+    A(f"- Balance at **{cg:.1f} mm** aft of the root leading edge"
+      + (f", with **{ballast:.1f} g** of nose weight at the camera if the pack "
+         f"cannot get it there" if ballast > 0 else "") + ".")
+    A(f"  Stay inside **{b_lo:.1f} to {b_hi:.1f} mm**. The predictions below are")
+    A("  at this balance point and this mass.")
+    if why == "stall onset":
+        A(f"  - **Do not balance nose-heavy past {b_lo:.1f} mm.** The stall starts")
+        A("    at that station. Forward of it, the lift lost at the stall is")
+        A("    behind the CG and pitches the nose UP.")
+    A(f"- Weigh it ready to fly: the predictions assume **{mass_g:.0f} g**.")
+    A("  Every gram of glue or GPS moves the numbers below. Re-balance after")
+    A("  adding anything.")
+    A("- If the receiver has stabilisation (the AR630 has AS3X), switch it")
+    A("  **off** for the stall tests. It fights the stall and hides exactly")
+    A("  what is being measured.")
+    A("")
+    A("## Tufts: where the stall starts")
+    A("")
+    A("Tape 30-40 mm lengths of wool to the UPPER surface. Attach each one at")
+    A("its front end, at half chord, at these stations, and do both halves:")
+    A("")
+    A("| from the centreline | leading edge at | chord | tuft at (half chord) |")
+    A("|---|---|---|---|")
+    grid = [int(round(y)) for y in np.linspace(0.1, 0.95, 7) * half]
+    # the onset row replaces any grid row within 8 mm of it, not beside it
+    ys = sorted([y for y in grid if abs(y - y_on) > 8.0] + [int(round(y_on))])
+    for y in ys:
+        st = plan.at(min(y / half, 1.0))
+        x_le = st.x_le_m * 1000.0
+        c = st.chord_m * 1000.0
+        mark = "  **<- predicted stall onset**" if y == int(round(y_on)) else ""
+        A(f"| {y} mm | {x_le:.0f} mm aft | {c:.0f} mm | {x_le + 0.5*c:.0f} mm aft{mark} |")
+    A("")
+    A("Mount a camera looking back along one wing, or film from a chase")
+    A("position. A tuft that reverses or thrashes marks separated flow.")
+    A("")
+    A("## What the model predicts")
+    A("")
+    A("| quantity | predicted |")
+    A("|---|---|")
+    A(f"| hands-off speed, sticks centred | **{v_trim:.1f} m/s**"
+      + (f" ({alpha_trim:.1f} deg)" if alpha_trim is not None else "") + " |")
+    A(f"| slowest trimmed speed | **{slow.v_min_ms:.2f} m/s**, at wing CL "
+      f"{slow.cl_max:.3f} |")
+    if slow.limit == "elevon":
+        lim = ("the up-elevon runs out first: holding full up, it should mush "
+               "nose-high rather than stall")
+    else:
+        lim = (f"the wing stalls, holding {abs(slow.delta_deg):.0f} deg of "
+               f"up-elevon: there is more travel left, so it CAN be stalled")
+    A(f"| what ends it | {lim} |")
+    A(f"| where the stall starts | {y_on:.0f} mm from the centreline, both sides |")
+    if x_on is not None and x_on < cg:
+        nose = f"drops: the onset is {cg - x_on:.1f} mm ahead of the CG"
+    else:
+        nose = "RISES: the onset is behind the CG"
+    A(f"| what the nose does | {nose} |")
+    A("")
+    A("## The test")
+    A("")
+    A("1. Trim for hands-off level flight. Record the speed: this checks the")
+    A("   trim and the hands-off prediction.")
+    A("2. At a height you could recover from twice, at least 30 m, fly")
+    A("   straight into wind and bring the speed down slowly: about one")
+    A("   second per 1 m/s. Keep the wings level with small inputs.")
+    A("3. Hold up-elevon until the nose drops, a wing drops, or full up is")
+    A("   reached. Recover by releasing the up-elevon; add power as the nose")
+    A("   comes down.")
+    A("4. Repeat three times into wind and three times downwind. The airspeed")
+    A("   is the mean of the two groundspeeds.")
+    A("")
+    A("Measuring speed with no GPS: two markers 20 m apart, filmed from the")
+    A("side, gives 20 m divided by the crossing time. Do it both ways and")
+    A("average. A GPS logger works too, but weigh it and re-balance.")
+    A("")
+    A("## Reading the result")
+    A("")
+    A("**The stall.**")
+    A("")
+    A(f"- **As predicted:** the tufts near {y_on:.0f} mm go first and the nose")
+    A("  drops. The model's stall location holds.")
+    A("- **Not as predicted:** the tips go first, or the nose rises. The")
+    A("  declared cl_max is wrong in a way that matters. Stop slow flight,")
+    A("  and send back the tuft video.")
+    A("")
+    A("**The speed.** A measured slowest speed V gives the wing CL_max the")
+    A("model should have used: CL = 2W / (rho S V^2), with")
+    A(f"W = {W:.3f} N, S = {S:.4f} m2 and rho = {RHO_AIR} kg/m3.")
+    A("")
+    A("| measured V | implied wing CL_max | vs predicted |")
+    A("|---|---|---|")
+    for f in (0.85, 0.9, 1.0, 1.1, 1.2):
+        v = slow.v_min_ms * f
+        cl = 2 * W / (RHO_AIR * S * v * v)
+        A(f"| {v:.2f} m/s | {cl:.3f} | {100*(cl/slow.cl_max-1):+.0f}% |")
+    A("")
+    A("That ratio, measured against predicted, is what goes back into the")
+    A("program: it scales the declared section cl_max for this wing.")
+    A("")
+    A("## Record")
+    A("")
+    A("| run | into / down wind | groundspeed at the stall | first tufts to go (mm) | nose / wing | notes |")
+    A("|---|---|---|---|---|---|")
+    for i in range(1, 7):
+        A(f"| {i} | | | | | |")
+    A("")
     return "\n".join(L) + "\n"
 
 
@@ -387,19 +867,51 @@ def manifest(ev, parts, settings: vase.PrintSettings) -> dict:
             "footprint_mm": [round(bx, 1), round(by, 1)],
             "first_layer_mm2": round(float(area), 1),
             "eta": [round(float(p.eta[0]), 4), round(float(p.eta[-1]), 4)]})
+        f = getattr(p, "frame", None)
+        if f is not None:
+            # Where the part flies, from where it prints: flight x is
+            # print X + origin[0]; with Y' = print Y + origin[1] and s =
+            # print Z, flight y = y0 + s cos(phi) - Y' sin(phi) and flight
+            # z = z0 + s sin(phi) + Y' cos(phi). Right half; mirror y.
+            out["half_wing_parts"][-1]["placement"] = {
+                "phi_deg": round(f.phi_deg, 4),
+                "pivot_yz_mm": [round(v, 3) for v in f.origin_yz_mm],
+                "print_origin_xy_mm": [round(v, 3) for v in p.origin_mm],
+                "root_joint": {"turns_deg": round(f.kink_deg, 3),
+                               "touches_at": f.pivot,
+                               "wedge_mm": round(f.wedge_mm, 2)}}
     if getattr(ev, "fins", None) is not None:
         out["half_wing_parts"].append(
             {"file": f"{ev.plan.name}_tip_fin.stl", "profile": "solid",
              "role": "fin", "quantity_per_aircraft": 2})
+    for ins in getattr(ev, "inserts", None) or []:
+        if ins.glue_fill:
+            continue
+        w, d, h = ins.size_mm()
+        out["half_wing_parts"].append({
+            "file": f"{ins.name}.stl", "profile": "solid", "role": "insert",
+            "joint": ins.joint, "eta": round(ins.eta, 4),
+            "height_mm": round(float(h), 2),
+            "mass_g": round(ins.mass_g(settings.filament_density_gcc), 2),
+            "footprint_mm": [round(float(w), 1), round(float(d), 1)],
+            "bores": [{"tube": b["name"], "d_mm": b["d_mm"],
+                       "wall_mm": round(b["wall_mm"], 2)} for b in ins.bores],
+            # where it flies: the same solid in flight mm, right half
+            "flight_bbox_mm": [[round(float(v), 2) for v in ins.flight_verts.min(0)],
+                               [round(float(v), 2) for v in ins.flight_verts.max(0)]]})
     return out
 
 
-def write(ev, parts, settings: vase.PrintSettings, path) -> Path:
+def write(ev, parts, settings: vase.PrintSettings, path,
+          mission=None) -> Path:
     import json as _json
 
     path = Path(path)
-    path.write_text(render(ev, parts, settings), encoding="utf-8")
+    path.write_text(render(ev, parts, settings, mission), encoding="utf-8")
     (path.parent / "BOM.md").write_text(bom(ev, parts), encoding="utf-8")
+    card = flight_test(ev, mission)
+    if card is not None:
+        (path.parent / "FLIGHT_TEST.md").write_text(card, encoding="utf-8")
     (path.parent / "MANIFEST.json").write_text(
         _json.dumps(manifest(ev, parts, settings), indent=2), encoding="utf-8")
     return path

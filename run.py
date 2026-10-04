@@ -38,7 +38,7 @@ from washout import build_sheet
 from washout import spars as sp
 from washout.geom import cst
 from washout.printing import elevons, stl, vase
-from washout.search.design import (BOUNDS, MISSIONS, Mission,  # noqa: F401
+from washout.search.design import (BOUNDS, MISSION_VARIANTS, MISSIONS, Mission,  # noqa: F401
                                 choose_structure, evaluate, unit_to_physical)
 from washout.search.optimize import SEEDS, run_search
 
@@ -105,12 +105,23 @@ def report(ev, settings: vase.PrintSettings) -> str:
         lines += [ev.fins.report(), ""]
     if getattr(ev, "dynamics", None) is not None:
         lines += [ev.dynamics.report(), ""]
+    if getattr(ev, "slow", None) is not None:
+        s = ev.slow
+        why = ("the elevon runs out of up-travel" if s.limit == "elevon"
+               else f"the section at eta {s.eta_critical:.2f} reaches cl_max")
+        lines += [f"slowest trimmed flight: {s.v_min_ms:.2f} m/s at CL {s.cl_max:.3f}, "
+                  f"alpha {s.alpha_deg:.1f} deg, elevon {s.delta_deg:+.1f} deg -- {why}; "
+                  f"first section to reach cl_max at eta {s.eta_critical:.2f}; "
+                  f"hands-off {ev.v_cruise / s.v_min_ms:.2f}x it", ""]
     if getattr(ev, "fairness", None) is not None:
         lines += [ev.fairness.report(getattr(ev, "fairness_limits", None)), ""]
     if getattr(ev, "lateral", None) is not None:
         lines += [ev.lateral.report(), ""]
     if getattr(ev, "aeroelastic", None) is not None:
         lines += [ev.aeroelastic.report(), ""]
+    if getattr(ev, "joints", None):
+        from washout import joints as _jnt
+        lines += [_jnt.report(ev.joints), ""]
     if getattr(ev, "linkage", None) is not None:
         from washout import linkage as _lkg
         lines += [_lkg.report(ev.linkage, ev.max_elevon_deflect_deg), ""]
@@ -122,7 +133,44 @@ def report(ev, settings: vase.PrintSettings) -> str:
     return "\n".join(lines)
 
 
-def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
+def export_companions(ev, settings: vase.PrintSettings, out: Path,
+                      mission) -> list:
+    """The parts one spiral cannot be: printed in normal mode, generated
+    to the shell that was scored. -> [(part, gates), ...]
+
+    Every dimension comes from the design; every claim about fit is a
+    gate with a number, reported here beside the part rather than left
+    for the builder to discover."""
+    from washout.printing import parts as _parts
+
+    made = []
+    if ev.linkage is not None and ev.horn_eta > 0.0:
+        try:
+            applied = 0.0
+            if mission is not None:
+                rod_n = mission.servo_stall_nmm / max(mission.servo_arm_mm, 1e-9)
+                applied = rod_n * ev.linkage.horn_arm_mm
+            horn = _parts.horn_for(ev.plan, ev.linkage, ev.horn_eta,
+                                   settings.extrusion_width_mm,
+                                   f"{ev.plan.name}_horn", applied)
+            made.append((horn, []))
+        except Exception as e:                       # noqa: BLE001
+            print(f"  control horn skipped ({type(e).__name__}: {e})")
+    # the design's own propeller, as scored -- not the mission's default
+    powertrain = getattr(ev, "powertrain", None) or (
+        mission.powertrain if mission is not None else None)
+    if powertrain is not None:
+        try:
+            part, gates = _parts.mount_for(ev.plan, settings, powertrain,
+                                           f"{ev.plan.name}_motor_mount")
+            made.append((part, gates))
+        except Exception as e:                       # noqa: BLE001
+            print(f"  motor mount skipped ({type(e).__name__}: {e})")
+    return made
+
+
+def do_export(ev, settings: vase.PrintSettings, out: Path,
+              mission=None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     try:
         from washout.report import figure
@@ -133,13 +181,24 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         # Any plotting failure, not just a missing matplotlib: the figure
         # is drawn BEFORE the STLs, and must never cost the parts.
         print(f"\nfigure skipped ({type(e).__name__}: {e})")
-    panels = vase.build_panels(ev.plan, settings)
+    # EXPORT THE PANELS THAT WERE SCORED. `evaluate(want_panels=True)`
+    # hands them back on the Evaluation, bays cut and ribs laid out, and
+    # rebuilding them here from the plan alone dropped the bay cuts: the
+    # search scored an aircraft with openings in it and the export printed
+    # a sealed shell. The oldest failure mode in the project, one more
+    # time, and the reason the panels travel with the verdict.
+    panels = list(ev.panels) if ev.panels else vase.build_panels(ev.plan, settings)
     # The control surfaces, as their own parts. The hinge line runs
     # spanwise and print Z is the span, so an elevon prints root-down in
     # exactly the same orientation as the wing panel it came off.
-    panels = panels + elevons.build_elevons(
-        ev.plan, settings, vase.panel_etas(ev.plan, settings),
-        ev.max_elevon_deflect_deg + settings.hinge_margin_deg)
+    # The control surfaces as they were SCORED, socket cut. Rebuilding
+    # them here is the same mistake rebuilding the panels was: the part
+    # that flies has to be the part that was judged.
+    panels = panels + (list(ev.elevons) if ev.elevons
+                       else elevons.build_elevons(
+                           ev.plan, settings,
+                           vase.panel_etas(ev.plan, settings),
+                           ev.max_elevon_deflect_deg + settings.hinge_margin_deg))
     total_g = total_min = 0.0
     print(f"\nprintable parts (one half wing; mirror for the other side):")
     for pan in panels:
@@ -165,7 +224,37 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
         print(f"  {ev.plan.name + '_tip_fin':<14} flat plate {w_mm:.0f}x{h_mm:.0f} mm, "
               f"{fins.thickness_m*1000:.1f} mm -- print TWO in normal (not vase) "
               f"mode, glue to the tips  {'OK' if rep.get('watertight') else 'CHECK MESH'}")
-    sheet = build_sheet.write(ev, panels, settings, out / "BUILD.md")
+    for ins in getattr(ev, "inserts", None) or []:
+        chk = vase.check_insert(ins, settings)
+        if ins.glue_fill:
+            print(f"  joint {ins.joint} wedge: FILL with microballoon epoxy, "
+                  f"~{ins.fill_g():.1f} g a side (the spar severs a printed insert)")
+            continue
+        stl.write_stl(out / f"{ins.name}.stl", ins.verts, ins.tris,
+                      header=f"washout {ins.name} (print 2, mirror 1)")
+        w, d, h = ins.size_mm()
+        print(f"  {ins.name:<14} joint {ins.joint} wedge, {w:.0f}x{d:.0f}x{h:.1f} mm, "
+              f"{ins.mass_g(settings.filament_density_gcc):.1f} g -- print TWO "
+              f"(mirror one) in normal mode, face A down  "
+              f"{'OK' if chk.ok else 'CHECK: ' + ','.join(chk.failures())}")
+        for g in chk.gates:
+            print("    " + g.line())
+    companions = export_companions(ev, settings, out, mission)
+    if companions:
+        print("")
+        print("  companion parts:")
+    for part, gates in companions:
+        rep = part.export_stl(out / f"{part.name}.stl")
+        w, h, d = part.footprint_mm
+        print(f"  {part.name:<24} x{part.quantity}  {w:.0f}x{h:.0f}x{d:.0f} mm  "
+              f"{part.mass_g():5.1f} g  normal mode, solid PLA  "
+              f"{'OK' if rep['watertight'] else 'CHECK MESH'}")
+        print(f"      {part.orientation}")
+        for n in part.notes:
+            print(f"      {n}")
+        for g in list(part.gates) + list(gates):
+            print("    " + g.line())
+    sheet = build_sheet.write(ev, panels, settings, out / "BUILD.md", mission)
     print(f"\n  build sheet: {sheet}")
     # The slicer settings are in BUILD.md and nowhere else now. The
     # prose here said "1 bottom layer" while spars.report said the root
@@ -177,6 +266,23 @@ def do_export(ev, settings: vase.PrintSettings, out: Path) -> None:
           f"BUILD.md names.")
     print("  every other print setting is in BUILD.md: read it before "
           "slicing.")
+
+
+def do_step(ev, out: Path) -> int:
+    """The CAD export and its 3D gates. Kept out of `do_export` because it
+    needs an optional install, and an STL export must never depend on it."""
+    from washout import cad
+    if not cad.available():
+        print("\nSTEP export needs the OpenCASCADE bindings: "
+              "pip install -e .[cad]")
+        return 1
+    from washout.cad.export import export_step
+    rep = export_step(ev, out)
+    print(f"\nCAD: {out / 'cad'}  ({rep['assembly']['file']}, "
+          f"{rep['assembly']['MB']:.1f} MB)")
+    for g in rep["_gates"]:
+        print(g.line())
+    return 0 if all(g.passed for g in rep["_gates"]) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,7 +300,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Choices come from design.py, never from a second list here: the
     # hardcoded one had drifted and offered `fpv_1m`, which has no factory
     # and crashed every command that named it.
-    ap.add_argument("--mission", choices=MISSIONS, default="trainer_v3")
+    ap.add_argument("--mission", choices=MISSIONS + tuple(MISSION_VARIANTS),
+                    default="trainer_v3")
     ap.add_argument("--polar", type=str, default=None,
                     help="measured LBM polar CSV; switches the search from "
                          "the flat tier-0 drag model to strip theory on real "
@@ -204,6 +311,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--iters", type=int, default=60)
     ap.add_argument("--popsize", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="search: evaluate each generation in this many "
+                         "worker processes. One search on one core leaves "
+                         "most of a modern machine idle; the fleet runner "
+                         "sets this so the whole fleet fills it")
     ap.add_argument("--out", type=Path, default=ROOT / "out" / "run")
     ap.add_argument("--design", type=Path, default=None)
     ap.add_argument("--airfoil", type=Path, default=ROOT / "assets" / "mh45.dat")
@@ -223,6 +335,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rib-pitch", type=float, default=25.0, dest="rib_pitch")
     ap.add_argument("--no-structure", action="store_true", dest="no_structure",
                     help="skip spar/rib sizing; export a bare vase shell")
+    ap.add_argument("--step", action="store_true",
+                    help="export: also write cad/ -- the aircraft as STEP, "
+                         "every part as a clean solid, and the 3D gates. "
+                         "Needs the OpenCASCADE bindings: pip install -e .[cad]")
+    ap.add_argument("--step-full", action="store_true", dest="step_full",
+                    help="export: also write cad/<name>_full.step -- the aircraft "
+                         "as built: printed walls, rib webs, the battery hatch "
+                         "and lid, every companion part, the tubes and the "
+                         "payload volumes (needs the OpenCASCADE bindings)")
     ap.add_argument("--seed-design", type=Path, default=None, dest="seed_design",
                     help="design.json from an earlier run to put in the starting "
                          "population, so the search cannot finish behind it")
@@ -306,8 +427,20 @@ def main(argv=None) -> int:
         print(report(ev, settings))
         if ev.reasons:
             print("issues:", "; ".join(ev.reasons), "\n")
-        do_export(ev, ev.print_settings or settings, a.out)
-        return 0
+        do_export(ev, ev.print_settings or settings, a.out, mission)
+        rc = do_step(ev, a.out) if a.step else 0
+        if a.step_full:
+            from washout.cad.full import export_full
+            print("\nfull CAD, as built:")
+            rep = export_full(ev, a.out, mission)
+            for g in rep["_gates"]:
+                print("  " + g.line())
+            for n in rep["notes"]:
+                print("  note: " + n)
+            print(f"  -> {a.out / 'cad' / rep['file']} ({rep['MB']} MB, "
+                  f"{len(rep['bodies'])} bodies)")
+            rc = rc or (0 if all(g.passed for g in rep["_gates"]) else 1)
+        return rc
 
     seed_phys = (load_seed_physical(a.seed_design) if a.seed_design
                  else SEEDS.get(a.mission))
@@ -315,8 +448,11 @@ def main(argv=None) -> int:
         print(f"seeded from {a.seed_design}")
     print(f"washout search [{a.mission}]: {mission.span_m*1000:.0f} mm span, bed "
           f"{a.bed:.0f}x{a.bed:.0f}x{a.bed_z:.0f} mm\n")
+    from washout.search.optimize import lower_priority
+    lower_priority()
     best_u, best, log = run_search(mission, base, settings, maxiter=a.iters,
                                    popsize=a.popsize, seed=a.seed, drag=drag,
+                                   workers=max(int(a.workers), 1),
                                    out_dir=a.out, seed_physical=seed_phys)
     (a.out / "design.json").write_text(json.dumps({
         "u": list(map(float, best_u)),
@@ -334,7 +470,7 @@ def main(argv=None) -> int:
         print(f"    {k:<16} {v:8.3f}")
     if best.ok:
         # the settings the verdict was reached with: spar and ribs sized
-        do_export(best, best.print_settings or settings, a.out)
+        do_export(best, best.print_settings or settings, a.out, mission)
     else:
         print("\nbest design still violates:", "; ".join(best.reasons))
         print("no STL written -- fix the mission or widen the bounds")

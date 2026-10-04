@@ -20,6 +20,7 @@ It is not a special case here; it is just a region of the same space.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -29,11 +30,24 @@ N1_ROUND_LE = 0.5
 N2_SHARP_TE = 1.0
 
 
+@lru_cache(maxsize=None)
+def _binomials(n: int) -> np.ndarray:
+    """comb(n, i) for i = 0..n, as the column `bernstein` multiplies by.
+
+    Computed by the same scipy call it replaces, so every value is the
+    same float to the last bit; only the call is saved. It was a third of
+    the cost of `cst_y`, which is called about 160 000 times per design
+    evaluation. Read-only, because it is shared."""
+    c = comb(n, np.arange(n + 1)[:, None])
+    c.flags.writeable = False
+    return c
+
+
 def bernstein(n: int, x: np.ndarray) -> np.ndarray:
     """Bernstein basis of order n evaluated at x -> (n+1, len(x))."""
     i = np.arange(n + 1)[:, None]
     x = np.asarray(x, dtype=float)[None, :]
-    return comb(n, i) * x**i * (1.0 - x) ** (n - i)
+    return _binomials(n) * x**i * (1.0 - x) ** (n - i)
 
 
 def cst_y(x: np.ndarray, a: np.ndarray, dz_te: float = 0.0) -> np.ndarray:

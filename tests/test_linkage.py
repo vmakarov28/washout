@@ -31,9 +31,9 @@ RESULTS = Path(__file__).resolve().parent.parent / "results" / "fleet"
 WALL = 0.45
 
 
-def _fleet(name):
+def _fleet(name, folder=None):
     index = json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
-    d = json.loads((RESULTS / index[name] / "design.json").read_text(encoding="utf-8"))
+    d = json.loads((RESULTS / (folder or index[name]) / "design.json").read_text(encoding="utf-8"))
     base = cst.load_selig(ASSETS / "mh45.dat")
     mission = getattr(Mission, name)()
     u = np.array(d["u"])
@@ -47,8 +47,8 @@ def _fleet(name):
 # time re-deriving the same three aircraft: 24 calls across the files,
 # each a full two-pass evaluation that now builds cut panels.
 @lru_cache(maxsize=None)
-def _built(name):
-    u, mission, base, plan = _fleet(name)
+def _built(name, folder=None):
+    u, mission, base, plan = _fleet(name, folder)
     settings = vase.PrintSettings(filament_density_gcc=0.55, spar_d_mm=8.0,
                                   bed_z_mm=250.0)
     return evaluate(u, mission, base, settings), mission
@@ -103,30 +103,66 @@ def test_a_four_bar_is_differential():
 
 
 def test_the_horn_arm_comes_from_the_section_not_a_constant():
-    """A control horn screws to the elevon's LOWER surface while the hinge
-    is on the upper one, so its arm is the section's own thickness plus the
-    protrusion -- and the section thins outboard. The mechanism's leverage
-    changes along the span whether or not anyone models it."""
+    """A control horn on the elevon's LOWER surface, with the hinge on the
+    upper one, has an arm of the section's own thickness plus the
+    protrusion -- and the section thins outboard, so the mechanism's
+    leverage changes along the span whether or not anyone models it.
+
+    The fleet's horns stand on the UPPER surface now, on the same side as
+    the hinge, and that is exactly why: the arm is then the hinge-to-hole
+    vector, the same at every station, and the leverage no longer depends
+    on where along the span the servo was seated. Both facts are pinned,
+    because the first is the physical reason for the second."""
     _, _, _, plan = _fleet("trainer_v3")
-    inner = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL)
-    outer = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL)
+    inner = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                            side=-1.0)
+    outer = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                            side=-1.0)
     assert inner.horn_arm_mm > outer.horn_arm_mm + 1.0, (
         f"{inner.horn_arm_mm:.1f} vs {outer.horn_arm_mm:.1f}")
     # and the leverage difference is real, not a rounding one
     assert lkg.sweep(outer)[0] > lkg.sweep(inner)[0]
 
+    top_in = lkg.for_station(plan, 0.50, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                             side=+1.0)
+    top_out = lkg.for_station(plan, 0.95, 0.72, 0.55, 11.0, 8.0, 60.0, WALL,
+                              side=+1.0)
+    assert np.allclose(top_in.horn_offset, top_out.horn_offset)
+    # and the offset aft of the axis is DERIVED from the one thing that
+    # constrains it -- the blade must not strike the wing's cut face at
+    # full deflection -- not from the hinge tape's reach. The tape is
+    # laid in strips either side of the horn, and pushing the horn aft of
+    # its whole reach put the tongue in the elevon's thin tail: 2.1 mm of
+    # section to socket into on the trainer and none at all on micro.
+    assert top_in.horn_dx_mm == pytest.approx(
+        lkg.horn_offset_mm(0.8, 8.0, 12.0), abs=1e-9)
+    assert top_in.horn_dx_mm < lkg.HINGE_TAPE_ON_ELEVON_MM
+    # the neutral position is still consistent with a horn aft of the axis
+    assert lkg.deflection_at(top_in, 0.0) == pytest.approx(0.0, abs=1e-9)
+
 
 def test_every_fleet_linkage_delivers_what_the_score_spends():
-    """The gate, on the designs that are actually tracked."""
+    """The gate, on the designs that are actually tracked.
+
+    A four-bar that runs out of solutions inside the servo's full travel
+    is not by itself a fault: a 17 mm horn on an 11 mm arm always does,
+    and what stops the servo short of it is the transmitter's endpoints.
+    The fault is a lock that comes BEFORE the surface has the deflection
+    the score spends, so that is what is asserted -- the deflection is
+    reached, and the lock (if there is one) stands clear of the servo
+    angle that reaches it."""
     for name in MISSIONS:
         ev, mission = _built(name)
         assert ev.linkage is not None, f"{name} has no linkage"
-        down, up, locked = lkg.sweep(ev.linkage)
-        assert not locked, f"{name}: linkage locks"
-        got = min(down, -up)
-        assert got >= mission.max_elevon_deflect_deg, (
-            f"{name}: reaches {down:+.1f}/{up:+.1f}, score spends "
-            f"+/-{mission.max_elevon_deflect_deg:.0f}")
+        want = mission.max_elevon_deflect_deg
+        ok, why = lkg.delivers(ev.linkage, want)
+        assert ok, f"{name}: {why}"
+        th_dn, th_up = lkg.endpoints_deg(ev.linkage, want)
+        assert th_dn is not None and th_up is not None
+        lock = lkg.lock_angle_deg(ev.linkage)
+        need = max(abs(th_dn), abs(th_up))
+        assert need <= lkg.LOCK_MARGIN * lock, (
+            f"{name}: needs {need:.0f} deg of servo, locks at {lock:.0f}")
         assert not [r for r in ev.reasons if "linkage" in r], ev.reasons
 
 
@@ -150,6 +186,21 @@ def test_the_servo_sits_beside_the_surface_it_drives():
         assert bay.eta_lo <= etas["servos"] <= bay.eta_hi
 
 
+def _servo_etas(ev, mission):
+    """(bay name, solved eta) for every bay with a spanwise seat, from the
+    geometry the verdict was reached with."""
+    from washout.search.design import seat_bays as _seat
+    from washout.search.design import unit_to_physical as _u2p
+    import json as _json
+    idx = _json.loads((RESULTS / "index.json").read_text(encoding="utf-8"))
+    name = ev.plan.name
+    d = _json.loads((RESULTS / idx[name] / "design.json").read_text(encoding="utf-8"))
+    joints = vase.panel_etas(ev.plan, ev.print_settings)
+    _, _, etas = _seat(ev.plan, mission, _u2p(np.array(d["u"])),
+                       ev.print_settings.extrusion_width_mm, joints)
+    return [(n, e) for n, e in etas.items() if e is not None]
+
+
 def test_the_servo_mass_moves_to_its_solved_seat():
     """Its station is an output now, so it has to be inside the evaluation
     loop. `choose_structure` taught this at a cost of four generations:
@@ -160,8 +211,17 @@ def test_the_servo_mass_moves_to_its_solved_seat():
         root_c = ev.plan.stations[0].chord_m
         item = next(i for i in ev.mass.items if i.name == "servos x2")
         bay = next(b for b in mission.bays if b.name == "servos")
-        # not at the old hardcoded nominal, and inside the solved band
-        assert bay.x_lo * root_c <= item.x_m <= bay.x_hi * root_c
+        # Inside the solved band, measured in the chord AT THE SERVO'S OWN
+        # STATION -- which is what the band means for a bay that lives out
+        # in the wing, and what the linkage is solved in. Read as a
+        # root-chord fraction it put the trainer's servos 64 mm forward.
+        eta_s = next(e for n, e in _servo_etas(ev, mission) if n == "servos")
+        st = ev.plan.at(float(eta_s))
+        lo = st.x_le_m + bay.x_lo * st.chord_m
+        hi = st.x_le_m + bay.x_hi * st.chord_m
+        assert lo <= item.x_m <= hi, (
+            f"{name}: servos at {item.x_m*1000:.1f} mm, band "
+            f"{lo*1000:.1f}-{hi*1000:.1f} mm at eta {eta_s:.2f}")
 
 
 def test_a_servo_bay_never_clashes_silently():
@@ -242,8 +302,11 @@ def test_the_build_sheet_never_says_one_bottom_layer():
 def test_the_build_sheet_reports_the_failures_it_has():
     """A sheet for a design that misses its mission must say so. Handing
     someone printable parts and a clean-looking sheet for an aeroplane
-    that does not meet its own gates is the worst of both."""
-    ev, mission = _built("trainer_v3")
+    that does not meet its own gates is the worst of both.
+
+    The failing design is named explicitly: the tracked trainer is gen7's
+    now, which passes, and gen5's no longer does (results/README.md)."""
+    ev, mission = _built("trainer_v3", "gen5_trainer_v3_v101")
     parts = vase.build_panels(ev.plan, ev.print_settings)
     text = build_sheet.render(ev, parts, ev.print_settings)
     assert ev.reasons, "this test needs a failing design"
@@ -265,7 +328,14 @@ def test_the_build_sheet_lists_every_part_and_the_cut_list():
     assert "fuselage" in text, "the builder has to know which panel that is"
     for f in ev.spar_fits:
         assert f.spec.name in text
-        assert f"{2*f.reach_mm:.0f} mm" in text, "tip to tip, not one side"
+        # One tube a side and its joiner, or one tube tip to tip only when
+        # the line really is parallel to the span. It said tip to tip on
+        # every aircraft, and on a swept wing that tube leaves the skin.
+        if f.one_piece:
+            assert f"1 x {2*f.reach_mm:.0f} mm" in text
+        else:
+            assert f"2 x {f.reach_mm:.0f} mm" in text, "one tube a side"
+            assert f"V: {2*f.sweep_deg:.0f} deg in plan" in text
 
 
 # ------------------------------------------- the output contract, and determinism
@@ -344,6 +414,52 @@ def test_the_bom_does_not_double_count_the_pairs():
     assert "mass (all of them)" in text
     assert "| servos x2 |" not in text, "the count belongs in the qty column"
     for f in ev.spar_fits:
-        assert f"{2*f.reach_mm:.0f} mm" in text
+        assert f"{(2 if f.one_piece else 1) * f.reach_mm:.0f} mm" in text
     total = sum(i.mass_kg for i in ev.mass.items)
     assert total == pytest.approx(ev.mass.total_kg - ev.mass.shell_kg)
+
+
+def test_the_linkage_is_solved_where_the_elevon_exists():
+    """The four-bar was solved at a station with no control surface.
+
+    `linkage.for_station` builds a hinge at the hinge line and a horn on
+    the elevon at whatever eta it is given, and it was given the servo
+    bay's seat. On every aircraft in the fleet that seat is INBOARD of
+    the elevon: the trainer's servos sit at eta 0.30 with the elevon
+    starting at 0.49, so the mechanism that proves the deflection
+    demon1's whole speed objective is scored from was solved on a
+    trailing edge that is not cut there.
+
+    Two halves to the fix and both are pinned here. The linkage is now
+    solved at the elevon's own root when the shaft falls short, so it
+    models a mechanism that exists; and the shortfall is named in
+    millimetres and priced, rather than repaired by moving the servo --
+    clamping the seat outboard was tried and dragged the CG, the trim,
+    the spar seats and the rib corridors with it, silently."""
+    for name in MISSIONS:
+        ev, mission = _built(name)
+        if ev.linkage is None:
+            continue
+        xh = lkg_hinge_frac(ev)
+        assert ev.print_settings.elevon_eta < 1.0
+        # the hinge the four-bar used is on the elevon, never inboard of it
+        assert ev.linkage.hinge_x_mm > 0.0
+        bay = next((b for b in mission.bays if b.drives_elevon), None)
+        if bay is None:
+            continue
+        short = [r for r in ev.reasons if "servo shaft" in r]
+        half_mm = ev.plan.half_span_m * 1000.0
+        e_servo = next(e for n, e in _servo_etas(ev, mission) if n == "servos")
+        e_shaft = e_servo + mission.servo_shaft_offset_mm / half_mm
+        if e_shaft < ev.print_settings.elevon_eta - 1e-9:
+            assert short, (
+                f"{name}: shaft at eta {e_shaft:.3f}, elevon starts at "
+                f"{ev.print_settings.elevon_eta:.3f}, and nothing said so")
+            assert not ev.ok
+        else:
+            assert not short, short
+
+
+def lkg_hinge_frac(ev):
+    from washout.printing import elevons as _elv
+    return _elv.hinge_x(ev.print_settings)

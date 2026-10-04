@@ -76,6 +76,8 @@ python run.py check --mission trainer_v3    # re-scores a tracked design in ~8 s
 python -m pytest -q
 ```
 
+Without the `[cad]` extra the STEP/CAD tests are skipped, not failed. One validation test is known to fail since gen12: `test_the_minimum_speed_does_not_hang_on_the_chordwise_lattice` (the v171 minimum speed moves 1.6% between lattice resolutions against a 1% tolerance). It is a finding about that design, not a broken install.
+
 **4. Design your own.** A search evaluates 350 designs per generation at roughly 2 s each per core, so give it
 workers. Rough times measured on a Ryzen 9 7900X:
 

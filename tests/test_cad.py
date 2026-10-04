@@ -255,6 +255,7 @@ def test_the_rib_webs_are_found_on_every_layer_of_a_ribbed_panel():
     """The truss is a detour of the upper skin: two floor vertices per rib.
     Every layer of a ribbed panel must show the same number of webs, or
     the lofted webs would skip layers."""
+    pytest.importorskip("OCP")
     from washout.cad.full import rib_sections
     plan, s, _, _ = _parts()
     ribbed = vase.build_panels(plan, replace(s, ribs=True), z_step_mm=2.0)

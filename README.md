@@ -19,6 +19,22 @@ vase-mode wing generator. That takes an aerofoil you chose and gives you
 a printable wing. This chooses the aerofoil, the planform, the twist, the
 reflex and the CG for you, because it can measure whether they fly.
 
+## What it produces
+
+The gen12 `micro_fpv`, the first design that is buildable exactly as drawn: a 480 mm tailless blended wing
+body, 167 g, cruising at 11.7 m/s with a static margin of +0.123, printed as two vase-mode panels.
+
+![gen12 micro_fpv design sheet: planform with CG and neutral point, front view with winglets, sections, span loading at trim, and the print layers](results/fleet/gen12_micro_fpv_v171/design.png)
+
+*The design sheet the search writes for every finalist: planform with the printed panel joins, CG and
+neutral point, front view, true-scale sections, span loading at trim against elliptic, the vase-mode
+layer stack, and every gate's measured value.*
+
+![gen12 micro_fpv as-built CAD: plan, front and side views with spar, battery bay, electronics and motor mount](docs/media/micro_fpv_cad_views.png)
+
+*The as-built CAD: printed walls, the carbon spar sliding through the shell's own cavity, the battery and
+electronics bays, the motor mount and the tip fins, all placed by the exporter rather than by hand.*
+
 ## The idea in one line
 
 Stand the panel on its **root** so span becomes print Z, and every layer
@@ -166,6 +182,14 @@ truth for the physics — and lets polars be produced on the WSL/GPU side
 while the search runs anywhere. Polars are cached by a content hash of
 the CST coefficients and Reynolds number, so a repeat section is free and
 a miss is a deliberate spend.
+
+| α = 4° | α = 13° |
+|---|---|
+| ![vorticity behind a wing section at 4 degrees angle of attack in the 2D lattice-Boltzmann tunnel](docs/media/tunnel_a4_vorticity.gif) | ![vorticity behind the same section at 13 degrees: a much larger, shedding wake](docs/media/tunnel_a13_vorticity.gif) |
+
+*Tier 1 in action: one section in the 2D lattice-Boltzmann tunnel (vorticity, red/blue = opposite spin).
+At low Reynolds number the wake sheds even at 4°; by 13° the separated wake is several times wider. This
+is the drag that tier 0's flat-plate estimate cannot see.*
 
 ### Tier 2, with smoke, and a viewer
 

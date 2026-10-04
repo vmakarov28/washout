@@ -22,7 +22,7 @@ reflex and the CG for you, because it can measure whether they fly.
 ## What it produces
 
 The gen12 `micro_fpv`, the first design that is buildable exactly as drawn: a 480 mm tailless blended wing
-body, 167 g, cruising at 11.7 m/s with a static margin of +0.123, printed as two vase-mode panels.
+body, 167 g, cruising at 11.7 m/s with a static margin of +0.123, printed as spiral-vase panels with no infill or supports.
 
 ![gen12 micro_fpv design sheet: planform with CG and neutral point, front view with winglets, sections, span loading at trim, and the print layers](results/fleet/gen12_micro_fpv_v171/design.png)
 

@@ -181,6 +181,8 @@ def do_export(ev, settings: vase.PrintSettings, out: Path,
         # Any plotting failure, not just a missing matplotlib: the figure
         # is drawn BEFORE the STLs, and must never cost the parts.
         print(f"\nfigure skipped ({type(e).__name__}: {e})")
+        if isinstance(e, ModuleNotFoundError) and "matplotlib" in str(e):
+            print("  (the design sheet needs matplotlib: pip install -e \".[dev]\")")
     # EXPORT THE PANELS THAT WERE SCORED. `evaluate(want_panels=True)`
     # hands them back on the Evaluation, bays cut and ribs laid out, and
     # rebuilding them here from the plan alone dropped the bay cuts: the

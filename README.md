@@ -35,6 +35,64 @@ layer stack, and every gate's measured value.*
 *The as-built CAD: printed walls, the carbon spar sliding through the shell's own cavity, the battery and
 electronics bays, the motor mount and the tip fins, all placed by the exporter rather than by hand.*
 
+## Quick start
+
+**What you need:** Python 3.10 or newer on Windows, macOS or Linux. The search and the export are CPU-only
+(numpy and scipy). A GPU is needed only for the optional wind-tunnel tiers (see
+[The fidelity ladder](#the-fidelity-ladder)), and OpenCASCADE only for STEP/CAD export.
+
+**1. Install** (a virtual environment keeps it separate from your other Python projects):
+
+```bash
+git clone https://github.com/vmakarov28/washout.git
+cd washout
+python -m venv .venv
+.venv\Scripts\activate          # Windows; on macOS/Linux: source .venv/bin/activate
+pip install -e ".[dev]"          # numpy, scipy, matplotlib (for the design sheet), pytest
+```
+
+**2. Build your first plane (about 10 seconds).** This rebuilds the gen12 `micro_fpv` shown above from its
+tracked design vector:
+
+```bash
+python run.py export --mission micro_fpv --design results/fleet/gen12_micro_fpv_v171/design.json --polar data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000 --out out/first_plane
+```
+
+`out/first_plane/` now holds:
+
+| file | what it is |
+|---|---|
+| `design.png` | the design sheet: planform, CG, sections, span loading, every gate |
+| `*_p0.stl`, `*_p1.stl`, ... | the wing panels, ready for spiral-vase mode |
+| `*_elevon*.stl`, `*_motor_mount.stl`, `*_horn.stl`, `*_tip_fin.stl`, `*_insert*.stl` | the other printed parts |
+| `BUILD.md` | slicer settings and assembly order: read it before slicing |
+| `BOM.md` | the parts list (spar tube, motor, servos, battery) |
+| `FLIGHT_TEST.md` | the balance point and a first-flight card |
+
+**3. Check that everything works** (about 8 minutes; the suite is the specification):
+
+```bash
+python run.py check --mission trainer_v3    # re-scores a tracked design in ~8 s
+python -m pytest -q
+```
+
+**4. Design your own.** A search evaluates 350 designs per generation at roughly 2 s each per core, so give it
+workers. Rough times measured on a Ryzen 9 7900X:
+
+| search | one worker | `--workers 12` |
+|---|---|---|
+| one generation | ~13 min | ~1 min |
+| `--iters 60` (the default) | ~13 h | ~1 h |
+
+```bash
+python run.py search --mission micro_fpv --workers 12 --iters 60 --polar data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000 --out out/my_search
+python run.py export --mission micro_fpv --design out/my_search/design.json --polar data/polars/trainer_mid_re60k.csv@60000,data/polars/thin_reflex_re100k.csv@100000 --out out/my_search
+```
+
+Each progress line is the best design so far and every gate it still fails; the list shrinking is the search
+working. The missions (`trainer_v3`, `demon1`, `micro`, `micro_fpv`) are declared in `design.MISSIONS`, and
+`python run.py --help` lists every printer and build setting.
+
 ## The idea in one line
 
 Stand the panel on its **root** so span becomes print Z, and every layer
@@ -57,6 +115,8 @@ own cavity *is* the channel; a carbon tube slides in after the print.
 `spar_fit` checks the tube clears every layer.
 
 ## Run it
+
+New here? Start with [Quick start](#quick-start); this section is the full reference.
 
 ```bash
 python run.py check  --mission trainer_v3          # re-score the tracked design

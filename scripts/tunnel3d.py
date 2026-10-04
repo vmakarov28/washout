@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -47,7 +48,8 @@ from washout.geom import cst                                       # noqa: E402
 from washout.search.design import (MISSION_VARIANTS, MISSIONS, Mission,  # noqa: E402
                                    build, evaluate, unit_to_physical)
 
-WSL_TUNNEL = "/mnt/c/Users/aipla/Desktop/windtunnel"
+# The companion windtunnel repo: a sibling of this one unless WASHOUT_TUNNEL_DIR says otherwise.
+WIN_TUNNEL = Path(os.environ.get("WASHOUT_TUNNEL_DIR", ROOT.parent / "windtunnel")).resolve()
 WSL_PY = "~/venvs/windtunnel/bin/python"
 NU_AIR = 1.5e-5
 
@@ -55,6 +57,9 @@ NU_AIR = 1.5e-5
 def wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
     return "/mnt/" + s[0].lower() + s[2:]
+
+
+WSL_TUNNEL = wsl_path(WIN_TUNNEL)
 
 
 # ------------------------------------------------------------- geometry

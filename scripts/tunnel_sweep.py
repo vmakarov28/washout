@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -34,8 +35,17 @@ sys.path.insert(0, str(ROOT))
 from washout.geom import cst                                    # noqa: E402
 from washout.search.design import Mission, build                # noqa: E402
 
-WIN_TUNNEL = Path.home() / "Desktop" / "windtunnel"
-WSL_TUNNEL = "/mnt/c/Users/aipla/Desktop/windtunnel"
+# The companion windtunnel repo: a sibling of this one unless WASHOUT_TUNNEL_DIR says otherwise.
+WIN_TUNNEL = Path(os.environ.get("WASHOUT_TUNNEL_DIR", ROOT.parent / "windtunnel")).resolve()
+
+
+def wsl_path(p: Path) -> str:
+    s = str(Path(p).resolve()).replace("\\", "/")
+    return "/mnt/" + s[0].lower() + s[2:]
+
+
+WSL_TUNNEL = wsl_path(WIN_TUNNEL)
+WSL_OUT = wsl_path(ROOT / "out" / "tunnel")
 WSL_PY = "~/wt-venv/bin/python"
 NU_AIR = 1.5e-5
 
@@ -271,9 +281,8 @@ def main() -> int:
         tag = f"a{al:g}".replace("-", "m").replace(".", "p")
         got = wsl(" ; ".join(
             f"cp /tmp/{name}/{p}/{p}.mp4 "
-            f"/mnt/c/Users/aipla/Desktop/washout/out/tunnel/{tag}_{p}.mp4"
-            for p in presets) + " ; ls -la /mnt/c/Users/aipla/Desktop/"
-            f"washout/out/tunnel/{tag}_*.mp4 | wc -l")
+            f"{WSL_OUT}/{tag}_{p}.mp4"
+            for p in presets) + f" ; ls -la {WSL_OUT}/{tag}_*.mp4 | wc -l")
         print(got.stdout.strip() or got.stderr.strip())
     return 0
 
